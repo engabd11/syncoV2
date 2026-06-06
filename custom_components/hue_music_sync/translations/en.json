@@ -1,0 +1,120 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to your Hue bridge",
+        "description": "Enter the IP address of the Philips Hue bridge that owns your entertainment areas.",
+        "data": {
+          "host": "Bridge IP address"
+        }
+      },
+      "link": {
+        "title": "Pair with the bridge",
+        "description": "Press the round link button on top of your Hue bridge, then select Submit within 30 seconds."
+      },
+      "select_areas": {
+        "title": "Choose entertainment areas",
+        "description": "Select the entertainment areas you want to control. Manage the lights inside each area in the Hue app.",
+        "data": {
+          "areas": "Entertainment areas"
+        }
+      }
+    },
+    "error": {
+      "link_button": "The link button was not pressed. Press it on the bridge and try again.",
+      "cannot_connect": "Could not connect to the bridge. Check the IP address and try again."
+    },
+    "abort": {
+      "already_configured": "This bridge is already configured.",
+      "no_areas": "No entertainment areas were found on this bridge. Create one in the Hue app first."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Entertainment areas",
+        "data": {
+          "areas": "Enabled entertainment areas"
+        }
+      }
+    }
+  },
+  "entity": {
+    "select": {
+      "color_scheme": {
+        "name": "Colour scheme",
+        "state": {
+          "album_art": "Album art",
+          "warm": "Warm",
+          "cool": "Cool",
+          "neon": "Neon",
+          "party": "Party",
+          "mono": "Mono",
+          "rainbow": "Rainbow"
+        }
+      },
+      "effect_mode": {
+        "name": "Effect mode",
+        "state": {
+          "pulse": "Pulse",
+          "spectrum": "Spectrum",
+          "wave": "Wave",
+          "ambient": "Ambient"
+        }
+      },
+      "media_player": {
+        "name": "Follow player"
+      }
+    },
+    "number": {
+      "latency": {
+        "name": "Latency offset"
+      },
+      "intensity": {
+        "name": "Intensity"
+      }
+    }
+  },
+  "services": {
+    "activate": {
+      "name": "Activate music sync",
+      "description": "Start music sync for one or more entertainment areas.",
+      "fields": {
+        "color_scheme": {
+          "name": "Colour scheme",
+          "description": "Colour scheme to use."
+        },
+        "effect_mode": {
+          "name": "Effect mode",
+          "description": "Choreography mode."
+        },
+        "media_player": {
+          "name": "Media player",
+          "description": "Media player to follow. Leave unset to auto-pick the one playing."
+        }
+      }
+    },
+    "deactivate": {
+      "name": "Deactivate music sync",
+      "description": "Stop music sync for one or more entertainment areas."
+    },
+    "set_options": {
+      "name": "Set music sync options",
+      "description": "Change colour scheme, effect mode or followed player live without restarting sync.",
+      "fields": {
+        "color_scheme": {
+          "name": "Colour scheme",
+          "description": "Colour scheme to use."
+        },
+        "effect_mode": {
+          "name": "Effect mode",
+          "description": "Choreography mode."
+        },
+        "media_player": {
+          "name": "Media player",
+          "description": "Media player to follow."
+        }
+      }
+    }
+  }
+}

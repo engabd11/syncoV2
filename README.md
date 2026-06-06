@@ -1,0 +1,168 @@
+# Hue Music Sync for Home Assistant
+
+A custom Home Assistant integration that syncs **Philips Hue Entertainment areas**
+to music played through **Music Assistant** — a self-hosted replacement for
+Samsung's music sync. It streams colour directly to the bridge over the low-latency
+Hue Entertainment API (~50 Hz over DTLS), reacts to the **beat** and **frequency
+content** of the audio, and lights each bulb differently based on its position in
+the area and the frequency band it represents.
+
+> Manage and arrange the lights inside an entertainment area in the **Hue app**.
+> This integration consumes the areas that already exist and drives them.
+
+## Features
+
+- **Direct Hue Entertainment streaming** — bypasses normal Zigbee light commands
+  for fast, fluid, high-rate updates.
+- **Real-time beat + frequency analysis** of the Music Assistant stream (no
+  microphone, no extra hardware).
+- **Smart, non-uniform choreography** — bass lights thump on the kick, treble
+  lights shimmer, colours spread spatially across the area.
+- **Colour schemes**, including a vivid palette **extracted from the current
+  album cover**, plus Warm / Cool / Neon / Party / Mono / Rainbow.
+- **Effect modes**: Pulse, Spectrum, Wave, Ambient.
+- Per-area **switch** to activate/deactivate, plus **select/number** entities for
+  scheme, effect, followed player, latency offset and intensity — and
+  `hue_music_sync.activate` / `deactivate` / `set_options` **services** for automations.
+
+## Requirements
+
+- A **v2 (square) Philips Hue bridge** with at least one Entertainment area
+  created in the Hue app. (The round v1 bridge does not support entertainment
+  streaming.)
+- **Music Assistant** running and connected to Home Assistant.
+- Home Assistant with the bundled **ffmpeg** and **numpy** (standard on HAOS,
+  Container and Supervised installs).
+- The **`openssl`** CLI on the host running Home Assistant (present in the HAOS /
+  HA container image). Used for the DTLS channel to the bridge.
+
+## Installation (HACS custom repository)
+
+1. HACS → ⋮ → *Custom repositories* → add this repo, category **Integration**.
+2. Install **Hue Music Sync**, then restart Home Assistant.
+3. *Settings → Devices & Services → Add Integration → Hue Music Sync*.
+4. Enter the **bridge IP**, **press the link button** on the bridge when prompted,
+   then choose which **entertainment areas** to enable.
+
+(Alternatively copy `custom_components/hue_music_sync/` into your HA `config/custom_components/` folder.)
+
+Each enabled area becomes a device with one **switch** plus several
+configuration entities (filed under the device's *Configuration* section):
+
+| Entity | Purpose |
+| --- | --- |
+| `switch.music_sync_<area>` | Activate / deactivate sync |
+| `select` Colour scheme | `album_art`, `warm`, `cool`, `neon`, `party`, `mono`, `rainbow` |
+| `select` Effect mode | `pulse`, `spectrum`, `wave`, `ambient` |
+| `select` Follow player | `auto` (first playing) or a specific media player |
+| `number` Latency offset | Shift lights vs. audio (ms) to match what you hear |
+| `number` Intensity | Overall brightness scaling |
+
+> **One area at a time per bridge.** A Hue bridge can stream to only one
+> entertainment area at a time. Activating a second area on the same bridge
+> automatically takes over from the one already running.
+
+## Usage
+
+1. Start playback in Music Assistant.
+2. Turn on the area's **Music Sync** switch (or call `hue_music_sync.activate`).
+3. Tune **Latency offset** so the flashes line up with the sound (speaker buffering
+   means there is always some delay to dial out).
+
+Example automation — start album-art sync when Music Assistant begins playing:
+
+```yaml
+automation:
+  - alias: Music sync on play
+    trigger:
+      - platform: state
+        entity_id: media_player.living_room
+        to: playing
+    action:
+      - service: hue_music_sync.activate
+        target:
+          entity_id: switch.music_sync_living_room
+        data:
+          color_scheme: album_art
+          effect_mode: spectrum
+```
+
+## Services
+
+| Service | What it does |
+| --- | --- |
+| `hue_music_sync.activate` | Start sync for the targeted area(s); optionally set `color_scheme`, `effect_mode`, `media_player` first |
+| `hue_music_sync.deactivate` | Stop sync for the targeted area(s) |
+| `hue_music_sync.set_options` | Change `color_scheme` / `effect_mode` / `media_player` **live**, without restarting sync — e.g. switch the vibe mid-song |
+
+All three target the area's `switch` entity. Example — go full party on the drop:
+
+```yaml
+- service: hue_music_sync.set_options
+  target:
+    entity_id: switch.music_sync_living_room
+  data:
+    color_scheme: party
+    effect_mode: pulse
+```
+
+## Effect modes
+
+- **Spectrum** — each light owns a frequency band by its left-to-right position;
+  bass lights react to bass, treble lights to highs. Each light gets its own
+  palette colour.
+- **Pulse** — the whole area pulses on the beat through a slowly rotating palette
+  colour (spread spatially so lights differ).
+- **Wave** — a wavefront sweeps across the area on the beat; speed tracks tempo.
+- **Ambient** — slow palette drift with gentle energy modulation; no hard beats.
+
+## Validation spikes
+
+Two self-contained scripts under `scripts/` let you de-risk the moving parts on
+your own host before/while using the integration:
+
+- `python scripts/spike_dtls.py --host <bridge-ip> --pair` then `--list` then a
+  colour-cycle run — proves the Hue Entertainment DTLS transport works.
+- `python scripts/spike_ma.py --url <stream-or-file>` — decodes audio with ffmpeg
+  and runs the real analyzer, printing beats / tempo / per-band levels.
+
+## How it works
+
+```
+Music Assistant audio ──ffmpeg──▶ PCM ──▶ Analyzer (bands + beat)
+                                              │
+album cover ──ffmpeg──▶ palette ──▶ Effect engine (per-channel colour)
+                                              │
+                                   HueStream v2 frames ──DTLS(openssl)──▶ Hue bridge
+```
+
+Audio is **position-locked** to the player's reported playback position, so
+pauses, seeks and track changes stay aligned.
+
+## Development
+
+The DSP / colour / encoder logic has no Home Assistant dependency and is covered
+by a fast unit-test suite that runs without HA:
+
+```bash
+pip install pytest numpy
+pytest tests/
+```
+
+These cover the HueStream frame encoder, palette sampling, album-art k-means and
+the analyzer's beat detection.
+
+## Limitations
+
+- Works with **Music Assistant** audio (the chosen beat source). Arbitrary HA
+  players without an accessible stream are not supported.
+- Perfect lip-sync is not possible due to player buffering — use the latency
+  offset to align by ear.
+- Requires a **v2** Hue bridge; entertainment streaming is not available on v1.
+- `python-mbedtls` has no Python 3.13 wheels, so the DTLS channel uses the
+  `openssl` CLI. If `openssl` is unavailable in your environment, streaming
+  cannot start.
+
+## License
+
+MIT
