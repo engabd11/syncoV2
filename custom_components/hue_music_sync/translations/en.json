@@ -49,7 +49,15 @@
           "subtle": "Subtle",
           "medium": "Medium",
           "high": "High",
-          "intense": "Intense"
+          "intense": "Intense",
+          "movie": "Movie"
+        }
+      },
+      "effect": {
+        "name": "Effect",
+        "state": {
+          "music": "Music",
+          "fireworks": "Fireworks"
         }
       },
       "colour": {
@@ -62,6 +70,7 @@
           "lavender": "Lavender",
           "ember": "Ember",
           "aurora": "Aurora",
+          "rainbow": "Rainbow",
           "tropical": "Tropical twilight",
           "savanna": "Savanna sunset",
           "blossom": "Spring blossom",
@@ -88,6 +97,10 @@
           "name": "Mode",
           "description": "Intensity/rhythm mode to use."
         },
+        "effect": {
+          "name": "Effect",
+          "description": "Renderer/effect style: music or fireworks."
+        },
         "colour": {
           "name": "Colour",
           "description": "Colour theme: album_art or a preset palette."
@@ -113,6 +126,10 @@
         "mode": {
           "name": "Mode",
           "description": "Intensity/rhythm mode to use."
+        },
+        "effect": {
+          "name": "Effect",
+          "description": "Renderer/effect style: music or fireworks."
         },
         "colour": {
           "name": "Colour",

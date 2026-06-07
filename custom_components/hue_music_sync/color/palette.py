@@ -90,6 +90,14 @@ _SCHEMES: dict[ColorScheme, Palette] = {
         (0.45, 0.80, 1.0), (0.36, 0.75, 1.0), (0.55, 0.80, 1.0),
         (0.72, 0.75, 1.0), (0.88, 0.65, 1.0),
     )),
+    # Full spectrum: red -> orange -> yellow -> green -> cyan -> blue -> violet,
+    # evenly around the hue wheel so the gradient (and the per-beat phase step)
+    # sweeps cleanly through every colour.
+    ColorScheme.RAINBOW: Palette(_hues(
+        (0.00, 0.90, 1.0), (0.083, 0.90, 1.0), (0.167, 0.90, 1.0),
+        (0.333, 0.85, 1.0), (0.500, 0.85, 1.0), (0.667, 0.85, 1.0),
+        (0.833, 0.85, 1.0),
+    )),
     # --- Philips Hue signature scenes ---
     # Tropical twilight: warm pink/purple sunset.
     ColorScheme.TROPICAL: Palette(_hues(

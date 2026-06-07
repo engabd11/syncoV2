@@ -10,17 +10,21 @@ from __future__ import annotations
 
 from ..audio.analyzer import AnalysisFrame
 from ..color.palette import RGB, Palette, get_palette
-from ..const import DEFAULT_MODE, ColorScheme, SyncMode
+from ..const import DEFAULT_EFFECT, DEFAULT_MODE, ColorScheme, SyncEffect, SyncMode
 from ..hue.bridge import EntertainmentChannel
-from .modes import MODE_PARAMS, band_for_rank, beat_flash, render
+from .fireworks import FireworksEffect
+from .modes import (
+    MODE_PARAMS,
+    band_for_rank,
+    beat_colour_advance,
+    beat_flash,
+    render,
+)
 
 _FLASH_DECAY = 0.80  # per-frame fade of the beat flash overlay (~5 frames)
 
-# Brightness smoothing: snap up hard on beats, fall back quickly so it goes dark
-# between beats (club feel). Colour eases slowly for smooth shifting.
-_ATTACK = 0.92
-_DECAY = 0.24
-_COLOR_LERP = 0.16
+# Brightness and colour smoothing are per-mode (ModeParams.bri_attack/bri_decay
+# and colour_lerp): club modes snap up hard and fall fast; Movie eases gently.
 
 # Pleasant fallback palette when no album art is available (e.g. live radio).
 _FALLBACK_SCHEME = ColorScheme.SUNSET
@@ -32,9 +36,12 @@ class EffectEngine:
     def __init__(self, channels: list[EntertainmentChannel]) -> None:
         self.palette: Palette = get_palette(_FALLBACK_SCHEME)
         self.params = MODE_PARAMS[DEFAULT_MODE]
+        self.effect: SyncEffect = DEFAULT_EFFECT
         self.brightness = 1.0  # master ceiling (0..1), independent of mode
         self.time: float = 0.0
+        self.colour_phase: float = 0.0  # palette position: time drift + beat steps
         self._flash = 0.0  # beat-flash overlay (decays fast)
+        self._fireworks = FireworksEffect()
         self.set_channels(channels)
 
     def set_channels(self, channels: list[EntertainmentChannel]) -> None:
@@ -61,6 +68,11 @@ class EffectEngine:
     def set_mode(self, mode: SyncMode) -> None:
         self.params = MODE_PARAMS[mode]
 
+    def set_effect(self, effect: SyncEffect) -> None:
+        if effect != self.effect:
+            self._fireworks.reset()  # start the new renderer from a clean slate
+        self.effect = effect
+
     def set_brightness(self, brightness: float) -> None:
         """Master brightness ceiling (0..1), scaling the mode's output."""
         self.brightness = max(0.0, min(1.0, brightness))
@@ -78,28 +90,44 @@ class EffectEngine:
         return out
 
     def render(self, frame: AnalysisFrame, dt: float) -> dict[int, RGB]:
-        """Advance time and produce smoothed per-channel RGB (0..1).
+        """Advance time and produce per-channel RGB (0..1) for the active effect."""
+        self.time += dt
+        if self.effect is SyncEffect.FIREWORKS:
+            # Fireworks owns its own per-light snap/fade, so it bypasses the music
+            # smoothing pipeline; it still advances colour_phase for its ember glow.
+            self.colour_phase += self.params.colour_speed * dt
+            return self._fireworks.render(self, frame, dt)
+        return self._render_music(frame, dt)
+
+    def _render_music(self, frame: AnalysisFrame, dt: float) -> dict[int, RGB]:
+        """Smoothed beat/frequency choreography (the default effect).
 
         Colour (full-value chromaticity) and brightness are smoothed separately;
         the colour is renormalised to max-channel 1 so brightness is carried
         purely by ``new_b``. That keeps mode floors honest (the encoder reads
         brightness as the max channel) even mid colour-transition.
         """
-        self.time += dt
+        # Advance the palette position: a slow continuous drift plus a step on
+        # every beat so the colour visibly moves with the music.
+        self.colour_phase += self.params.colour_speed * dt
+        if frame.beat:
+            self.colour_phase += beat_colour_advance(self.params, frame)
         # Beat-flash overlay: snaps to full on a qualifying beat, then decays
         # fast — independent of the slower continuous-brightness smoothing.
         self._flash = max(self._flash * _FLASH_DECAY, beat_flash(self.params, frame))
         targets = render(self, frame)
 
+        colour_lerp = self.params.colour_lerp
+        attack, decay = self.params.bri_attack, self.params.bri_decay
         out: dict[int, RGB] = {}
         for cid, (target_color, target_b) in targets.items():
             prev_color, prev_b = self._state[cid]
-            alpha = _ATTACK if target_b >= prev_b else _DECAY
+            alpha = attack if target_b >= prev_b else decay
             new_b = prev_b + (target_b - prev_b) * alpha
             blended = (
-                prev_color[0] + (target_color[0] - prev_color[0]) * _COLOR_LERP,
-                prev_color[1] + (target_color[1] - prev_color[1]) * _COLOR_LERP,
-                prev_color[2] + (target_color[2] - prev_color[2]) * _COLOR_LERP,
+                prev_color[0] + (target_color[0] - prev_color[0]) * colour_lerp,
+                prev_color[1] + (target_color[1] - prev_color[1]) * colour_lerp,
+                prev_color[2] + (target_color[2] - prev_color[2]) * colour_lerp,
             )
             m = max(blended)
             nc = (blended[0] / m, blended[1] / m, blended[2] / m) if m > 1e-6 else (0.0, 0.0, 0.0)

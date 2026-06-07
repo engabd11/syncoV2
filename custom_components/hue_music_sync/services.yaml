@@ -19,6 +19,16 @@ activate:
             - medium
             - high
             - intense
+            - movie
+    effect:
+      name: Effect
+      description: Renderer/effect style — music choreography or fireworks.
+      required: false
+      selector:
+        select:
+          options:
+            - music
+            - fireworks
     colour:
       name: Colour
       description: Colour theme — album_art or a preset palette.
@@ -85,6 +95,16 @@ set_options:
             - medium
             - high
             - intense
+            - movie
+    effect:
+      name: Effect
+      description: Renderer/effect style — music choreography or fireworks.
+      required: false
+      selector:
+        select:
+          options:
+            - music
+            - fireworks
     colour:
       name: Colour
       description: Colour theme — album_art or a preset palette.

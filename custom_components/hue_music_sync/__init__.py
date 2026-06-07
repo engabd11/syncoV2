@@ -19,12 +19,14 @@ from .const import (
     CONF_BRIGHTNESS,
     CONF_CLIENT_KEY,
     CONF_COLOUR,
+    CONF_EFFECT,
     CONF_HOST,
     CONF_MEDIA_PLAYER,
     CONF_MODE,
     DOMAIN,
     PLATFORMS,
     ColorScheme,
+    SyncEffect,
     SyncMode,
 )
 from .coordinator import SyncManager
@@ -124,6 +126,8 @@ def _register_services(hass: HomeAssistant) -> None:
         changes: dict = {}
         if CONF_MODE in call.data:
             changes["mode"] = SyncMode(call.data[CONF_MODE])
+        if CONF_EFFECT in call.data:
+            changes["effect"] = SyncEffect(call.data[CONF_EFFECT])
         if CONF_COLOUR in call.data:
             changes["colour"] = ColorScheme(call.data[CONF_COLOUR])
         if CONF_BRIGHTNESS in call.data:
@@ -150,6 +154,7 @@ def _register_services(hass: HomeAssistant) -> None:
 
     options_fields = {
         vol.Optional(CONF_MODE): vol.In([str(m) for m in SyncMode]),
+        vol.Optional(CONF_EFFECT): vol.In([str(e) for e in SyncEffect]),
         vol.Optional(CONF_COLOUR): vol.In([str(c) for c in ColorScheme]),
         vol.Optional(CONF_BRIGHTNESS): vol.All(
             vol.Coerce(float), vol.Range(min=5, max=100)

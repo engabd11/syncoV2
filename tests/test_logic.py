@@ -7,14 +7,18 @@ import colorsys
 import numpy as np
 import pytest
 
-from hue_music_sync.audio.analyzer import Analyzer
+from hue_music_sync.audio.analyzer import AnalysisFrame, Analyzer
 from hue_music_sync.color.album_art import _kmeans_palette
 from hue_music_sync.color.palette import Palette, get_palette
 from hue_music_sync.const import (
     ANALYSIS_HOP,
     ANALYSIS_SAMPLE_RATE,
     ColorScheme,
+    SyncEffect,
+    SyncMode,
 )
+from hue_music_sync.effects.engine import EffectEngine
+from hue_music_sync.hue.bridge import EntertainmentChannel
 from hue_music_sync.hue.stream import HueStreamEncoder, float_to_16, rgb8_to_16
 
 _UUID = "abcdefab-1234-1234-1234-0123456789ab"
@@ -89,6 +93,116 @@ def test_palette_spread_count():
 def test_album_art_fallback_returns_palette():
     # ALBUM_ART has no static palette; it should fall back, not raise.
     assert len(get_palette(ColorScheme.ALBUM_ART).colors) >= 1
+
+
+def test_rainbow_scheme_spans_the_spectrum():
+    pal = get_palette(ColorScheme.RAINBOW)
+    hues = {round(colorsys.rgb_to_hsv(*c)[0] * 6) for c in pal.colors}
+    assert len(hues) >= 5  # covers most of the hue wheel, not one colour family
+
+
+# --- effect engine: colour shifts with the beat -------------------------
+
+def _channels(n: int = 3) -> list[EntertainmentChannel]:
+    return [
+        EntertainmentChannel(channel_id=i, x=-1.0 + 2.0 * i / (n - 1), y=0.0, z=0.0)
+        for i in range(n)
+    ]
+
+
+def _frame(beat: bool, strength: float = 0.0) -> AnalysisFrame:
+    bands = {"sub_bass": 1.0, "bass": 1.0, "low_mid": 0.5, "mid": 0.3, "high": 0.2}
+    return AnalysisFrame(bands=bands, energy=1.0, beat=beat, beat_strength=strength)
+
+
+def test_colour_phase_advances_faster_with_beats():
+    # With beats, the palette phase should move much more than pure time drift.
+    drift = EffectEngine(_channels())
+    drift.set_mode(SyncMode.HIGH)
+    for _ in range(40):
+        drift.render(_frame(beat=False), 0.025)
+
+    beats = EffectEngine(_channels())
+    beats.set_mode(SyncMode.HIGH)
+    for i in range(40):
+        beats.render(_frame(beat=(i % 5 == 0), strength=2.0), 0.025)
+
+    assert beats.colour_phase > drift.colour_phase * 2
+
+
+def test_subtle_mode_barely_steps_on_beats():
+    # Subtle is mostly time-drift; its per-beat step is tiny by design.
+    eng = EffectEngine(_channels())
+    eng.set_mode(SyncMode.SUBTLE)
+    for i in range(40):
+        eng.render(_frame(beat=(i % 5 == 0), strength=2.0), 0.025)
+    intense = EffectEngine(_channels())
+    intense.set_mode(SyncMode.INTENSE)
+    for i in range(40):
+        intense.render(_frame(beat=(i % 5 == 0), strength=2.0), 0.025)
+    assert intense.colour_phase > eng.colour_phase
+
+
+# --- fireworks effect ----------------------------------------------------
+
+def test_fireworks_ignites_on_beats_and_fades():
+    eng = EffectEngine(_channels(5))
+    eng.set_mode(SyncMode.INTENSE)
+    eng.set_effect(SyncEffect.FIREWORKS)
+
+    def brightness(out):
+        return max(max(c) for c in out.values())
+
+    # A big beat should light at least one channel brightly.
+    out = eng.render(_frame(beat=True, strength=3.0), 0.025)
+    assert brightness(out) > 0.5
+
+    # With no further beats the burst should fade back toward the dim base.
+    for _ in range(40):
+        out = eng.render(_frame(beat=False), 0.025)
+    assert brightness(out) < 0.3
+
+
+def test_movie_mode_brightness_follows_loudness():
+    # Movie mode brightness should track overall loudness, gently, not beats.
+    def energy_frame(e: float) -> AnalysisFrame:
+        return AnalysisFrame(
+            bands={"sub_bass": 0.1, "bass": 0.1, "high": 0.05},
+            energy=e, beat=False,
+        )
+
+    eng = EffectEngine(_channels())
+    eng.set_mode(SyncMode.MOVIE)
+    for _ in range(150):  # let the slow easing settle on a loud passage
+        out = eng.render(energy_frame(0.9), 0.025)
+    loud = max(max(c) for c in out.values())
+    for _ in range(250):  # then a long quiet passage
+        out = eng.render(energy_frame(0.03), 0.025)
+    quiet = max(max(c) for c in out.values())
+    assert loud > quiet + 0.1  # louder scenes are clearly brighter
+
+
+def test_movie_mode_does_not_flash_on_beats():
+    # A strong beat must not produce a flash in Movie mode (calm, eye-friendly).
+    eng = EffectEngine(_channels())
+    eng.set_mode(SyncMode.MOVIE)
+    out = eng.render(
+        AnalysisFrame(
+            bands={"sub_bass": 1.0, "bass": 1.0}, energy=0.3,
+            beat=True, beat_strength=3.0,
+        ),
+        0.025,
+    )
+    assert max(max(c) for c in out.values()) < 0.6  # no full-bright strobe pop
+
+
+def test_fireworks_respects_master_brightness():
+    eng = EffectEngine(_channels(5))
+    eng.set_mode(SyncMode.INTENSE)
+    eng.set_effect(SyncEffect.FIREWORKS)
+    eng.set_brightness(0.5)
+    out = eng.render(_frame(beat=True, strength=3.0), 0.025)
+    assert max(max(c) for c in out.values()) <= 0.5 + 1e-6
 
 
 # --- album-art k-means ---------------------------------------------------

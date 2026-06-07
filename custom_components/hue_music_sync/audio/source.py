@@ -224,8 +224,8 @@ class MusicAssistantSource:
 
         mass = self._mass_client()
         player_id = self._mass_player_id()
-        _LOGGER.warning(
-            "DIAG [%s] resolve: mass_client=%s player_id=%s",
+        _LOGGER.debug(
+            "[%s] resolve: mass_client=%s player_id=%s",
             self._entity_id, "found" if mass else "MISSING", player_id,
         )
         if mass is not None and player_id is not None:
@@ -234,10 +234,8 @@ class MusicAssistantSource:
                 media = getattr(player, "current_media", None)
                 uri = getattr(media, "uri", None) if media else None
                 base_url = getattr(getattr(mass, "server_info", None), "base_url", None)
-                # NOTE: temporarily logged at WARNING for first-run diagnosis;
-                # will be lowered to debug once stream resolution is confirmed.
-                _LOGGER.warning(
-                    "DIAG [%s] player=%s server=%s current_media: uri=%r media_type=%r "
+                _LOGGER.debug(
+                    "[%s] player=%s server=%s current_media: uri=%r media_type=%r "
                     "source_id=%r queue_item_id=%r custom_data=%r",
                     self._entity_id, "found" if player else "None", base_url, uri,
                     getattr(media, "media_type", None) if media else None,

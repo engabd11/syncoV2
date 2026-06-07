@@ -16,6 +16,7 @@ CONF_AREAS: Final = "areas"  # list of enabled entertainment_configuration ids
 
 # --- Per-area option keys ------------------------------------------------
 CONF_MODE: Final = "mode"
+CONF_EFFECT: Final = "effect"
 CONF_COLOUR: Final = "colour"
 CONF_BRIGHTNESS: Final = "brightness"
 CONF_MEDIA_PLAYER: Final = "media_player"
@@ -68,6 +69,7 @@ class ColorScheme(StrEnum):
     LAVENDER = "lavender"
     EMBER = "ember"
     AURORA = "aurora"
+    RAINBOW = "rainbow"  # full spectrum; hue steps on the beat
     # Philips Hue signature scenes
     TROPICAL = "tropical"
     SAVANNA = "savanna"
@@ -88,9 +90,23 @@ class SyncMode(StrEnum):
     MEDIUM = "medium"  # stays bright, some lights pulse on beats
     HIGH = "high"  # dims to ~30%, bright bass/treble beats
     INTENSE = "intense"  # full 0-100% dimming/brightening + shimmer
+    MOVIE = "movie"  # calm, non-distracting: brightness follows the soundtrack
+
+
+class SyncEffect(StrEnum):
+    """The renderer/choreography style — orthogonal to intensity and colour.
+
+    ``MUSIC`` is the default audio-reactive choreography (dim/brighten + colour
+    shifting). Other effects swap the whole render path while still drawing their
+    colours from the selected palette and their energy from the music.
+    """
+
+    MUSIC = "music"  # default beat/frequency choreography
+    FIREWORKS = "fireworks"  # bursts ignite on big beats and fade out
 
 
 DEFAULT_MODE: Final = SyncMode.HIGH
+DEFAULT_EFFECT: Final = SyncEffect.MUSIC
 DEFAULT_COLOUR: Final = ColorScheme.ALBUM_ART
 
 PLATFORMS: Final = ["switch", "select", "number"]

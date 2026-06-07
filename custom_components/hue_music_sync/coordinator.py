@@ -29,6 +29,7 @@ from .const import (
     CONF_AREAS,
     CONF_BRIGHTNESS,
     CONF_COLOUR,
+    CONF_EFFECT,
     CONF_LATENCY_MS,
     CONF_MEDIA_PLAYER,
     CONF_MODE,
@@ -36,12 +37,14 @@ from .const import (
     CONF_TIMING_MS,
     DEFAULT_BRIGHTNESS,
     DEFAULT_COLOUR,
+    DEFAULT_EFFECT,
     DEFAULT_LATENCY_MS,
     DEFAULT_MODE,
     DEFAULT_STREAM_FPS,
     DEFAULT_TIMING_MS,
     TIMING_BUFFER_MS,
     ColorScheme,
+    SyncEffect,
     SyncMode,
     signal_area_update,
 )
@@ -54,6 +57,12 @@ _LOGGER = logging.getLogger(__name__)
 _IDLE_FPS = 10
 _IDLE_REOPEN_S = 2.0
 
+# DTLS auto-reconnect: a dropped channel (transient packet loss, bridge hiccup)
+# should recover on its own instead of silently ending the session.
+_RECONNECT_ATTEMPTS = 5
+_RECONNECT_BASE_S = 1.0
+_RECONNECT_MAX_S = 8.0
+
 
 @dataclass(slots=True)
 class AreaSettings:
@@ -62,6 +71,7 @@ class AreaSettings:
     and ``latency_ms`` are advanced options (auto/default by default)."""
 
     mode: SyncMode = DEFAULT_MODE
+    effect: SyncEffect = DEFAULT_EFFECT
     colour: ColorScheme = DEFAULT_COLOUR
     brightness: float = DEFAULT_BRIGHTNESS
     timing_ms: int = DEFAULT_TIMING_MS
@@ -75,11 +85,16 @@ class AreaSettings:
         except ValueError:
             mode = DEFAULT_MODE
         try:
+            effect = SyncEffect(data.get(CONF_EFFECT, DEFAULT_EFFECT))
+        except ValueError:
+            effect = DEFAULT_EFFECT
+        try:
             colour = ColorScheme(data.get(CONF_COLOUR, DEFAULT_COLOUR))
         except ValueError:
             colour = DEFAULT_COLOUR
         return cls(
             mode=mode,
+            effect=effect,
             colour=colour,
             brightness=float(data.get(CONF_BRIGHTNESS, DEFAULT_BRIGHTNESS)),
             timing_ms=int(data.get(CONF_TIMING_MS, DEFAULT_TIMING_MS)),
@@ -90,6 +105,7 @@ class AreaSettings:
     def to_dict(self) -> dict:
         return {
             CONF_MODE: str(self.mode),
+            CONF_EFFECT: str(self.effect),
             CONF_COLOUR: str(self.colour),
             CONF_BRIGHTNESS: self.brightness,
             CONF_TIMING_MS: self.timing_ms,
@@ -139,6 +155,7 @@ class SyncSession:
 
     async def start(self) -> None:
         self._engine.set_mode(self._settings.mode)
+        self._engine.set_effect(self._settings.effect)
         self._engine.set_brightness(self._settings.brightness)
         self._apply_colour()
         await self._bridge.start_stream(self._config.id)
@@ -157,6 +174,7 @@ class SyncSession:
         prev = self._settings
         self._settings = settings
         self._engine.set_mode(settings.mode)
+        self._engine.set_effect(settings.effect)
         self._engine.set_brightness(settings.brightness)
         if settings.colour != prev.colour:
             self._apply_colour()
@@ -246,32 +264,42 @@ class SyncSession:
                 dt = now - last_t
                 last_t = now
 
-                if self._source is None:
-                    if now - last_reopen >= _IDLE_REOPEN_S:
-                        last_reopen = now
-                        await self._ensure_source()
+                try:
                     if self._source is None:
+                        if now - last_reopen >= _IDLE_REOPEN_S:
+                            last_reopen = now
+                            await self._ensure_source()
+                        if self._source is None:
+                            idle_color_phase += dt * 0.05
+                            await self._send_idle(idle_color_phase)
+                            await asyncio.sleep(1.0 / _IDLE_FPS)
+                            continue
+
+                    # Paused/stopped: idle (keep the source for a fast resume).
+                    pstate = self._hass.states.get(self._source.entity_id)
+                    if pstate is None or pstate.state != "playing":
                         idle_color_phase += dt * 0.05
                         await self._send_idle(idle_color_phase)
                         await asyncio.sleep(1.0 / _IDLE_FPS)
                         continue
 
-                # Paused/stopped: idle (keep the source for a fast resume).
-                pstate = self._hass.states.get(self._source.entity_id)
-                if pstate is None or pstate.state != "playing":
-                    idle_color_phase += dt * 0.05
-                    await self._send_idle(idle_color_phase)
-                    await asyncio.sleep(1.0 / _IDLE_FPS)
-                    continue
+                    frame = await self._source.read_frame()  # paced to real time
+                    if frame is None:
+                        await self._reset_source()
+                        continue
 
-                frame = await self._source.read_frame()  # paced to real time
-                if frame is None:
-                    await self._reset_source()
-                    continue
-
-                self._maybe_refresh_album_art()
-                colors = self._engine.render(frame, period)
-                await self._send_timed(colors)
+                    self._maybe_refresh_album_art()
+                    colors = self._engine.render(frame, period)
+                    await self._send_timed(colors)
+                except ConnectionError:
+                    # DTLS channel dropped: try to recover instead of ending sync.
+                    if not await self._reconnect_stream():
+                        _LOGGER.warning(
+                            "DTLS channel lost for %s; giving up after %d retries",
+                            self._config.name, _RECONNECT_ATTEMPTS,
+                        )
+                        self._running = False
+                    last_t = time.monotonic()
         except asyncio.CancelledError:
             pass
         except Exception:  # noqa: BLE001
@@ -308,12 +336,34 @@ class SyncSession:
             await self._safe_send(send)  # else still filling the buffer; hold
 
     async def _safe_send(self, colors: dict[int, tuple[float, float, float]]) -> None:
+        # ConnectionError propagates to the run loop, which attempts a reconnect.
         frame = self._encoder.build(colors)
+        await self._stream.send(frame)
+
+    async def _reconnect_stream(self) -> bool:
+        """Re-establish a dropped DTLS channel with backoff; True on success."""
         try:
-            await self._stream.send(frame)
-        except ConnectionError:
-            _LOGGER.warning("DTLS channel lost for %s; stopping sync", self._config.name)
-            self._running = False
+            await self._stream.stop()
+        except Exception:  # noqa: BLE001 - best-effort teardown before retrying
+            pass
+        for attempt in range(1, _RECONNECT_ATTEMPTS + 1):
+            if not self._running or self._stopping:
+                return False
+            delay = min(_RECONNECT_BASE_S * attempt, _RECONNECT_MAX_S)
+            await asyncio.sleep(delay)
+            try:
+                await self._bridge.start_stream(self._config.id)
+                await self._stream.start()
+            except Exception as err:  # noqa: BLE001 - keep retrying on any failure
+                _LOGGER.info(
+                    "Reconnect attempt %d/%d for %s failed: %s",
+                    attempt, _RECONNECT_ATTEMPTS, self._config.name, err,
+                )
+                continue
+            self._delay_buf.clear()  # drop stale frames buffered before the drop
+            _LOGGER.info("Reconnected DTLS stream for %s", self._config.name)
+            return True
+        return False
 
     def _maybe_refresh_album_art(self) -> None:
         # Only when the Album colour is selected; preset themes are static.

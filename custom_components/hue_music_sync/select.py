@@ -8,7 +8,7 @@ from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN, ColorScheme, SyncMode
+from .const import DOMAIN, ColorScheme, SyncEffect, SyncMode
 from .coordinator import SyncManager
 from .entity import HueMusicSyncAreaEntity
 
@@ -22,6 +22,7 @@ async def async_setup_entry(
     entities: list[SelectEntity] = []
     for area_id in manager.enabled_areas:
         entities.append(ModeSelect(manager, area_id))
+        entities.append(EffectSelect(manager, area_id))
         entities.append(ColourSelect(manager, area_id))
     async_add_entities(entities)
 
@@ -43,6 +44,26 @@ class ModeSelect(HueMusicSyncAreaEntity, SelectEntity):
 
     async def async_select_option(self, option: str) -> None:
         await self._manager.update_settings(self._area_id, mode=SyncMode(option))
+        self.async_write_ha_state()
+
+
+class EffectSelect(HueMusicSyncAreaEntity, SelectEntity):
+    """Pick the effect/renderer style (Music choreography, Fireworks, ...)."""
+
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_translation_key = "effect"
+    _attr_icon = "mdi:auto-fix"
+    _attr_options = [str(e) for e in SyncEffect]
+
+    def __init__(self, manager: SyncManager, area_id: str) -> None:
+        super().__init__(manager, area_id, "effect")
+
+    @property
+    def current_option(self) -> str:
+        return str(self._manager.get_settings(self._area_id).effect)
+
+    async def async_select_option(self, option: str) -> None:
+        await self._manager.update_settings(self._area_id, effect=SyncEffect(option))
         self.async_write_ha_state()
 
 
