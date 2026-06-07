@@ -1,9 +1,10 @@
 """Samsung-style intensity modes as parameters for one unified renderer.
 
-Instead of separate choreographies, every mode is the same render driven by a
-:class:`ModeParams`: a steady base brightness, a minimum floor (how far it may
-dim), how much continuous band energy and discrete beats brighten lights, and an
-optional treble shimmer. This mirrors Samsung's Subtle/Medium/High/Intense ladder.
+Brightness is driven mainly by the **continuous bass envelope** so the lights
+react to *every* kick proportionally (not just the big detected beats), with an
+extra pop on detected beats and optional treble shimmer. Higher modes get darker
+between beats and brighten harder on them — Intense is a dark club that snaps to
+full on the beat; Subtle does no dimming and only drifts colour.
 """
 
 from __future__ import annotations
@@ -17,36 +18,35 @@ from ..color.palette import RGB
 
 @dataclass(frozen=True, slots=True)
 class ModeParams:
-    base: float          # steady brightness level
-    floor: float         # minimum brightness (dimming limit)
-    energy_gain: float   # continuous band/overall energy -> brightness
-    beat_gain: float     # extra brightness on a beat
-    band_reactive: bool  # per-light frequency band (else overall energy)
-    bass_beats_only: bool  # only bass-positioned lights react to beats
+    base: float          # steady brightness between beats
+    floor: float         # minimum brightness (darkness between beats)
+    bass_gain: float     # brightness from the bass envelope (catches most beats)
+    beat_gain: float     # extra pop on a detected beat
+    spread: float        # per-light spectrum variety (treble lights vs bass lights)
     colour_speed: float  # palette drift per second
     shimmer: float       # treble-driven sparkle amount
 
 
 MODE_PARAMS: dict[SyncMode, ModeParams] = {
-    # No dimming, colours drift slowly.
+    # No dimming — only gentle colour drift.
     SyncMode.SUBTLE: ModeParams(
-        base=1.0, floor=1.0, energy_gain=0.0, beat_gain=0.0,
-        band_reactive=False, bass_beats_only=False, colour_speed=0.012, shimmer=0.0,
+        base=1.0, floor=1.0, bass_gain=0.0, beat_gain=0.0,
+        spread=0.0, colour_speed=0.02, shimmer=0.0,
     ),
-    # Stays bright; some (bass) lights pulse up on beats.
+    # Dark, reacts to most beats, moderate pops — gentle, colourful.
     SyncMode.MEDIUM: ModeParams(
-        base=0.92, floor=0.88, energy_gain=0.06, beat_gain=0.25,
-        band_reactive=False, bass_beats_only=True, colour_speed=0.018, shimmer=0.0,
+        base=0.10, floor=0.04, bass_gain=0.65, beat_gain=0.35,
+        spread=0.15, colour_speed=0.03, shimmer=0.0,
     ),
-    # Dims no lower than ~30%, bright beats on bass + treble.
+    # Darker, stronger beat pops, a touch of shimmer.
     SyncMode.HIGH: ModeParams(
-        base=0.55, floor=0.30, energy_gain=0.40, beat_gain=0.45,
-        band_reactive=True, bass_beats_only=False, colour_speed=0.03, shimmer=0.18,
+        base=0.08, floor=0.02, bass_gain=0.85, beat_gain=0.60,
+        spread=0.25, colour_speed=0.045, shimmer=0.15,
     ),
-    # Full 0-100% dimming/brightening with shimmer.
+    # Club: near-dark between beats, snaps to full on the beat, shimmer on highs.
     SyncMode.INTENSE: ModeParams(
-        base=0.22, floor=0.0, energy_gain=0.75, beat_gain=0.65,
-        band_reactive=True, bass_beats_only=False, colour_speed=0.05, shimmer=0.5,
+        base=0.03, floor=0.0, bass_gain=1.0, beat_gain=0.95,
+        spread=0.20, colour_speed=0.06, shimmer=0.4,
     ),
 }
 
@@ -71,8 +71,8 @@ def render(engine, frame) -> dict[int, tuple[RGB, float]]:
     """Return per-channel (base_colour, brightness) for the active mode params."""
     p: ModeParams = engine.params
     t = engine.time
-    high = frame.bands.get("high", 0.0)
-    overall = frame.energy
+    bass = max(frame.bands.get("sub_bass", 0.0), frame.bands.get("bass", 0.0))
+    treble = frame.bands.get("high", 0.0)
     beat = frame.beat
     strength = min(1.0, frame.beat_strength)
 
@@ -80,17 +80,17 @@ def render(engine, frame) -> dict[int, tuple[RGB, float]]:
     for ch in engine.channels:
         info = engine.cmap[ch.channel_id]
         bri = p.base
-
-        if p.energy_gain:
-            level = frame.bands.get(info["band"], 0.0) if p.band_reactive else overall
-            bri += p.energy_gain * level
-
-        if p.beat_gain and beat:
-            if not p.bass_beats_only or info["band"] in ("sub_bass", "bass"):
-                bri += p.beat_gain * strength
-
-        if p.shimmer and high > 0.05:
-            bri += p.shimmer * high * _shimmer(t, ch.channel_id)
+        # Continuous bass envelope -> reacts to every kick.
+        bri += p.bass_gain * bass
+        # Extra pop on detected beats.
+        if beat:
+            bri += p.beat_gain * strength
+        # Per-light spectrum variety (treble-side lights catch highs, etc.).
+        if p.spread:
+            bri += p.spread * frame.bands.get(info["band"], 0.0)
+        # Treble sparkle.
+        if p.shimmer and treble > 0.05:
+            bri += p.shimmer * treble * _shimmer(t, ch.channel_id)
 
         bri = p.floor if bri < p.floor else 1.0 if bri > 1.0 else bri
         colour = engine.palette.sample(info["xrank"] + p.colour_speed * t)

@@ -14,10 +14,11 @@ from ..const import DEFAULT_MODE, ColorScheme, SyncMode
 from ..hue.bridge import EntertainmentChannel
 from .modes import MODE_PARAMS, band_for_rank, render
 
-# Brightness smoothing: snap up on transients, ease back down.
-_ATTACK = 0.6
-_DECAY = 0.16
-_COLOR_LERP = 0.2
+# Brightness smoothing: snap up hard on beats, fall back quickly so it goes dark
+# between beats (club feel). Colour eases slowly for smooth shifting.
+_ATTACK = 0.8
+_DECAY = 0.26
+_COLOR_LERP = 0.16
 
 # Pleasant fallback palette when no album art is available (e.g. live radio).
 _FALLBACK_SCHEME = ColorScheme.SUNSET
@@ -60,6 +61,18 @@ class EffectEngine:
     def set_brightness(self, brightness: float) -> None:
         """Master brightness ceiling (0..1), scaling the mode's output."""
         self.brightness = max(0.0, min(1.0, brightness))
+
+    def render_idle(self, phase: float, level: float = 0.12) -> dict[int, RGB]:
+        """A gentle, mode-independent palette glow for paused/idle state."""
+        dim = level * self.brightness
+        out: dict[int, RGB] = {}
+        for ch in self.channels:
+            info = self.cmap[ch.channel_id]
+            c = self.palette.sample(info["xrank"] + phase)
+            m = max(c)
+            nc = (c[0] / m, c[1] / m, c[2] / m) if m > 1e-6 else (0.0, 0.0, 0.0)
+            out[ch.channel_id] = (nc[0] * dim, nc[1] * dim, nc[2] * dim)
+        return out
 
     def render(self, frame: AnalysisFrame, dt: float) -> dict[int, RGB]:
         """Advance time and produce smoothed per-channel RGB (0..1).

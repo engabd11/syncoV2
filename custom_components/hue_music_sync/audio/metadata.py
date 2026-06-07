@@ -37,6 +37,10 @@ class MetadataSource:
         self._last_pulse = -1
 
     @property
+    def entity_id(self) -> str:
+        return self._entity_id
+
+    @property
     def album_art_url(self) -> str | None:
         return self._album_art_url
 

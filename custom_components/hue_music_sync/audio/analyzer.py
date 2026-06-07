@@ -55,7 +55,7 @@ class Analyzer:
         sample_rate: int = ANALYSIS_SAMPLE_RATE,
         window: int = ANALYSIS_WINDOW,
         hop: int = ANALYSIS_HOP,
-        beat_sensitivity: float = 1.4,
+        beat_sensitivity: float = 1.2,
     ) -> None:
         self._sr = sample_rate
         self._window = window

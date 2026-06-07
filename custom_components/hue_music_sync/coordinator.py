@@ -20,7 +20,6 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
-from .audio.analyzer import AnalysisFrame
 from .audio.metadata import MetadataSource
 from .audio.snapcast import SnapcastSource
 from .audio.source import MusicAssistantSource
@@ -249,6 +248,14 @@ class SyncSession:
                         await asyncio.sleep(1.0 / _IDLE_FPS)
                         continue
 
+                # Paused/stopped: idle (keep the source for a fast resume).
+                pstate = self._hass.states.get(self._source.entity_id)
+                if pstate is None or pstate.state != "playing":
+                    idle_color_phase += dt * 0.05
+                    await self._send_idle(idle_color_phase)
+                    await asyncio.sleep(1.0 / _IDLE_FPS)
+                    continue
+
                 frame = await self._source.read_frame()  # paced to real time
                 if frame is None:
                     await self._reset_source()
@@ -268,12 +275,8 @@ class SyncSession:
                 self._on_finished()
 
     async def _send_idle(self, phase: float) -> None:
-        # Gentle dim glow drifting through the palette while waiting for audio.
-        idle = AnalysisFrame(bands={b: 0.0 for b in ("sub_bass", "bass", "low_mid", "mid", "high")},
-                             energy=0.08)
-        self._engine.color_phase = phase
-        colors = self._engine.render(idle, 1.0 / _IDLE_FPS)
-        await self._safe_send(colors)
+        # Gentle dim glow drifting through the palette (paused / waiting for audio).
+        await self._safe_send(self._engine.render_idle(phase))
 
     async def _safe_send(self, colors: dict[int, tuple[float, float, float]]) -> None:
         frame = self._encoder.build(colors)
