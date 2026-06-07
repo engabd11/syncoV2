@@ -211,8 +211,8 @@ class MusicAssistantSource:
 
         mass = self._mass_client()
         player_id = self._mass_player_id()
-        _LOGGER.debug(
-            "[%s] resolve: mass_client=%s player_id=%s",
+        _LOGGER.warning(
+            "DIAG [%s] resolve: mass_client=%s player_id=%s",
             self._entity_id, "found" if mass else "MISSING", player_id,
         )
         if mass is not None and player_id is not None:
@@ -221,15 +221,16 @@ class MusicAssistantSource:
                 media = getattr(player, "current_media", None)
                 uri = getattr(media, "uri", None) if media else None
                 base_url = getattr(getattr(mass, "server_info", None), "base_url", None)
-                _LOGGER.debug(
-                    "[%s] player=%s server=%s current_media: uri=%r media_type=%r "
-                    "source_id=%r queue_item_id=%r custom_data=%r image=%r",
+                # NOTE: temporarily logged at WARNING for first-run diagnosis;
+                # will be lowered to debug once stream resolution is confirmed.
+                _LOGGER.warning(
+                    "DIAG [%s] player=%s server=%s current_media: uri=%r media_type=%r "
+                    "source_id=%r queue_item_id=%r custom_data=%r",
                     self._entity_id, "found" if player else "None", base_url, uri,
                     getattr(media, "media_type", None) if media else None,
                     getattr(media, "source_id", None) if media else None,
                     getattr(media, "queue_item_id", None) if media else None,
                     getattr(media, "custom_data", None) if media else None,
-                    getattr(media, "image_url", None) if media else None,
                 )
                 if media is not None:
                     album_art = getattr(media, "image_url", None)
