@@ -26,6 +26,7 @@ class ModeParams:
     spread: float        # per-light spectrum variety (treble lights vs bass)
     colour_speed: float  # palette drift per second
     shimmer: float       # treble-driven sparkle amount
+    colour_sat: float = 1.0  # <1 softens colours toward white (Samsung-style)
 
 
 MODE_PARAMS: dict[SyncMode, ModeParams] = {
@@ -44,10 +45,11 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         base=0.07, floor=0.0, bass_gain=0.18, beat_gain=0.95, beat_threshold=1.5,
         spread=0.18, colour_speed=0.045, shimmer=0.22,
     ),
-    # Club: near-dark + shimmer between beats; only BIG beats snap to full.
+    # Samsung-style: moody mid-level base that pulses ~1.5-2x on most main beats,
+    # never fully dark, with softened (desaturated) album colours.
     SyncMode.INTENSE: ModeParams(
-        base=0.05, floor=0.0, bass_gain=0.10, beat_gain=1.0, beat_threshold=1.8,
-        spread=0.12, colour_speed=0.06, shimmer=0.4,
+        base=0.40, floor=0.30, bass_gain=0.30, beat_gain=0.55, beat_threshold=1.2,
+        spread=0.12, colour_speed=0.05, shimmer=0.22, colour_sat=0.5,
     ),
 }
 

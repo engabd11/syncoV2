@@ -104,6 +104,10 @@ class EffectEngine:
             m = max(blended)
             nc = (blended[0] / m, blended[1] / m, blended[2] / m) if m > 1e-6 else (0.0, 0.0, 0.0)
             self._state[cid] = (nc, new_b)
+            # Soften colours toward white per the mode (keeps max channel = 1).
+            sat = self.params.colour_sat
+            if sat < 1.0:
+                nc = (nc[0] * sat + (1.0 - sat), nc[1] * sat + (1.0 - sat), nc[2] * sat + (1.0 - sat))
             # Continuous brightness + sharp flash, then master-brightness scaling.
             b = min(1.0, new_b + self._flash) * self.brightness
             out[cid] = (nc[0] * b, nc[1] * b, nc[2] * b)
