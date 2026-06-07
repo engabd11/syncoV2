@@ -22,6 +22,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 
 from .audio.analyzer import AnalysisFrame
 from .audio.metadata import MetadataSource
+from .audio.snapcast import SnapcastSource
 from .audio.source import MusicAssistantSource
 from .color.album_art import extract_palette
 from .const import (
@@ -31,6 +32,7 @@ from .const import (
     CONF_LATENCY_MS,
     CONF_MEDIA_PLAYER,
     CONF_MODE,
+    CONF_SNAPSERVER_HOST,
     DEFAULT_BRIGHTNESS,
     DEFAULT_COLOUR,
     DEFAULT_LATENCY_MS,
@@ -103,6 +105,7 @@ class SyncSession:
         ffmpeg_bin: str,
         config: EntertainmentConfig,
         settings: AreaSettings,
+        snapserver_host: str = "",
         on_finished: Callable[[], None] | None = None,
     ) -> None:
         self._hass = hass
@@ -110,12 +113,13 @@ class SyncSession:
         self._ffmpeg = ffmpeg_bin
         self._config = config
         self._settings = settings
+        self._snapserver_host = snapserver_host
         self._on_finished = on_finished
 
         self._encoder = HueStreamEncoder(config.id)
         self._stream = DtlsStream(host, app_key, client_key)
         self._engine = EffectEngine(config.channels)
-        self._source: MusicAssistantSource | MetadataSource | None = None
+        self._source: MusicAssistantSource | MetadataSource | SnapcastSource | None = None
         self._task: asyncio.Task | None = None
         self._running = False
         self._stopping = False
@@ -192,8 +196,20 @@ class SyncSession:
         entity_id = self._resolve_player()
         if entity_id is None:
             return False
-        # Prefer the real Music Assistant audio tap; fall back to metadata-driven
-        # animation when no decodable stream is available for this player.
+
+        # 1. Snapcast tap (primary): real, beat-accurate audio for any MA player.
+        if self._snapserver_host:
+            entry = er.async_get(self._hass).async_get(entity_id)
+            player_uid = entry.unique_id if entry else None
+            snap = SnapcastSource(
+                self._hass, entity_id, self._snapserver_host, self._ffmpeg, player_uid
+            )
+            if await snap.open():
+                self._source = snap
+                return True
+            await snap.close()
+
+        # 2. Music Assistant HTTP tap (works for players that expose a stream).
         ma = MusicAssistantSource(
             self._hass, entity_id, self._ffmpeg, self._settings.latency_ms
         )
@@ -202,6 +218,7 @@ class SyncSession:
             return True
         await ma.close()
 
+        # 3. Metadata-driven animation (universal fallback).
         meta = MetadataSource(self._hass, entity_id)
         if await meta.open():
             _LOGGER.info(
@@ -325,6 +342,7 @@ class SyncManager:
         self._ffmpeg = ffmpeg_bin
         self.configs: dict[str, EntertainmentConfig] = {c.id: c for c in configs}
         self.enabled_areas: list[str] = list(entry.data.get(CONF_AREAS, []))
+        self._snapserver_host: str = entry.options.get(CONF_SNAPSERVER_HOST, "") or ""
         self._sessions: dict[str, SyncSession] = {}
         self._settings: dict[str, AreaSettings] = self._load_settings()
 
@@ -375,6 +393,7 @@ class SyncManager:
         session = SyncSession(
             self.hass, self.bridge, self._host, self._app_key, self._client_key,
             self._ffmpeg, config, self.get_settings(area_id),
+            snapserver_host=self._snapserver_host,
             on_finished=lambda: self._on_session_finished(area_id),
         )
         await session.start()

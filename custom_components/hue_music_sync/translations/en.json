@@ -32,9 +32,11 @@
   "options": {
     "step": {
       "init": {
-        "title": "Entertainment areas",
+        "title": "Settings",
+        "description": "Enable areas, and optionally point at your Snapcast server for real beat-accurate audio (Music Assistant streams through Snapcast).",
         "data": {
-          "areas": "Enabled entertainment areas"
+          "areas": "Enabled entertainment areas",
+          "snapserver_host": "Snapcast server host (IP) — optional"
         }
       }
     }

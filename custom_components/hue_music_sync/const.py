@@ -20,6 +20,7 @@ CONF_COLOUR: Final = "colour"
 CONF_BRIGHTNESS: Final = "brightness"
 CONF_MEDIA_PLAYER: Final = "media_player"
 CONF_LATENCY_MS: Final = "latency_ms"
+CONF_SNAPSERVER_HOST: Final = "snapserver_host"
 
 # --- Defaults ------------------------------------------------------------
 DEFAULT_LATENCY_MS: Final = 150
