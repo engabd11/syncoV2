@@ -30,25 +30,26 @@ class ModeParams:
 
 
 MODE_PARAMS: dict[SyncMode, ModeParams] = {
-    # No dimming — only gentle colour drift.
+    # Stays bright and colourful, but gently sways with the music + colour drift.
     SyncMode.SUBTLE: ModeParams(
-        base=1.0, floor=1.0, bass_gain=0.0, beat_gain=0.0, beat_threshold=9.0,
-        spread=0.0, colour_speed=0.02, shimmer=0.0,
+        base=0.82, floor=0.62, bass_gain=0.18, beat_gain=0.0, beat_threshold=9.0,
+        spread=0.05, colour_speed=0.025, shimmer=0.0, colour_sat=1.0,
     ),
-    # Dark, reacts to most beats (continuous bass + low threshold) — colourful.
+    # Like Intense but lighter: brighter baseline, gentler pulses on most beats,
+    # more colour.
     SyncMode.MEDIUM: ModeParams(
-        base=0.10, floor=0.04, bass_gain=0.55, beat_gain=0.5, beat_threshold=1.0,
-        spread=0.15, colour_speed=0.03, shimmer=0.06,
+        base=0.22, floor=0.14, bass_gain=0.28, beat_gain=0.55, beat_threshold=1.1,
+        spread=0.15, colour_speed=0.04, shimmer=0.10, colour_sat=0.8,
     ),
-    # Mostly dark + shimmer; only the bigger beats flash.
+    # "Heavy": immersive Intense-style, but flashes ONLY on big beats (eye-
+    # friendly, less strobing) over a sustained lit base.
     SyncMode.HIGH: ModeParams(
-        base=0.07, floor=0.0, bass_gain=0.18, beat_gain=0.95, beat_threshold=1.5,
-        spread=0.18, colour_speed=0.045, shimmer=0.22,
+        base=0.30, floor=0.20, bass_gain=0.20, beat_gain=0.8, beat_threshold=2.2,
+        spread=0.12, colour_speed=0.05, shimmer=0.12, colour_sat=0.6,
     ),
-    # Samsung-style but with visible dimming: dim baseline that clearly drops
-    # between beats and pulses up on the main beats. Threshold kept high enough
-    # that flashes are selective (~the beat, not every onset) so the flash decays
-    # between them. Softened (desaturated) album colours.
+    # Samsung-style with visible dimming: dim baseline that clearly drops between
+    # beats and pulses up on the main beats (selective so the flash decays). Soft
+    # desaturated album colours.
     SyncMode.INTENSE: ModeParams(
         base=0.10, floor=0.05, bass_gain=0.12, beat_gain=0.9, beat_threshold=1.6,
         spread=0.12, colour_speed=0.05, shimmer=0.2, colour_sat=0.5,

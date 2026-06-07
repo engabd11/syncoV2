@@ -33,6 +33,11 @@ activate:
             - lavender
             - ember
             - aurora
+            - tropical
+            - savanna
+            - blossom
+            - honolulu
+            - galaxy
     brightness:
       name: Brightness
       description: Master brightness ceiling (5-100%).
@@ -94,6 +99,11 @@ set_options:
             - lavender
             - ember
             - aurora
+            - tropical
+            - savanna
+            - blossom
+            - honolulu
+            - galaxy
     brightness:
       name: Brightness
       description: Master brightness ceiling (5-100%).

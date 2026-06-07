@@ -90,6 +90,32 @@ _SCHEMES: dict[ColorScheme, Palette] = {
         (0.45, 0.80, 1.0), (0.36, 0.75, 1.0), (0.55, 0.80, 1.0),
         (0.72, 0.75, 1.0), (0.88, 0.65, 1.0),
     )),
+    # --- Philips Hue signature scenes ---
+    # Tropical twilight: warm pink/purple sunset.
+    ColorScheme.TROPICAL: Palette(_hues(
+        (0.92, 0.80, 1.0), (0.85, 0.72, 1.0), (0.98, 0.80, 1.0),
+        (0.04, 0.82, 1.0), (0.10, 0.70, 1.0),
+    )),
+    # Savanna sunset: golden ambers and soft reds.
+    ColorScheme.SAVANNA: Palette(_hues(
+        (0.01, 0.85, 1.0), (0.05, 0.85, 1.0), (0.08, 0.85, 1.0),
+        (0.11, 0.80, 1.0), (0.13, 0.68, 1.0),
+    )),
+    # Spring blossom: soft pastels.
+    ColorScheme.BLOSSOM: Palette(_hues(
+        (0.95, 0.42, 1.0), (0.04, 0.38, 1.0), (0.13, 0.33, 1.0),
+        (0.78, 0.34, 1.0), (0.55, 0.28, 1.0),
+    )),
+    # Honolulu: vibrant pink / orange / purple / teal.
+    ColorScheme.HONOLULU: Palette(_hues(
+        (0.95, 0.85, 1.0), (0.04, 0.85, 1.0), (0.80, 0.80, 1.0),
+        (0.50, 0.80, 1.0),
+    )),
+    # Galaxy: deep blue / violet / magenta.
+    ColorScheme.GALAXY: Palette(_hues(
+        (0.66, 0.90, 1.0), (0.72, 0.85, 1.0), (0.78, 0.85, 1.0),
+        (0.86, 0.78, 1.0),
+    )),
 }
 
 # Fallback used when album-art extraction is unavailable.

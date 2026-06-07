@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 
@@ -32,11 +33,14 @@ from .const import (
     CONF_MEDIA_PLAYER,
     CONF_MODE,
     CONF_SNAPSERVER_HOST,
+    CONF_TIMING_MS,
     DEFAULT_BRIGHTNESS,
     DEFAULT_COLOUR,
     DEFAULT_LATENCY_MS,
     DEFAULT_MODE,
     DEFAULT_STREAM_FPS,
+    DEFAULT_TIMING_MS,
+    TIMING_BUFFER_MS,
     ColorScheme,
     SyncMode,
     signal_area_update,
@@ -60,6 +64,7 @@ class AreaSettings:
     mode: SyncMode = DEFAULT_MODE
     colour: ColorScheme = DEFAULT_COLOUR
     brightness: float = DEFAULT_BRIGHTNESS
+    timing_ms: int = DEFAULT_TIMING_MS
     media_player: str | None = None
     latency_ms: int = DEFAULT_LATENCY_MS
 
@@ -77,6 +82,7 @@ class AreaSettings:
             mode=mode,
             colour=colour,
             brightness=float(data.get(CONF_BRIGHTNESS, DEFAULT_BRIGHTNESS)),
+            timing_ms=int(data.get(CONF_TIMING_MS, DEFAULT_TIMING_MS)),
             media_player=data.get(CONF_MEDIA_PLAYER),
             latency_ms=int(data.get(CONF_LATENCY_MS, DEFAULT_LATENCY_MS)),
         )
@@ -86,6 +92,7 @@ class AreaSettings:
             CONF_MODE: str(self.mode),
             CONF_COLOUR: str(self.colour),
             CONF_BRIGHTNESS: self.brightness,
+            CONF_TIMING_MS: self.timing_ms,
             CONF_MEDIA_PLAYER: self.media_player,
             CONF_LATENCY_MS: self.latency_ms,
         }
@@ -124,6 +131,7 @@ class SyncSession:
         self._stopping = False
         self._last_track: str | None = None
         self._art_task: asyncio.Task | None = None
+        self._delay_buf: deque[tuple[float, dict]] = deque()
 
     @property
     def settings(self) -> AreaSettings:
@@ -263,7 +271,7 @@ class SyncSession:
 
                 self._maybe_refresh_album_art()
                 colors = self._engine.render(frame, period)
-                await self._safe_send(colors)
+                await self._send_timed(colors)
         except asyncio.CancelledError:
             pass
         except Exception:  # noqa: BLE001
@@ -277,6 +285,27 @@ class SyncSession:
     async def _send_idle(self, phase: float) -> None:
         # Gentle dim glow drifting through the palette (paused / waiting for audio).
         await self._safe_send(self._engine.render_idle(phase))
+
+    async def _send_timed(self, colors: dict) -> None:
+        """Send the frame through the timing-offset delay buffer.
+
+        Effective delay = TIMING_BUFFER_MS + the user's offset (can be negative
+        down to zero). Positive = lights later; negative = earlier (within the
+        baseline buffer). Lets the user align lights to the sound.
+        """
+        delay_s = max(0.0, (TIMING_BUFFER_MS + self._settings.timing_ms) / 1000.0)
+        if delay_s <= 0.001:
+            self._delay_buf.clear()
+            await self._safe_send(colors)
+            return
+        now = time.monotonic()
+        self._delay_buf.append((now, colors))
+        target = now - delay_s
+        send = None
+        while self._delay_buf and self._delay_buf[0][0] <= target:
+            send = self._delay_buf.popleft()[1]
+        if send is not None:
+            await self._safe_send(send)  # else still filling the buffer; hold
 
     async def _safe_send(self, colors: dict[int, tuple[float, float, float]]) -> None:
         frame = self._encoder.build(colors)

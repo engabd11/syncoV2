@@ -61,13 +61,21 @@
           "forest": "Forest",
           "lavender": "Lavender",
           "ember": "Ember",
-          "aurora": "Aurora"
+          "aurora": "Aurora",
+          "tropical": "Tropical twilight",
+          "savanna": "Savanna sunset",
+          "blossom": "Spring blossom",
+          "honolulu": "Honolulu",
+          "galaxy": "Galaxy"
         }
       }
     },
     "number": {
       "brightness": {
         "name": "Brightness"
+      },
+      "timing": {
+        "name": "Timing offset"
       }
     }
   },

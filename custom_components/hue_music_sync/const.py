@@ -20,6 +20,7 @@ CONF_COLOUR: Final = "colour"
 CONF_BRIGHTNESS: Final = "brightness"
 CONF_MEDIA_PLAYER: Final = "media_player"
 CONF_LATENCY_MS: Final = "latency_ms"
+CONF_TIMING_MS: Final = "timing_ms"
 CONF_SNAPSERVER_HOST: Final = "snapserver_host"
 
 # --- Defaults ------------------------------------------------------------
@@ -53,6 +54,8 @@ BANDS: Final[dict[str, tuple[float, float]]] = {
 
 
 DEFAULT_BRIGHTNESS: Final = 1.0  # master brightness ceiling (0..1)
+DEFAULT_TIMING_MS: Final = 0  # +ve delays lights, -ve advances (within buffer)
+TIMING_BUFFER_MS: Final = 200  # baseline delay buffer enabling -ve offsets
 
 
 class ColorScheme(StrEnum):
@@ -65,6 +68,12 @@ class ColorScheme(StrEnum):
     LAVENDER = "lavender"
     EMBER = "ember"
     AURORA = "aurora"
+    # Philips Hue signature scenes
+    TROPICAL = "tropical"
+    SAVANNA = "savanna"
+    BLOSSOM = "blossom"
+    HONOLULU = "honolulu"
+    GALAXY = "galaxy"
 
 
 class SyncMode(StrEnum):
