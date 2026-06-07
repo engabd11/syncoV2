@@ -63,11 +63,25 @@ class PcmDecoder:
             "-vn", "-ac", "1", "-ar", str(self._sr),
             "-f", "s16le", "-acodec", "pcm_s16le", "pipe:1",
         ]
-        self._proc = await asyncio.create_subprocess_exec(
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
+        _LOGGER.debug("ffmpeg decode: %s -i %s (ss=%.2f)", self._ffmpeg, url, offset)
+        try:
+            self._proc = await asyncio.create_subprocess_exec(
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError:
+            _LOGGER.error("ffmpeg binary %r not found; cannot decode audio", self._ffmpeg)
+            self._proc = None
+
+    async def _log_stderr_if_failed(self) -> None:
+        """If ffmpeg exited immediately, surface its error output."""
+        proc = self._proc
+        if proc is None or proc.returncode is None or proc.stderr is None:
+            return
+        err = (await proc.stderr.read()).decode(errors="replace").strip()
+        if err:
+            _LOGGER.warning("ffmpeg could not open the stream: %s", err.splitlines()[-1])
 
     async def read_hop(self) -> np.ndarray | None:
         """Read one hop of float32 samples (-1..1), or None at end of stream."""
@@ -78,6 +92,7 @@ class PcmDecoder:
         except asyncio.IncompleteReadError as err:
             raw = err.partial
             if len(raw) < _HOP_BYTES:
+                await self._log_stderr_if_failed()
                 return None
         samples = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
         return samples
@@ -172,9 +187,17 @@ class MusicAssistantSource:
         return float(pos) + max(0.0, extra), state.state == "playing"
 
     def _resolve(self) -> TrackInfo | None:
-        """Resolve the current track's tappable stream URL + position."""
+        """Resolve the current track's tappable stream URL + position.
+
+        Preference order for a decodable HTTP URL:
+          1. ``player.current_media.uri`` (MA's re-encoded stream — universal).
+          2. the active queue item's ``streamdetails.path`` (works for local /
+             URL / radio providers).
+          3. the HA ``media_content_id`` if it happens to be HTTP.
+        """
         position, playing = self._ha_position()
         if not playing:
+            _LOGGER.debug("[%s] not playing; no audio source", self._entity_id)
             return None
 
         state = self._hass.states.get(self._entity_id)
@@ -182,41 +205,65 @@ class MusicAssistantSource:
         is_live = attrs.get("media_duration") in (None, 0)
 
         stream_url: str | None = None
+        source_desc = "none"
         album_art: str | None = None
         track_id: str | None = attrs.get("media_content_id")
 
         mass = self._mass_client()
         player_id = self._mass_player_id()
+        _LOGGER.debug(
+            "[%s] resolve: mass_client=%s player_id=%s",
+            self._entity_id, "found" if mass else "MISSING", player_id,
+        )
         if mass is not None and player_id is not None:
             try:
                 player = mass.players.get(player_id)
                 media = getattr(player, "current_media", None)
+                uri = getattr(media, "uri", None) if media else None
+                _LOGGER.debug(
+                    "[%s] player=%s current_media.uri=%r image=%r active_source=%r",
+                    self._entity_id, "found" if player else "None", uri,
+                    getattr(media, "image_url", None) if media else None,
+                    getattr(player, "active_source", None),
+                )
                 if media is not None:
-                    uri = getattr(media, "uri", None)
-                    if uri and uri.startswith(("http://", "https://")):
-                        stream_url = uri
                     album_art = getattr(media, "image_url", None)
-                    track_id = getattr(media, "uri", None) or track_id
+                    track_id = uri or track_id
+                    if uri and uri.startswith(("http://", "https://")):
+                        stream_url, source_desc = uri, "current_media.uri"
+                # Fallback: the queue item's provider stream path.
+                if stream_url is None and player is not None:
+                    src = getattr(player, "active_source", None)
+                    queue = mass.player_queues.get(src) if src else None
+                    item = getattr(queue, "current_item", None)
+                    sd = getattr(item, "streamdetails", None)
+                    path = getattr(sd, "path", None)
+                    _LOGGER.debug("[%s] queue streamdetails.path=%r", self._entity_id, path)
+                    if isinstance(path, str) and path.startswith(("http://", "https://")):
+                        stream_url, source_desc = path, "streamdetails.path"
             except Exception as err:  # noqa: BLE001 - defensive across MA versions
-                _LOGGER.debug("MA client lookup failed, falling back: %s", err)
+                _LOGGER.debug("[%s] MA client lookup failed: %s", self._entity_id, err)
 
-        # Fallbacks via HA state.
         if album_art is None and attrs.get("entity_picture"):
             album_art = self._absolute_url(attrs["entity_picture"])
         if stream_url is None:
-            # No direct tappable URL exposed; rely on HA-proxied content if usable.
             content = attrs.get("media_content_id")
             if content and content.startswith(("http://", "https://")):
-                stream_url = content
+                stream_url, source_desc = content, "media_content_id"
 
         if not stream_url:
             _LOGGER.warning(
-                "Could not resolve a decodable stream URL for %s; "
-                "music sync needs Music Assistant to expose an HTTP stream",
-                self._entity_id,
+                "[%s] could not resolve a decodable HTTP stream URL "
+                "(media_content_id=%r). Enable debug logging for "
+                "custom_components.hue_music_sync to see what Music Assistant exposed.",
+                self._entity_id, attrs.get("media_content_id"),
             )
             return None
 
+        _LOGGER.debug(
+            "[%s] resolved stream via %s: %s (pos=%.1fs live=%s)",
+            self._entity_id, source_desc, stream_url, position, is_live,
+        )
         return TrackInfo(
             stream_url=stream_url,
             position=position,
@@ -252,7 +299,10 @@ class MusicAssistantSource:
         self._wall0 = time.monotonic()
         self._last_resync_check = self._wall0
         await self._decoder.start(info.stream_url, start)
-        _LOGGER.debug("Decoding %s from %.2fs (live=%s)", self._entity_id, start, info.is_live)
+        _LOGGER.info(
+            "Music sync tapping %s audio: %s (from %.1fs)",
+            self._entity_id, info.stream_url, start,
+        )
 
     async def read_hop(self) -> np.ndarray | None:
         """Return the next paced hop, resyncing on drift/track-change.

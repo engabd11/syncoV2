@@ -176,10 +176,14 @@ class SyncSession:
             for s in self._hass.states.async_all("media_player")
             if s.state == "playing"
         ]
+        _LOGGER.debug("Playing media_players: %s", playing)
         for entity_id in playing:
             entry = registry.async_get(entity_id)
             if entry is not None and entry.platform == "music_assistant":
+                _LOGGER.debug("Following Music Assistant player %s", entity_id)
                 return entity_id
+        if playing:
+            _LOGGER.debug("No MA player playing; following %s", playing[0])
         return playing[0] if playing else None
 
     async def _ensure_source(self) -> bool:
