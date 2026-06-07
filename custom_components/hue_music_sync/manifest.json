@@ -2,13 +2,13 @@
   "domain": "hue_music_sync",
   "name": "Hue Music Sync",
   "after_dependencies": ["music_assistant"],
-  "codeowners": ["@Abdullah"],
+  "codeowners": ["@engabd11"],
   "config_flow": true,
   "dependencies": ["ffmpeg"],
-  "documentation": "https://github.com/Abdullah/hue_music_sync",
+  "documentation": "https://github.com/engabd11/synco",
   "integration_type": "hub",
   "iot_class": "local_push",
-  "issue_tracker": "https://github.com/Abdullah/hue_music_sync/issues",
+  "issue_tracker": "https://github.com/engabd11/synco/issues",
   "requirements": ["numpy"],
   "version": "0.1.0"
 }
