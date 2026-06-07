@@ -113,6 +113,7 @@ class SnapcastSource:
         self._analyzer = Analyzer()
         self._album_art_url: str | None = None
         self._track_id: str | None = None
+        self._meta_ts = 0.0
 
     @property
     def entity_id(self) -> str:
@@ -175,6 +176,10 @@ class SnapcastSource:
     async def read_frame(self) -> AnalysisFrame | None:
         if self._stop.is_set():
             return None
+        # Keep track/album-art current so colours follow track changes.
+        if time.monotonic() - self._meta_ts > 1.0:
+            self._meta_ts = time.monotonic()
+            self._refresh_meta()
         loop = asyncio.get_running_loop()
         try:
             return await loop.run_in_executor(None, self._frames.get, True, 1.0)

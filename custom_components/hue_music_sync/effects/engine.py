@@ -12,12 +12,14 @@ from ..audio.analyzer import AnalysisFrame
 from ..color.palette import RGB, Palette, get_palette
 from ..const import DEFAULT_MODE, ColorScheme, SyncMode
 from ..hue.bridge import EntertainmentChannel
-from .modes import MODE_PARAMS, band_for_rank, render
+from .modes import MODE_PARAMS, band_for_rank, beat_flash, render
+
+_FLASH_DECAY = 0.80  # per-frame fade of the beat flash overlay (~5 frames)
 
 # Brightness smoothing: snap up hard on beats, fall back quickly so it goes dark
 # between beats (club feel). Colour eases slowly for smooth shifting.
-_ATTACK = 0.8
-_DECAY = 0.26
+_ATTACK = 0.92
+_DECAY = 0.24
 _COLOR_LERP = 0.16
 
 # Pleasant fallback palette when no album art is available (e.g. live radio).
@@ -32,6 +34,7 @@ class EffectEngine:
         self.params = MODE_PARAMS[DEFAULT_MODE]
         self.brightness = 1.0  # master ceiling (0..1), independent of mode
         self.time: float = 0.0
+        self._flash = 0.0  # beat-flash overlay (decays fast)
         self.set_channels(channels)
 
     def set_channels(self, channels: list[EntertainmentChannel]) -> None:
@@ -83,6 +86,9 @@ class EffectEngine:
         brightness as the max channel) even mid colour-transition.
         """
         self.time += dt
+        # Beat-flash overlay: snaps to full on a qualifying beat, then decays
+        # fast — independent of the slower continuous-brightness smoothing.
+        self._flash = max(self._flash * _FLASH_DECAY, beat_flash(self.params, frame))
         targets = render(self, frame)
 
         out: dict[int, RGB] = {}
@@ -98,7 +104,7 @@ class EffectEngine:
             m = max(blended)
             nc = (blended[0] / m, blended[1] / m, blended[2] / m) if m > 1e-6 else (0.0, 0.0, 0.0)
             self._state[cid] = (nc, new_b)
-            # Master brightness scales the mode envelope (separate from intensity).
-            b = new_b * self.brightness
+            # Continuous brightness + sharp flash, then master-brightness scaling.
+            b = min(1.0, new_b + self._flash) * self.brightness
             out[cid] = (nc[0] * b, nc[1] * b, nc[2] * b)
         return out

@@ -305,6 +305,13 @@ class SyncSession:
         palette = await extract_palette(self._ffmpeg, url)
         if palette is not None and self._settings.colour == ColorScheme.ALBUM_ART:
             self._engine.set_palette(palette)
+            _LOGGER.info(
+                "Album colours for %s: %s",
+                self._config.name,
+                [tuple(round(v, 2) for v in c) for c in palette.colors],
+            )
+        elif palette is None:
+            _LOGGER.warning("Album-art extraction failed for %s (%s)", self._config.name, url)
 
     async def stop(self) -> None:
         self._stopping = True

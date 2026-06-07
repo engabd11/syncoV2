@@ -20,9 +20,10 @@ from ..color.palette import RGB
 class ModeParams:
     base: float          # steady brightness between beats
     floor: float         # minimum brightness (darkness between beats)
-    bass_gain: float     # brightness from the bass envelope (catches most beats)
-    beat_gain: float     # extra pop on a detected beat
-    spread: float        # per-light spectrum variety (treble lights vs bass lights)
+    bass_gain: float     # continuous brightness from the bass envelope
+    beat_gain: float     # pop on a (qualifying) beat
+    beat_threshold: float  # only beats this strong pop (higher = big beats only)
+    spread: float        # per-light spectrum variety (treble lights vs bass)
     colour_speed: float  # palette drift per second
     shimmer: float       # treble-driven sparkle amount
 
@@ -30,23 +31,23 @@ class ModeParams:
 MODE_PARAMS: dict[SyncMode, ModeParams] = {
     # No dimming — only gentle colour drift.
     SyncMode.SUBTLE: ModeParams(
-        base=1.0, floor=1.0, bass_gain=0.0, beat_gain=0.0,
+        base=1.0, floor=1.0, bass_gain=0.0, beat_gain=0.0, beat_threshold=9.0,
         spread=0.0, colour_speed=0.02, shimmer=0.0,
     ),
-    # Dark, reacts to most beats, moderate pops — gentle, colourful.
+    # Dark, reacts to most beats (continuous bass + low threshold) — colourful.
     SyncMode.MEDIUM: ModeParams(
-        base=0.10, floor=0.04, bass_gain=0.65, beat_gain=0.35,
-        spread=0.15, colour_speed=0.03, shimmer=0.0,
+        base=0.10, floor=0.04, bass_gain=0.55, beat_gain=0.5, beat_threshold=1.0,
+        spread=0.15, colour_speed=0.03, shimmer=0.06,
     ),
-    # Darker, stronger beat pops, a touch of shimmer.
+    # Mostly dark + shimmer; only the bigger beats flash.
     SyncMode.HIGH: ModeParams(
-        base=0.08, floor=0.02, bass_gain=0.85, beat_gain=0.60,
-        spread=0.25, colour_speed=0.045, shimmer=0.15,
+        base=0.07, floor=0.0, bass_gain=0.18, beat_gain=0.95, beat_threshold=1.5,
+        spread=0.18, colour_speed=0.045, shimmer=0.22,
     ),
-    # Club: near-dark between beats, snaps to full on the beat, shimmer on highs.
+    # Club: near-dark + shimmer between beats; only BIG beats snap to full.
     SyncMode.INTENSE: ModeParams(
-        base=0.03, floor=0.0, bass_gain=1.0, beat_gain=0.95,
-        spread=0.20, colour_speed=0.06, shimmer=0.4,
+        base=0.05, floor=0.0, bass_gain=0.10, beat_gain=1.0, beat_threshold=1.8,
+        spread=0.12, colour_speed=0.06, shimmer=0.4,
     ),
 }
 
@@ -67,28 +68,30 @@ def _shimmer(t: float, cid: int) -> float:
     return 0.5 + 0.5 * math.sin(t * 23.0 + cid * 2.7) * math.sin(t * 8.0 + cid * 1.3)
 
 
+def beat_flash(params: ModeParams, frame) -> float:
+    """Flash amount a qualifying beat contributes (0 if it doesn't qualify).
+
+    The engine maintains this as a fast-decaying overlay so beats always snap to
+    full, independent of the slower continuous-brightness smoothing.
+    """
+    if frame.beat and frame.beat_strength >= params.beat_threshold:
+        return params.beat_gain * min(1.0, frame.beat_strength / 2.0)
+    return 0.0
+
+
 def render(engine, frame) -> dict[int, tuple[RGB, float]]:
-    """Return per-channel (base_colour, brightness) for the active mode params."""
+    """Per-channel (colour, continuous brightness) — no beat flash (added later)."""
     p: ModeParams = engine.params
     t = engine.time
     bass = max(frame.bands.get("sub_bass", 0.0), frame.bands.get("bass", 0.0))
     treble = frame.bands.get("high", 0.0)
-    beat = frame.beat
-    strength = min(1.0, frame.beat_strength)
 
     out: dict[int, tuple[RGB, float]] = {}
     for ch in engine.channels:
         info = engine.cmap[ch.channel_id]
-        bri = p.base
-        # Continuous bass envelope -> reacts to every kick.
-        bri += p.bass_gain * bass
-        # Extra pop on detected beats.
-        if beat:
-            bri += p.beat_gain * strength
-        # Per-light spectrum variety (treble-side lights catch highs, etc.).
+        bri = p.base + p.bass_gain * bass
         if p.spread:
             bri += p.spread * frame.bands.get(info["band"], 0.0)
-        # Treble sparkle.
         if p.shimmer and treble > 0.05:
             bri += p.shimmer * treble * _shimmer(t, ch.channel_id)
 
