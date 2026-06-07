@@ -220,17 +220,28 @@ class MusicAssistantSource:
                 player = mass.players.get(player_id)
                 media = getattr(player, "current_media", None)
                 uri = getattr(media, "uri", None) if media else None
+                base_url = getattr(getattr(mass, "server_info", None), "base_url", None)
                 _LOGGER.debug(
-                    "[%s] player=%s current_media.uri=%r image=%r active_source=%r",
-                    self._entity_id, "found" if player else "None", uri,
+                    "[%s] player=%s server=%s current_media: uri=%r media_type=%r "
+                    "source_id=%r queue_item_id=%r custom_data=%r image=%r",
+                    self._entity_id, "found" if player else "None", base_url, uri,
+                    getattr(media, "media_type", None) if media else None,
+                    getattr(media, "source_id", None) if media else None,
+                    getattr(media, "queue_item_id", None) if media else None,
+                    getattr(media, "custom_data", None) if media else None,
                     getattr(media, "image_url", None) if media else None,
-                    getattr(player, "active_source", None),
                 )
                 if media is not None:
                     album_art = getattr(media, "image_url", None)
                     track_id = uri or track_id
                     if uri and uri.startswith(("http://", "https://")):
                         stream_url, source_desc = uri, "current_media.uri"
+                    else:
+                        # Snapcast/pipe players don't use an HTTP URL, but the
+                        # session data lets us build MA's own stream URL.
+                        built = self._build_ma_stream_url(media, base_url, player_id)
+                        if built:
+                            stream_url, source_desc = built, "built /single"
                 # Fallback: the queue item's provider stream path.
                 if stream_url is None and player is not None:
                     src = getattr(player, "active_source", None)
@@ -271,6 +282,25 @@ class MusicAssistantSource:
             album_art_url=album_art,
             is_live=bool(is_live),
         )
+
+    def _build_ma_stream_url(self, media, base_url: str | None, player_id: str) -> str | None:
+        """Build MA's own stream URL from the active session data.
+
+        Mirrors the server's resolve_stream_url:
+        ``{base}/single|flow/{session_id}/{queue_id}/{queue_item_id}/{player_id}.flac``
+        """
+        if not base_url:
+            return None
+        custom = getattr(media, "custom_data", None) or {}
+        session_id = custom.get("session_id")
+        queue_id = getattr(media, "source_id", None)
+        queue_item_id = getattr(media, "queue_item_id", None)
+        if not (session_id and queue_id and queue_item_id):
+            return None
+        kind = "flow" if str(getattr(media, "media_type", "")).lower().endswith("flow_stream") else "single"
+        url = f"{base_url.rstrip('/')}/{kind}/{session_id}/{queue_id}/{queue_item_id}/{player_id}.flac"
+        _LOGGER.debug("[%s] built MA stream URL: %s", self._entity_id, url)
+        return url
 
     def _absolute_url(self, path: str) -> str:
         if path.startswith(("http://", "https://")):
