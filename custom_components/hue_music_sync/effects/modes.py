@@ -45,11 +45,13 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         base=0.07, floor=0.0, bass_gain=0.18, beat_gain=0.95, beat_threshold=1.5,
         spread=0.18, colour_speed=0.045, shimmer=0.22,
     ),
-    # Samsung-style: moody mid-level base that pulses ~1.5-2x on most main beats,
-    # never fully dark, with softened (desaturated) album colours.
+    # Samsung-style but with visible dimming: dim baseline that clearly drops
+    # between beats and pulses up on the main beats. Threshold kept high enough
+    # that flashes are selective (~the beat, not every onset) so the flash decays
+    # between them. Softened (desaturated) album colours.
     SyncMode.INTENSE: ModeParams(
-        base=0.40, floor=0.30, bass_gain=0.30, beat_gain=0.55, beat_threshold=1.2,
-        spread=0.12, colour_speed=0.05, shimmer=0.22, colour_sat=0.5,
+        base=0.10, floor=0.05, bass_gain=0.12, beat_gain=0.9, beat_threshold=1.6,
+        spread=0.12, colour_speed=0.05, shimmer=0.2, colour_sat=0.5,
     ),
 }
 
