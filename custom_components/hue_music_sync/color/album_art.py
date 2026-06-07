@@ -64,7 +64,7 @@ def _kmeans_palette(pixels: np.ndarray, k: int = 5, iters: int = 12) -> list[RGB
     return palette
 
 
-async def extract_palette(ffmpeg_bin: str, url: str, k: int = 3) -> Palette | None:
+async def extract_palette(ffmpeg_bin: str, url: str, k: int = 5) -> Palette | None:
     """Decode artwork at ``url`` with ffmpeg and return a vivid palette."""
     args = [
         ffmpeg_bin, "-nostdin", "-loglevel", "error", "-i", url,

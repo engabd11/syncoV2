@@ -71,11 +71,15 @@ def _shimmer(t: float, cid: int) -> float:
 def beat_flash(params: ModeParams, frame) -> float:
     """Flash amount a qualifying beat contributes (0 if it doesn't qualify).
 
-    The engine maintains this as a fast-decaying overlay so beats always snap to
-    full, independent of the slower continuous-brightness smoothing.
+    Weighted by bass content so the flashes track the kick/bass beat rather than
+    incidental onsets (hi-hats etc.). The engine keeps this as a fast-decaying
+    overlay so beats always snap to full, independent of the slower continuous
+    brightness smoothing.
     """
     if frame.beat and frame.beat_strength >= params.beat_threshold:
-        return params.beat_gain * min(1.0, frame.beat_strength / 2.0)
+        bass = max(frame.bands.get("sub_bass", 0.0), frame.bands.get("bass", 0.0))
+        weight = 0.4 + 0.6 * bass  # full on kicks, dimmer on bass-less onsets
+        return params.beat_gain * min(1.0, frame.beat_strength / 2.0) * weight
     return 0.0
 
 
