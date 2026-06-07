@@ -15,10 +15,24 @@ activate:
       selector:
         select:
           options:
-            - album
-            - energetic
+            - subtle
+            - medium
+            - high
+            - intense
+    colour:
+      name: Colour
+      description: Colour theme — album_art or a preset palette.
+      required: false
+      selector:
+        select:
+          options:
+            - album_art
+            - warm
+            - cool
+            - neon
             - party
-            - chill
+            - mono
+            - rainbow
     media_player:
       name: Media player
       description: Media player to follow. Leave unset to auto-pick the one playing.
@@ -52,10 +66,24 @@ set_options:
       selector:
         select:
           options:
-            - album
-            - energetic
+            - subtle
+            - medium
+            - high
+            - intense
+    colour:
+      name: Colour
+      description: Colour theme — album_art or a preset palette.
+      required: false
+      selector:
+        select:
+          options:
+            - album_art
+            - warm
+            - cool
+            - neon
             - party
-            - chill
+            - mono
+            - rainbow
     media_player:
       name: Media player
       description: Media player to follow.

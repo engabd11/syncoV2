@@ -16,6 +16,7 @@ CONF_AREAS: Final = "areas"  # list of enabled entertainment_configuration ids
 
 # --- Per-area option keys ------------------------------------------------
 CONF_MODE: Final = "mode"
+CONF_COLOUR: Final = "colour"
 CONF_MEDIA_PLAYER: Final = "media_player"
 CONF_LATENCY_MS: Final = "latency_ms"
 
@@ -61,41 +62,21 @@ class ColorScheme(StrEnum):
     RAINBOW = "rainbow"
 
 
-class EffectMode(StrEnum):
-    """Choreography modes mapping audio features to lights."""
-
-    PULSE = "pulse"  # whole area pulses on the beat with palette color
-    SPECTRUM = "spectrum"  # channels mapped to frequency bands
-    WAVE = "wave"  # beat triggers a travelling wave across positions
-    AMBIENT = "ambient"  # slow palette drift, gentle energy modulation
-
-
-DEFAULT_COLOR_SCHEME: Final = ColorScheme.ALBUM_ART
-DEFAULT_EFFECT_MODE: Final = EffectMode.SPECTRUM
-
-
 class SyncMode(StrEnum):
-    """Curated, Samsung-style presets bundling scheme + effect + intensity.
+    """Samsung-style intensity ladder; the only user-facing control.
 
-    Keeps the user-facing surface to a single choice instead of separate
-    colour-scheme / effect / intensity controls.
+    Reactivity (dimming range, beat brightening, shimmer) increases up the
+    ladder. Parameters per mode live in ``effects.modes.MODE_PARAMS``.
     """
 
-    ALBUM = "album"
-    ENERGETIC = "energetic"
-    PARTY = "party"
-    CHILL = "chill"
+    SUBTLE = "subtle"  # no dimming, colours drift slowly
+    MEDIUM = "medium"  # stays bright, some lights pulse on beats
+    HIGH = "high"  # dims to ~30%, bright bass/treble beats
+    INTENSE = "intense"  # full 0-100% dimming/brightening + shimmer
 
 
-# mode -> (colour scheme, effect mode, intensity)
-MODE_PRESETS: Final[dict[SyncMode, tuple[ColorScheme, EffectMode, float]]] = {
-    SyncMode.ALBUM: (ColorScheme.ALBUM_ART, EffectMode.SPECTRUM, 1.0),
-    SyncMode.ENERGETIC: (ColorScheme.NEON, EffectMode.PULSE, 1.1),
-    SyncMode.PARTY: (ColorScheme.PARTY, EffectMode.WAVE, 1.1),
-    SyncMode.CHILL: (ColorScheme.COOL, EffectMode.AMBIENT, 0.7),
-}
-
-DEFAULT_MODE: Final = SyncMode.ALBUM
+DEFAULT_MODE: Final = SyncMode.HIGH
+DEFAULT_COLOUR: Final = ColorScheme.ALBUM_ART
 
 PLATFORMS: Final = ["switch", "select"]
 

@@ -17,11 +17,13 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from .const import (
     CONF_APP_KEY,
     CONF_CLIENT_KEY,
+    CONF_COLOUR,
     CONF_HOST,
     CONF_MEDIA_PLAYER,
     CONF_MODE,
     DOMAIN,
     PLATFORMS,
+    ColorScheme,
     SyncMode,
 )
 from .coordinator import SyncManager
@@ -121,6 +123,8 @@ def _register_services(hass: HomeAssistant) -> None:
         changes: dict = {}
         if CONF_MODE in call.data:
             changes["mode"] = SyncMode(call.data[CONF_MODE])
+        if CONF_COLOUR in call.data:
+            changes["colour"] = ColorScheme(call.data[CONF_COLOUR])
         if CONF_MEDIA_PLAYER in call.data:
             changes["media_player"] = call.data[CONF_MEDIA_PLAYER]
         return changes
@@ -143,6 +147,7 @@ def _register_services(hass: HomeAssistant) -> None:
 
     options_fields = {
         vol.Optional(CONF_MODE): vol.In([str(m) for m in SyncMode]),
+        vol.Optional(CONF_COLOUR): vol.In([str(c) for c in ColorScheme]),
         vol.Optional(CONF_MEDIA_PLAYER): cv.entity_id,
     }
     activate_schema = vol.Schema({vol.Required(ATTR_ENTITY_ID): cv.entity_ids, **options_fields})

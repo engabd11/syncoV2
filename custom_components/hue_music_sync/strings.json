@@ -44,10 +44,22 @@
       "mode": {
         "name": "Mode",
         "state": {
-          "album": "Album colours",
-          "energetic": "Energetic",
+          "subtle": "Subtle",
+          "medium": "Medium",
+          "high": "High",
+          "intense": "Intense"
+        }
+      },
+      "colour": {
+        "name": "Colour",
+        "state": {
+          "album_art": "Album colours",
+          "warm": "Warm",
+          "cool": "Cool",
+          "neon": "Neon",
           "party": "Party",
-          "chill": "Chill"
+          "mono": "Mono",
+          "rainbow": "Rainbow"
         }
       }
     }
@@ -59,7 +71,11 @@
       "fields": {
         "mode": {
           "name": "Mode",
-          "description": "Sync mode preset to use."
+          "description": "Intensity/rhythm mode to use."
+        },
+        "colour": {
+          "name": "Colour",
+          "description": "Colour theme: album_art or a preset palette."
         },
         "media_player": {
           "name": "Media player",
@@ -77,7 +93,11 @@
       "fields": {
         "mode": {
           "name": "Mode",
-          "description": "Sync mode preset to use."
+          "description": "Intensity/rhythm mode to use."
+        },
+        "colour": {
+          "name": "Colour",
+          "description": "Colour theme: album_art or a preset palette."
         },
         "media_player": {
           "name": "Media player",

@@ -45,18 +45,26 @@ the area and the frequency band it represents.
 
 (Alternatively copy `custom_components/hue_music_sync/` into your HA `config/custom_components/` folder.)
 
-Each enabled area becomes a device with just two controls — kept deliberately
-Samsung-simple:
+Each enabled area becomes a device with just a switch and two pickers — kept
+deliberately Samsung-simple:
 
 | Entity | Purpose |
 | --- | --- |
 | `switch.music_sync_<area>` | Activate / deactivate sync |
-| `select` Mode | `Album colours`, `Energetic`, `Party`, `Chill` |
+| `select` Mode | Intensity / rhythm: `Subtle`, `Medium`, `High`, `Intense` |
+| `select` Colour | `Album colours` or a preset theme (Warm/Cool/Neon/Party/Mono/Rainbow) |
 
-Each **Mode** is a curated preset bundling a colour scheme, effect and intensity,
-so there are no individual scheme/effect/brightness knobs to fiddle with. The
-followed media player auto-detects the one that's playing (override via the
-`activate` service if needed).
+**Mode** controls only *how the lights move* — how much they dim and how hard
+they react to the beat — independent of colour:
+
+- **Subtle** — no dimming; colours just drift slowly.
+- **Medium** — stays bright; some lights pulse brighter on the beat.
+- **High** — dims no lower than ~30%, with bright bass + treble beats.
+- **Intense** — full 0–100% dimming/brightening with treble shimmer.
+
+**Colour** picks the palette independently — the current album art, or a preset
+mixed-colour theme. The followed media player auto-detects the one that's
+playing (override via the `activate` service if needed).
 
 > **One area at a time per bridge.** A Hue bridge can stream to only one
 > entertainment area at a time. Activating a second area on the same bridge
@@ -112,18 +120,12 @@ All three target the area's `switch` entity. Example — go full party on the dr
     mode: party
 ```
 
-## Modes
+## Choreography
 
-Each mode bundles a colour scheme + choreography + intensity:
-
-- **Album colours** — palette extracted from the current album art; each light
-  owns a frequency band by its position (bass lights react to bass, treble to
-  highs). The default.
-- **Energetic** — neon palette, whole-area beat pulses.
-- **Party** — full rainbow palette with a wavefront that sweeps across the area
-  on the beat.
-- **Chill** — cool palette, slow drift with gentle energy modulation; no hard
-  beats.
+Within any mode, lights are driven per-channel by **spatial position** and
+**frequency band**: lights are ordered left-to-right and mapped across the
+spectrum, so bass-side lights thump on the kick while treble-side lights react
+to highs — they don't all behave or colour the same.
 
 ## Validation spikes
 
