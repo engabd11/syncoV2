@@ -31,10 +31,9 @@ the area and the frequency band it represents.
   created in the Hue app. (The round v1 bridge does not support entertainment
   streaming.)
 - **Music Assistant** running and connected to Home Assistant.
-- Home Assistant with the bundled **ffmpeg** and **numpy** (standard on HAOS,
-  Container and Supervised installs).
-- The **`openssl`** CLI on the host running Home Assistant (present in the HAOS /
-  HA container image). Used for the DTLS channel to the bridge.
+- Home Assistant with the bundled **ffmpeg**, **numpy** and **cryptography**
+  (all standard on HAOS, Container and Supervised installs). No external `openssl`
+  binary is required — the DTLS channel is implemented in pure Python.
 
 ## Installation (HACS custom repository)
 
@@ -159,9 +158,10 @@ the analyzer's beat detection.
 - Perfect lip-sync is not possible due to player buffering — use the latency
   offset to align by ear.
 - Requires a **v2** Hue bridge; entertainment streaming is not available on v1.
-- `python-mbedtls` has no Python 3.13 wheels, so the DTLS channel uses the
-  `openssl` CLI. If `openssl` is unavailable in your environment, streaming
-  cannot start.
+- The DTLS channel is a self-contained pure-Python DTLS 1.2 PSK implementation
+  (built on the bundled `cryptography`), since `python-mbedtls` has no modern
+  wheels and the HA container ships no `openssl` CLI. It implements exactly one
+  cipher suite (`TLS_PSK_WITH_AES_128_GCM_SHA256`) — enough for the bridge.
 
 ## License
 

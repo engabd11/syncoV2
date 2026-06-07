@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import shutil
 import ssl
 
 import voluptuous as vol
@@ -62,11 +61,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN].setdefault(DATA_AREA_INDEX, {})
 
-    if shutil.which("openssl") is None:
-        _LOGGER.warning(
-            "openssl CLI not found on PATH; Hue Entertainment DTLS streaming will "
-            "fail to start until it is available"
-        )
     if "music_assistant" not in hass.config.components:
         _LOGGER.warning(
             "Music Assistant integration not detected; music sync needs it to "

@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Milestone 1 spike: prove Hue Entertainment DTLS streaming end-to-end.
 
-Self-contained (stdlib + the ``openssl`` CLI only) so it can be dropped onto the
-Home Assistant host and run without installing the integration. It exercises the
-exact transport the integration uses: pairing, CLIP v2 config discovery, the
-``{"action":"start"}`` handover, and a HueStream v2 colour cycle over DTLS.
+Exercises the exact transport the integration uses: pairing, CLIP v2 config
+discovery, the ``{"action":"start"}`` handover, and a HueStream v2 colour cycle
+over the integration's pure-Python DTLS-PSK client (``hue/dtls.py``). Pairing and
+discovery use only the stdlib; the streaming part needs ``cryptography`` (already
+present in Home Assistant, and easy to ``pip install`` on a desktop on the same
+LAN as the bridge).
 
 Usage
 -----
@@ -21,17 +23,27 @@ from __future__ import annotations
 
 import argparse
 import colorsys
+import importlib.util
 import json
+import os
 import ssl
-import subprocess
 import sys
 import time
 import urllib.request
 
-HUE_STREAM_PROTOCOL = b"HueStream"
-HUE_STREAM_VERSION = b"\x02\x00"
-CIPHER = "PSK-AES128-GCM-SHA256"
 DTLS_PORT = 2100
+
+
+def _load_dtls_client():
+    """Load DtlsPskClient straight from the integration source (no package import)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(
+        os.path.dirname(here), "custom_components", "hue_music_sync", "hue", "dtls.py"
+    )
+    spec = importlib.util.spec_from_file_location("hms_dtls", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.DtlsPskClient
 
 
 def _ctx() -> ssl.SSLContext:
@@ -51,8 +63,10 @@ def _request(method: str, url: str, *, headers=None, body=None) -> object:
 
 
 def pair(host: str) -> None:
-    url = f"https://{host}/api"
-    res = _request("POST", url, body={"devicetype": "hue_music_sync#spike", "generateclientkey": True})
+    res = _request(
+        "POST", f"https://{host}/api",
+        body={"devicetype": "hue_music_sync#spike", "generateclientkey": True},
+    )
     entry = res[0]
     if "error" in entry:
         print("ERROR:", entry["error"].get("description"), file=sys.stderr)
@@ -65,8 +79,10 @@ def pair(host: str) -> None:
 
 
 def list_configs(host: str, app_key: str) -> None:
-    url = f"https://{host}/clip/v2/resource/entertainment_configuration"
-    res = _request("GET", url, headers={"hue-application-key": app_key})
+    res = _request(
+        "GET", f"https://{host}/clip/v2/resource/entertainment_configuration",
+        headers={"hue-application-key": app_key},
+    )
     for cfg in res.get("data", []):
         name = cfg.get("metadata", {}).get("name", "?")
         n = len(cfg.get("channels", []))
@@ -74,18 +90,16 @@ def list_configs(host: str, app_key: str) -> None:
 
 
 def set_action(host: str, app_key: str, config_id: str, action: str) -> None:
-    url = f"https://{host}/clip/v2/resource/entertainment_configuration/{config_id}"
-    _request("PUT", url, headers={"hue-application-key": app_key}, body={"action": action})
+    _request(
+        "PUT", f"https://{host}/clip/v2/resource/entertainment_configuration/{config_id}",
+        headers={"hue-application-key": app_key}, body={"action": action},
+    )
 
 
 def build_frame(config_id: str, seq: int, channels) -> bytes:
-    frame = bytearray()
-    frame += HUE_STREAM_PROTOCOL
-    frame += HUE_STREAM_VERSION
+    frame = bytearray(b"HueStream" + b"\x02\x00")
     frame.append(seq & 0xFF)
-    frame += b"\x00\x00"  # reserved
-    frame.append(0x00)  # RGB colourspace
-    frame.append(0x00)  # reserved
+    frame += b"\x00\x00\x00\x00"  # reserved, RGB colourspace, reserved
     frame += config_id.encode("ascii")
     for cid, r, g, b in channels:
         frame.append(cid & 0xFF)
@@ -96,27 +110,23 @@ def build_frame(config_id: str, seq: int, channels) -> bytes:
 
 
 def run_cycle(host: str, app_key: str, client_key: str, config_id: str, seconds: float) -> None:
-    # Discover channel ids.
-    url = f"https://{host}/clip/v2/resource/entertainment_configuration/{config_id}"
-    res = _request("GET", url, headers={"hue-application-key": app_key})
-    cfg = res["data"][0]
-    channel_ids = [ch["channel_id"] for ch in cfg["channels"]]
+    DtlsPskClient = _load_dtls_client()
+
+    res = _request(
+        "GET", f"https://{host}/clip/v2/resource/entertainment_configuration/{config_id}",
+        headers={"hue-application-key": app_key},
+    )
+    channel_ids = [ch["channel_id"] for ch in res["data"][0]["channels"]]
     print(f"Streaming to {len(channel_ids)} channels: {channel_ids}")
 
     set_action(host, app_key, config_id, "start")
     time.sleep(0.3)
 
-    proc = subprocess.Popen(
-        [
-            "openssl", "s_client", "-dtls1_2", "-cipher", CIPHER,
-            "-psk_identity", app_key, "-psk", client_key,
-            "-connect", f"{host}:{DTLS_PORT}", "-quiet",
-        ],
-        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-    )
-    time.sleep(1.5)
-    if proc.poll() is not None:
-        err = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
+    client = DtlsPskClient(host, DTLS_PORT, app_key.encode(), bytes.fromhex(client_key))
+    print("Performing DTLS handshake...")
+    try:
+        client.connect()
+    except Exception as err:  # noqa: BLE001
         print("DTLS handshake failed:", err, file=sys.stderr)
         set_action(host, app_key, config_id, "stop")
         sys.exit(1)
@@ -128,24 +138,19 @@ def run_cycle(host: str, app_key: str, client_key: str, config_id: str, seconds:
     try:
         while time.monotonic() - start < seconds:
             t = time.monotonic() - start
-            beat = 0.5 + 0.5 * abs((t * 2) % 2 - 1)  # triangle pulse ~1Hz
+            beat = 0.5 + 0.5 * abs((t * 2) % 2 - 1)
             channels = []
             for i, cid in enumerate(channel_ids):
                 hue = ((t * 0.1) + i / max(1, len(channel_ids))) % 1.0
                 r, g, b = colorsys.hsv_to_rgb(hue, 1.0, beat)
                 channels.append((cid, r, g, b))
             seq = (seq + 1) & 0xFF
-            proc.stdin.write(build_frame(config_id, seq, channels))
-            proc.stdin.flush()
+            client.send(build_frame(config_id, seq, channels))
             time.sleep(1 / fps)
     except KeyboardInterrupt:
         pass
     finally:
-        try:
-            proc.stdin.close()
-            proc.terminate()
-        except Exception:
-            pass
+        client.close()
         set_action(host, app_key, config_id, "stop")
         print("Stopped. Lights should restore to their previous state.")
 
@@ -163,15 +168,14 @@ def main() -> None:
 
     if a.pair:
         pair(a.host)
-        return
-    if a.list:
+    elif a.list:
         if not a.app_key:
             p.error("--list requires --app-key")
         list_configs(a.host, a.app_key)
-        return
-    if not (a.app_key and a.client_key and a.config_id):
+    elif a.app_key and a.client_key and a.config_id:
+        run_cycle(a.host, a.app_key, a.client_key, a.config_id, a.seconds)
+    else:
         p.error("streaming requires --app-key, --client-key and --config-id")
-    run_cycle(a.host, a.app_key, a.client_key, a.config_id, a.seconds)
 
 
 if __name__ == "__main__":
