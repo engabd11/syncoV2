@@ -25,6 +25,7 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 
 from ..const import ANALYSIS_HOP, ANALYSIS_SAMPLE_RATE
+from .analyzer import AnalysisFrame, Analyzer
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -138,6 +139,7 @@ class MusicAssistantSource:
         self._last_resync_check = 0.0
         self._mass_cache = None
         self._mass_cache_ts = 0.0
+        self._analyzer = Analyzer()
 
     @property
     def album_art_url(self) -> str | None:
@@ -146,6 +148,13 @@ class MusicAssistantSource:
     @property
     def track_id(self) -> str | None:
         return self._track_id
+
+    async def read_frame(self) -> AnalysisFrame | None:
+        """Read the next paced hop and turn it into analysis features."""
+        hop = await self.read_hop()
+        if hop is None:
+            return None
+        return self._analyzer.push(hop)
 
     def _mass_player_id(self) -> str | None:
         """The MA player id is the HA entity's unique id."""
@@ -313,11 +322,29 @@ class MusicAssistantSource:
         return f"{base.rstrip('/')}{path}" if base else path
 
     async def open(self) -> bool:
-        """Resolve and start decoding the current track. Returns success."""
+        """Resolve, start decoding, and confirm real audio actually flows.
+
+        Returning False (no URL, or the URL won't decode) lets the coordinator
+        fall back to the metadata source.
+        """
         info = self._resolve()
         if info is None:
             return False
         await self._begin(info)
+        # Verify audio is actually decodable before committing to this source.
+        try:
+            first = await asyncio.wait_for(self._decoder.read_hop(), timeout=5.0)
+        except asyncio.TimeoutError:
+            first = None
+        if first is None:
+            _LOGGER.warning(
+                "[%s] resolved a stream but no audio decoded; falling back",
+                self._entity_id,
+            )
+            await self._decoder.stop()
+            return False
+        self._analyzer.push(first)
+        self._frames_emitted += 1
         return True
 
     async def _begin(self, info: TrackInfo) -> None:
@@ -329,6 +356,7 @@ class MusicAssistantSource:
         self._frames_emitted = 0
         self._wall0 = time.monotonic()
         self._last_resync_check = self._wall0
+        self._analyzer.reset()
         await self._decoder.start(info.stream_url, start)
         _LOGGER.info(
             "Music sync tapping %s audio: %s (from %.1fs)",

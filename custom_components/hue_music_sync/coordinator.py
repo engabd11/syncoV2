@@ -20,7 +20,8 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
-from .audio.analyzer import AnalysisFrame, Analyzer
+from .audio.analyzer import AnalysisFrame
+from .audio.metadata import MetadataSource
 from .audio.source import MusicAssistantSource
 from .color.album_art import extract_palette
 from .const import (
@@ -114,8 +115,7 @@ class SyncSession:
         self._encoder = HueStreamEncoder(config.id)
         self._stream = DtlsStream(host, app_key, client_key)
         self._engine = EffectEngine(config.channels)
-        self._analyzer = Analyzer()
-        self._source: MusicAssistantSource | None = None
+        self._source: MusicAssistantSource | MetadataSource | None = None
         self._task: asyncio.Task | None = None
         self._running = False
         self._stopping = False
@@ -192,15 +192,24 @@ class SyncSession:
         entity_id = self._resolve_player()
         if entity_id is None:
             return False
-        self._source = MusicAssistantSource(
+        # Prefer the real Music Assistant audio tap; fall back to metadata-driven
+        # animation when no decodable stream is available for this player.
+        ma = MusicAssistantSource(
             self._hass, entity_id, self._ffmpeg, self._settings.latency_ms
         )
-        if not await self._source.open():
-            await self._source.close()
-            self._source = None
-            return False
-        self._analyzer.reset()
-        return True
+        if await ma.open():
+            self._source = ma
+            return True
+        await ma.close()
+
+        meta = MetadataSource(self._hass, entity_id)
+        if await meta.open():
+            _LOGGER.info(
+                "No tappable audio for %s; using metadata-driven sync", entity_id
+            )
+            self._source = meta
+            return True
+        return False
 
     async def _run(self) -> None:
         idle_color_phase = 0.0
@@ -223,13 +232,12 @@ class SyncSession:
                         await asyncio.sleep(1.0 / _IDLE_FPS)
                         continue
 
-                hop = await self._source.read_hop()  # paced to real time
-                if hop is None:
+                frame = await self._source.read_frame()  # paced to real time
+                if frame is None:
                     await self._reset_source()
                     continue
 
                 self._maybe_refresh_album_art()
-                frame = self._analyzer.push(hop)
                 colors = self._engine.render(frame, period)
                 await self._safe_send(colors)
         except asyncio.CancelledError:
