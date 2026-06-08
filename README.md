@@ -1,11 +1,10 @@
 # Hue Music Sync for Home Assistant
 
-A custom Home Assistant integration that syncs **Philips Hue Entertainment areas**
-to music played through **Music Assistant**, a self-hosted replacement for
-Samsung's Hue music sync. It streams colour directly to the bridge over the
-Hue Entertainment API (~40 Hz over DTLS), reacts to the beat and frequency
-content of the audio, and lights each bulb based on its position in the area
-and the frequency band it represents.
+Syncs **Philips Hue Entertainment areas** to music played through **Music Assistant**.
+Streams colour directly to the bridge over the Hue Entertainment API
+(~40 Hz over DTLS). Reacts to the beat and frequency content of the audio,
+lighting each bulb based on its position in the area and the frequency band
+it represents.
 
 Manage and arrange the lights inside an entertainment area in the **Hue app**.
 This integration consumes the areas that already exist and drives them.
@@ -15,7 +14,7 @@ This integration consumes the areas that already exist and drives them.
 - **Direct Hue Entertainment streaming** over DTLS for low-latency, high-rate
   updates (~40 Hz), bypassing normal Zigbee light commands.
 - **Real-time beat and frequency analysis** from your Snapcast server or Music
-  Assistant stream — no microphone required.
+  Assistant stream; no microphone required.
 - **Non-uniform choreography**: bass lights thump on the kick, treble lights
   shimmer, colours spread spatially across the area.
 - **Beat-driven colour shifts**: the palette steps forward on every kick so the
@@ -69,7 +68,7 @@ Each enabled area becomes a device with the following controls:
 | `number` Brightness | Master brightness ceiling (5–100%) |
 | `number` Timing offset | Nudge the lights earlier or later (ms) to align with the sound |
 
-**Intensity** controls only how the lights move — their dimming range and beat
+**Intensity** controls only how the lights move: their dimming range and beat
 reactivity relative to the brightness ceiling:
 
 - **Subtle**: no dimming; colours drift slowly.
@@ -131,7 +130,7 @@ fades don't step at the low end.
 3. Adjust the **Timing offset** so the flashes line up with the sound; speaker
    buffering always introduces some delay.
 
-Example automation — start sync when Music Assistant begins playing:
+Example automation to start sync when Music Assistant begins playing:
 
 ```yaml
 automation:
@@ -157,7 +156,7 @@ automation:
 | `hue_music_sync.deactivate` | Stop sync for the targeted area(s) |
 | `hue_music_sync.set_options` | Change `mode`, `effect`, `colour`, `brightness`, or `media_player` live, without restarting sync |
 
-All three target the area's `switch` entity. Example — go full Intense on the drop:
+All three target the area's `switch` entity. Example: go full Intense on the drop:
 
 ```yaml
 - service: hue_music_sync.set_options
@@ -182,8 +181,8 @@ Two self-contained scripts under `scripts/` let you verify the moving parts on
 your own host before using the integration:
 
 - `python scripts/spike_dtls.py --host <bridge-ip> --pair` then `--list` then a
-  colour-cycle run — proves the Hue Entertainment DTLS transport works.
-- `python scripts/spike_ma.py --url <stream-or-file>` — decodes audio with
+  colour-cycle run; proves the Hue Entertainment DTLS transport works.
+- `python scripts/spike_ma.py --url <stream-or-file>`; decodes audio with
   ffmpeg and runs the real analyzer, printing beats, tempo, and per-band levels.
 
 ## How it works
