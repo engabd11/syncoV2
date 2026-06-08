@@ -15,6 +15,7 @@ from ..hue.bridge import EntertainmentChannel
 from .fireworks import FireworksEffect
 from .modes import (
     MODE_PARAMS,
+    MOVIE_PARAMS,
     band_for_rank,
     beat_colour_advance,
     beat_flash,
@@ -77,6 +78,15 @@ class EffectEngine:
         """Master brightness ceiling (0..1), scaling the mode's output."""
         self.brightness = max(0.0, min(1.0, brightness))
 
+    @property
+    def active_params(self):
+        """Render params for the current effect.
+
+        The Movies effect uses its own calm preset regardless of the selected
+        intensity; every other effect uses the chosen intensity's params.
+        """
+        return MOVIE_PARAMS if self.effect is SyncEffect.MOVIES else self.params
+
     def render_idle(self, phase: float, level: float = 0.12) -> dict[int, RGB]:
         """A gentle, mode-independent palette glow for paused/idle state."""
         dim = level * self.brightness
@@ -95,30 +105,31 @@ class EffectEngine:
         if self.effect is SyncEffect.FIREWORKS:
             # Fireworks owns its own per-light snap/fade, so it bypasses the music
             # smoothing pipeline; it still advances colour_phase for its ember glow.
-            self.colour_phase += self.params.colour_speed * dt
+            self.colour_phase += self.active_params.colour_speed * dt
             return self._fireworks.render(self, frame, dt)
         return self._render_music(frame, dt)
 
     def _render_music(self, frame: AnalysisFrame, dt: float) -> dict[int, RGB]:
-        """Smoothed beat/frequency choreography (the default effect).
+        """Smoothed beat/frequency choreography (Music and Movies effects).
 
         Colour (full-value chromaticity) and brightness are smoothed separately;
         the colour is renormalised to max-channel 1 so brightness is carried
         purely by ``new_b``. That keeps mode floors honest (the encoder reads
         brightness as the max channel) even mid colour-transition.
         """
+        p = self.active_params
         # Advance the palette position: a slow continuous drift plus a step on
         # every beat so the colour visibly moves with the music.
-        self.colour_phase += self.params.colour_speed * dt
+        self.colour_phase += p.colour_speed * dt
         if frame.beat:
-            self.colour_phase += beat_colour_advance(self.params, frame)
+            self.colour_phase += beat_colour_advance(p, frame)
         # Beat-flash overlay: snaps to full on a qualifying beat, then decays
         # fast — independent of the slower continuous-brightness smoothing.
-        self._flash = max(self._flash * _FLASH_DECAY, beat_flash(self.params, frame))
+        self._flash = max(self._flash * _FLASH_DECAY, beat_flash(p, frame))
         targets = render(self, frame)
 
-        colour_lerp = self.params.colour_lerp
-        attack, decay = self.params.bri_attack, self.params.bri_decay
+        colour_lerp = p.colour_lerp
+        attack, decay = p.bri_attack, p.bri_decay
         out: dict[int, RGB] = {}
         for cid, (target_color, target_b) in targets.items():
             prev_color, prev_b = self._state[cid]
@@ -133,7 +144,7 @@ class EffectEngine:
             nc = (blended[0] / m, blended[1] / m, blended[2] / m) if m > 1e-6 else (0.0, 0.0, 0.0)
             self._state[cid] = (nc, new_b)
             # Soften colours toward white per the mode (keeps max channel = 1).
-            sat = self.params.colour_sat
+            sat = p.colour_sat
             if sat < 1.0:
                 nc = (nc[0] * sat + (1.0 - sat), nc[1] * sat + (1.0 - sat), nc[2] * sat + (1.0 - sat))
             # Continuous brightness + sharp flash, then master-brightness scaling.

@@ -19,15 +19,15 @@ activate:
             - medium
             - high
             - intense
-            - movie
     effect:
       name: Effect
-      description: Renderer/effect style — music choreography or fireworks.
+      description: Renderer/effect style — music, movies or fireworks.
       required: false
       selector:
         select:
           options:
             - music
+            - movies
             - fireworks
     colour:
       name: Colour
@@ -95,15 +95,15 @@ set_options:
             - medium
             - high
             - intense
-            - movie
     effect:
       name: Effect
-      description: Renderer/effect style — music choreography or fireworks.
+      description: Renderer/effect style — music, movies or fireworks.
       required: false
       selector:
         select:
           options:
             - music
+            - movies
             - fireworks
     colour:
       name: Colour

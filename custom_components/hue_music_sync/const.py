@@ -90,7 +90,6 @@ class SyncMode(StrEnum):
     MEDIUM = "medium"  # stays bright, some lights pulse on beats
     HIGH = "high"  # dims to ~30%, bright bass/treble beats
     INTENSE = "intense"  # full 0-100% dimming/brightening + shimmer
-    MOVIE = "movie"  # calm, non-distracting: brightness follows the soundtrack
 
 
 class SyncEffect(StrEnum):
@@ -102,6 +101,7 @@ class SyncEffect(StrEnum):
     """
 
     MUSIC = "music"  # default beat/frequency choreography
+    MOVIES = "movies"  # calm, non-distracting: brightness follows the soundtrack
     FIREWORKS = "fireworks"  # bursts ignite on big beats and fade out
 
 

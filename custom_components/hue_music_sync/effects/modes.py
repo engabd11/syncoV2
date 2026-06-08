@@ -64,19 +64,21 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         spread=0.12, colour_speed=0.05, shimmer=0.2, colour_sat=0.5,
         colour_beat_step=0.034, colour_lerp=0.30,
     ),
-    # Ambient "movie" sync: deliberately calm so it never pulls your eye from the
-    # screen. Brightness gently follows the soundtrack's overall loudness (no
-    # beat flashes, no shimmer), colour drifts slowly through the movie's artwork
-    # palette, softened toward white. Brightness eases slowly both ways so even
-    # explosions swell rather than strobe. Pair with the "Album colours" theme
-    # (the default) to pull colours from the movie's poster/artwork.
-    SyncMode.MOVIE: ModeParams(
-        base=0.28, floor=0.16, bass_gain=0.0, beat_gain=0.0, beat_threshold=99.0,
-        spread=0.0, colour_speed=0.012, shimmer=0.0, colour_sat=0.6,
-        colour_beat_step=0.0, colour_lerp=0.05, energy_gain=0.5,
-        bri_attack=0.16, bri_decay=0.07,
-    ),
 }
+
+
+# Parameters for the Movies *effect* (not part of the intensity ladder).
+# Deliberately calm so it never pulls your eye from the screen: brightness gently
+# follows the soundtrack's overall loudness (no beat flashes, no shimmer), colour
+# drifts slowly through the artwork palette, softened toward white, and eases
+# slowly both ways so even explosions swell rather than strobe. Pair with the
+# "Album colours" theme (the default) to pull colours from the film's artwork.
+MOVIE_PARAMS = ModeParams(
+    base=0.28, floor=0.16, bass_gain=0.0, beat_gain=0.0, beat_threshold=99.0,
+    spread=0.0, colour_speed=0.012, shimmer=0.0, colour_sat=0.6,
+    colour_beat_step=0.0, colour_lerp=0.05, energy_gain=0.5,
+    bri_attack=0.16, bri_decay=0.07,
+)
 
 
 _BAND_ORDER = ["sub_bass", "bass", "low_mid", "mid", "high"]
@@ -128,7 +130,7 @@ def beat_flash(params: ModeParams, frame) -> float:
 
 def render(engine, frame) -> dict[int, tuple[RGB, float]]:
     """Per-channel (colour, continuous brightness) — no beat flash (added later)."""
-    p: ModeParams = engine.params
+    p: ModeParams = engine.active_params
     t = engine.time
     bass = max(frame.bands.get("sub_bass", 0.0), frame.bands.get("bass", 0.0))
     treble = frame.bands.get("high", 0.0)

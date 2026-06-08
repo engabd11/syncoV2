@@ -24,10 +24,10 @@ the area and the frequency band it represents.
   album cover**, a full-spectrum **Rainbow**, plus Sunset / Ocean / Forest /
   Lavender / Ember / Aurora and the Philips Hue signature scenes (Tropical /
   Savanna / Blossom / Honolulu / Galaxy).
-- **Effects** beyond the music choreography: **Fireworks** (bursts ignite on big
-  beats and fade out in the palette colours).
-- **Movie mode** — a calm, non-distracting preset whose brightness follows the
-  soundtrack and whose colour comes from the film's artwork.
+- **Effects** beyond the music choreography: **Movies** (a calm, non-distracting
+  renderer whose brightness follows the soundtrack and whose colour comes from the
+  film's artwork) and **Fireworks** (bursts ignite on big beats and fade out in
+  the palette colours).
 - **Self-healing** — a dropped DTLS channel auto-reconnects with backoff instead
   of silently stopping.
 - Per-area **switch** to activate/deactivate, plus **select/number** entities for
@@ -63,8 +63,8 @@ matching Samsung's model:
 | Entity | Purpose |
 | --- | --- |
 | `switch.music_sync_<area>` | Activate / deactivate sync |
-| `select` Intensity | How the lights *behave*: `Subtle`, `Medium`, `High`, `Intense`, `Movie` |
-| `select` Effect | The renderer style: `Music` (default) or `Fireworks` |
+| `select` Intensity | How the lights *behave*: `Subtle`, `Medium`, `High`, `Intense` |
+| `select` Effect | The renderer style: `Music` (default), `Movies` or `Fireworks` |
 | `select` Colour | `Album colours`, `Rainbow`, or a preset theme (Sunset/Ocean/Forest/Lavender/Ember/Aurora + Hue scenes) |
 | `number` Brightness | Master brightness ceiling (5–100%), separate from intensity |
 | `number` Timing offset | Nudge the lights earlier/later (ms) to line up with the sound |
@@ -76,26 +76,26 @@ hard they react to the beat — relative to the brightness ceiling:
 - **Medium** — stays bright; some lights pulse brighter on the beat.
 - **High** — dims no lower than ~30% of the ceiling, with bright bass + treble beats.
 - **Intense** — full dimming/brightening across the whole range, with treble shimmer.
-- **Movie** — calm and non-distracting: brightness gently follows the soundtrack's
-  loudness (no flashes), colours drift slowly through the artwork. See
-  [Movie mode](#movie-mode).
 
 **Brightness** sets the overall ceiling; intensity varies brightness below it.
 At Subtle, brightness is simply the steady level.
 
 **Effect** swaps the whole renderer while still drawing colours from the selected
-palette: **Music** is the default beat/frequency choreography; **Fireworks** keeps
-the area dark and ignites random bursts on the big beats that fade out in the
-palette's colours (more/faster bursts at higher intensities).
+palette: **Music** is the default beat/frequency choreography; **Movies** is a calm
+soundtrack-following backlight (see [Movies effect](#movies-effect)); **Fireworks**
+keeps the area dark and ignites random bursts on the big beats that fade out in the
+palette's colours (more/faster bursts at higher intensities). The intensity level
+applies to Music and Fireworks; Movies stays gentle regardless (use the Brightness
+slider to set its level).
 
 **Colour** picks the palette independently — the current album art, the
 full-spectrum Rainbow (which steps hue on the beat), or a smooth, easy-on-the-eyes
 preset theme. The followed media player auto-detects the one that's playing
 (override via the `activate` service if needed).
 
-### Movie mode
+### Movies effect
 
-Set **Intensity = Movie** with **Colour = Album colours** for an ambient backlight
+Set **Effect = Movies** with **Colour = Album colours** for an ambient backlight
 that won't pull your eye from the screen:
 
 - **Brightness follows the soundtrack's overall loudness** — loud scenes swell,

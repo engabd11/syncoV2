@@ -49,14 +49,14 @@
           "subtle": "Subtle",
           "medium": "Medium",
           "high": "High",
-          "intense": "Intense",
-          "movie": "Movie"
+          "intense": "Intense"
         }
       },
       "effect": {
         "name": "Effect",
         "state": {
           "music": "Music",
+          "movies": "Movies",
           "fireworks": "Fireworks"
         }
       },
@@ -99,7 +99,7 @@
         },
         "effect": {
           "name": "Effect",
-          "description": "Renderer/effect style: music or fireworks."
+          "description": "Renderer/effect style: music, movies or fireworks."
         },
         "colour": {
           "name": "Colour",
@@ -129,7 +129,7 @@
         },
         "effect": {
           "name": "Effect",
-          "description": "Renderer/effect style: music or fireworks."
+          "description": "Renderer/effect style: music, movies or fireworks."
         },
         "colour": {
           "name": "Colour",

@@ -172,7 +172,7 @@ def test_movie_mode_brightness_follows_loudness():
         )
 
     eng = EffectEngine(_channels())
-    eng.set_mode(SyncMode.MOVIE)
+    eng.set_effect(SyncEffect.MOVIES)
     for _ in range(150):  # let the slow easing settle on a loud passage
         out = eng.render(energy_frame(0.9), 0.025)
     loud = max(max(c) for c in out.values())
@@ -183,9 +183,9 @@ def test_movie_mode_brightness_follows_loudness():
 
 
 def test_movie_mode_does_not_flash_on_beats():
-    # A strong beat must not produce a flash in Movie mode (calm, eye-friendly).
+    # A strong beat must not produce a flash in Movies effect (calm, eye-friendly).
     eng = EffectEngine(_channels())
-    eng.set_mode(SyncMode.MOVIE)
+    eng.set_effect(SyncEffect.MOVIES)
     out = eng.render(
         AnalysisFrame(
             bands={"sub_bass": 1.0, "bass": 1.0}, energy=0.3,
