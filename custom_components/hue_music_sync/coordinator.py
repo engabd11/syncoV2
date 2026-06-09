@@ -421,12 +421,15 @@ class SyncSession:
         track = self._source.track_id
         if track == self._last_track:
             return
-        self._last_track = track
-        url = self._source.album_art_url
-        if not url:
-            return
+        # A previous extraction is still running: retry next loop. Crucially we do
+        # NOT mark this track handled yet, or a transient state would skip it.
         if self._art_task and not self._art_task.done():
             return
+        url = self._source.album_art_url
+        if not url:
+            return  # artwork URL not populated for the new track yet; retry later
+        # Only now claim the track as handled, since we're actually extracting it.
+        self._last_track = track
         self._art_task = self._hass.async_create_task(self._extract_art(url))
 
     async def _extract_art(self, url: str) -> None:

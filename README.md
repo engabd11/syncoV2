@@ -30,11 +30,12 @@ This integration consumes the areas that already exist and drives them.
 - **Beat-driven colour shifts**: the palette steps forward on every kick so the
   colour visibly grooves with the music instead of drifting on a timer.
 - **13 colour schemes**: a vivid palette **extracted from the current album
-  cover** (perceptual CIELAB clustering that rejects the grey/black background,
-  ranks colours by vividness rather than raw size, and orders them for a smooth
-  hue drift), a full-spectrum Rainbow, and 11 preset themes (Sunset, Ocean,
-  Forest, Lavender, Ember, Aurora, plus the Philips Hue signature scenes:
-  Tropical, Savanna, Blossom, Honolulu, Galaxy).
+  cover** (perceptual CIELAB clustering that rejects the grey/black background
+  and ranks colours by vividness rather than raw size, using only colours
+  actually in the cover and ordering them for a smooth hue drift), a full-spectrum
+  Rainbow, and 11 preset themes (Sunset, Ocean, Forest, Lavender, Ember, Aurora,
+  plus the Philips Hue signature scenes: Tropical, Savanna, Blossom, Honolulu,
+  Galaxy).
 - **Three effects**: Music (beat/frequency choreography), Movies (calm
   soundtrack-following backlight whose brightness tracks the audio and colour
   comes from the film's artwork), and Fireworks (bursts ignite on big beats and
@@ -114,7 +115,7 @@ Each enabled area becomes a device with the following controls:
 | Entity | Purpose |
 | --- | --- |
 | `switch.music_sync_<area>` | Activate / deactivate sync |
-| `select` Intensity | How the lights behave: `Subtle`, `Medium`, `High`, `Intense` |
+| `select` Intensity | How the lights behave: `Subtle`, `Medium`, `High`, `Intense`, `Extreme` |
 | `select` Effect | Renderer style: `Music`, `Movies`, `Fireworks` |
 | `select` Colour | `Album colours`, `Rainbow`, or a preset theme |
 | `number` Brightness | Master brightness ceiling (5–100%) |
@@ -123,11 +124,17 @@ Each enabled area becomes a device with the following controls:
 **Intensity** controls only how the lights move: their dimming range and beat
 reactivity relative to the brightness ceiling:
 
-- **Subtle**: no dimming; colours drift slowly.
-- **Medium**: stays bright; some lights pulse on the beat.
-- **High**: dims to ~30% of the ceiling, with bright bass and treble beats.
-- **Intense**: full dimming/brightening across the whole range, with treble
-  shimmer.
+- **Subtle**: seamless. The lights hold a steady, bright level and just let the
+  colour flow and shift smoothly across the room; no flashing, no beat stepping.
+- **Medium**: gentle. Stays bright and sways softly with the music, colour
+  drifting with a small nudge on each beat; still no flashing or wavefronts.
+- **High**: dims to ~30% of the ceiling; the kick sweeps the room as a wavefront.
+- **Intense**: full dimming/brightening across the whole range, strong wavefronts
+  and treble shimmer.
+- **Extreme**: the maximum, club-style. Near-black (~1%) between beats, snapping
+  to full on the kick with fast, hard wavefronts (still held under the flash
+  limit by the eye-safety stage, since the wavefronts spread the energy across
+  the room rather than flashing it all at once).
 
 **Brightness** sets the overall ceiling; intensity varies brightness below it.
 At Subtle, brightness is simply the steady level.

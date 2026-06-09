@@ -46,22 +46,23 @@ class ModeParams:
 
 
 MODE_PARAMS: dict[SyncMode, ModeParams] = {
-    # Stays bright and colourful, but gently sways with the music + colour drift.
-    # Colour glides on a slow timer with only a tiny nudge per beat.
+    # Seamless: lights hold a steady, bright level and simply let the colour flow
+    # and shift smoothly across the room. No beat flashes and no stepping — only a
+    # continuous colour drift plus a very gentle, heavily-eased breath with the
+    # music's energy. The calmest preset.
     SyncMode.SUBTLE: ModeParams(
-        base=0.82, floor=0.62, bass_gain=0.18, beat_gain=0.0, beat_threshold=9.0,
-        spread=0.05, colour_speed=0.025, shimmer=0.0, colour_sat=1.0,
-        colour_beat_step=0.004, colour_lerp=0.08,
+        base=0.80, floor=0.72, bass_gain=0.10, beat_gain=0.0, beat_threshold=99.0,
+        spread=0.0, colour_speed=0.03, shimmer=0.0, colour_sat=1.0,
+        colour_beat_step=0.0, colour_lerp=0.05, bri_attack=0.12, bri_decay=0.08,
     ),
-    # Like Intense but lighter: brighter baseline, gentler pulses on most beats,
-    # more colour. Colour clearly steps forward on the beat. Beats sweep the room
-    # as a soft wavefront rather than flashing every lamp together.
+    # Gentle: stays bright and colourful and sways softly with the music, with a
+    # slow colour drift nudged a touch on each beat. The brightness sway is eased
+    # smoothly both ways so it breathes rather than pulses — no flashing and no
+    # wavefronts, a relaxed glow one notch livelier than Subtle.
     SyncMode.MEDIUM: ModeParams(
-        base=0.22, floor=0.14, bass_gain=0.28, beat_gain=0.55, beat_threshold=1.1,
-        spread=0.15, colour_speed=0.04, shimmer=0.10, colour_sat=0.8,
-        colour_beat_step=0.018, colour_lerp=0.18,
-        wave_gain=0.35, wave_speed=1.6, wave_width=0.40, height_freq=0.30,
-        depth_wash=0.18, anticipation_ms=60, drop_boost=0.20, build_desat=0.30,
+        base=0.80, floor=0.66, bass_gain=0.18, beat_gain=0.0, beat_threshold=9.0,
+        spread=0.05, colour_speed=0.025, shimmer=0.0, colour_sat=1.0,
+        colour_beat_step=0.004, colour_lerp=0.08, bri_attack=0.30, bri_decay=0.12,
     ),
     # "Heavy": immersive Intense-style, but the beat travels as a wavefront
     # (eye-friendly spatial distribution rather than synchronous strobing) over a
@@ -83,6 +84,17 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         colour_beat_step=0.034, colour_lerp=0.30,
         wave_gain=0.85, wave_speed=2.2, wave_width=0.30, height_freq=0.50,
         depth_wash=0.10, anticipation_ms=80, drop_boost=0.50, build_desat=0.50,
+    ),
+    # Club: the maximum. Near-black (~1%) between beats, snapping to full on the
+    # kick with fast, hard wavefronts sweeping the room, treble shimmer and colour
+    # jumping hard per beat. Still bounded by the non-bypassable flash limiter (the
+    # spatial wavefronts distribute the energy so it stays under the WCAG ceiling).
+    SyncMode.EXTREME: ModeParams(
+        base=0.05, floor=0.01, bass_gain=0.10, beat_gain=1.0, beat_threshold=1.3,
+        spread=0.12, colour_speed=0.06, shimmer=0.30, colour_sat=0.45,
+        colour_beat_step=0.040, colour_lerp=0.38,
+        wave_gain=1.0, wave_speed=2.6, wave_width=0.26, height_freq=0.60,
+        depth_wash=0.08, anticipation_ms=85, drop_boost=0.70, build_desat=0.60,
     ),
 }
 

@@ -37,8 +37,12 @@ from .palette import RGB, Palette
 _LOGGER = logging.getLogger(__name__)
 
 _THUMB = 64  # decode artwork to THUMB x THUMB before clustering
-_SAT_FLOOR = 0.5  # minimum output saturation so bulbs stay vivid
+_SAT_FLOOR = 0.40  # minimum output saturation so bulbs stay vivid (kept gentle so
+# a muted cover doesn't get pushed into a colour it doesn't actually contain)
 _HUE_MIN_SEP = 0.055  # ~20 deg: reject near-duplicate hues in the palette
+# Soft warm white for covers with no real colour (black & white art) — nothing to
+# be faithful to, so a neutral candle white reads better than an invented hue.
+_NEUTRAL = (1.0, 0.86, 0.70)
 
 
 def _rgb_to_hsv_components(rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -97,25 +101,20 @@ def _hue_distance(a: float, b: float) -> float:
     return min(d, 1.0 - d)
 
 
-def _analogous_spread(h: float, s: float, n: int) -> list[RGB]:
-    """A tasteful analogous spread around a single dominant hue.
+def _low_colour_fallback(pixels: np.ndarray) -> list[RGB]:
+    """Faithful fallback for covers with almost no colour.
 
-    Used when a cover is effectively one colour (greyscale, or a vivid but
-    single-hue cover) so the lights still have related hues to drift through
-    instead of sitting on one flat colour.
+    Returns the cover's single dominant *actual* hue (from whatever colourful
+    pixels exist), or a neutral warm white for genuinely black-and-white art.
+    Deliberately does NOT invent extra hues — a near-monochrome cover should
+    drive a near-monochrome show, not a fabricated rainbow.
     """
-    s = max(s, _SAT_FLOOR)
-    out: list[RGB] = []
-    for i in range(max(1, n)):
-        hh = (h + (i - (n - 1) / 2.0) * 0.05) % 1.0  # +/- a few degrees
-        out.append(colorsys.hsv_to_rgb(hh, s, 1.0))
-    return out
-
-
-def _monochrome_fallback(rgb: np.ndarray, n: int) -> list[RGB]:
-    """Analogous spread around the cover's dominant hue (greyscale covers)."""
-    h, s, _ = colorsys.rgb_to_hsv(*rgb.mean(axis=0))
-    return _analogous_spread(h, s, n)
+    _, sat, _luma = _rgb_to_hsv_components(pixels)
+    colourful = pixels[sat >= 0.12]
+    if colourful.shape[0] >= 4:
+        h, s, _v = colorsys.rgb_to_hsv(*colourful.mean(axis=0))
+        return [colorsys.hsv_to_rgb(h, max(s, _SAT_FLOOR), 1.0)]
+    return [_NEUTRAL]
 
 
 def _kmeans_palette(pixels: np.ndarray, k: int = 5) -> list[RGB]:
@@ -130,11 +129,11 @@ def _kmeans_palette(pixels: np.ndarray, k: int = 5) -> list[RGB]:
     keep = (sat >= 0.12) & (luma >= 0.06) & (luma <= 0.97)
     vivid = pixels[keep]
     # If almost nothing colourful survives, the cover is effectively monochrome.
-    if vivid.shape[0] < max(8, int(0.04 * pixels.shape[0])):
-        return _monochrome_fallback(pixels, k)
+    if vivid.shape[0] < max(6, int(0.02 * pixels.shape[0])):
+        return _low_colour_fallback(pixels)
 
     lab = _rgb_to_lab(vivid)
-    n_clusters = min(12, vivid.shape[0], max(2 * k, 8))
+    n_clusters = min(14, vivid.shape[0], max(2 * k, 8))
     labels = _kmeans(lab, n_clusters)
 
     clusters: list[tuple[float, float, float, float]] = []  # (score, h, s, v)
@@ -161,12 +160,9 @@ def _kmeans_palette(pixels: np.ndarray, k: int = 5) -> list[RGB]:
     if not picked:
         picked = [(clusters[0][1], clusters[0][2], clusters[0][3])]
 
-    # A near-single-hue cover (vivid but one colour) reads better as an analogous
-    # spread than one flat colour, so the lights have related hues to drift over.
-    if len(picked) <= 1:
-        h, s, _v = picked[0]
-        return _analogous_spread(h, s, k)
-
+    # Return only the real colours found — never invent hues that aren't on the
+    # cover. A cover with one dominant colour yields a one-colour palette; the
+    # show is faithful even if that means fewer colours.
     # Order by hue so the cyclic gradient drifts smoothly between related hues.
     picked.sort(key=lambda t: t[0])
     return [colorsys.hsv_to_rgb(h, max(s, _SAT_FLOOR), 1.0) for h, s, _v in picked]

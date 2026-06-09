@@ -132,7 +132,16 @@ class SnapcastSource:
         if st is None:
             return
         attrs = st.attributes
-        self._track_id = attrs.get("media_content_id") or attrs.get("media_title")
+        # Build a track id that reliably changes per song. Some Music Assistant
+        # players keep media_content_id constant across tracks (a continuous flow
+        # stream), so fold in title + artist; otherwise the album-art colours
+        # would never refresh until sync was restarted.
+        signature = "|".join(
+            str(attrs[k])
+            for k in ("media_content_id", "media_artist", "media_title")
+            if attrs.get(k)
+        )
+        self._track_id = signature or None
         pic = attrs.get("entity_picture")
         if pic:
             if pic.startswith(("http://", "https://")):

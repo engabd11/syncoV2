@@ -19,6 +19,7 @@ activate:
             - medium
             - high
             - intense
+            - extreme
     effect:
       name: Effect
       description: Renderer/effect style — music, movies or fireworks.
@@ -95,6 +96,7 @@ set_options:
             - medium
             - high
             - intense
+            - extreme
     effect:
       name: Effect
       description: Renderer/effect style — music, movies or fireworks.

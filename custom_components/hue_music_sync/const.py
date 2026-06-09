@@ -95,10 +95,11 @@ class SyncMode(StrEnum):
     Parameters per mode live in ``effects.modes.MODE_PARAMS``.
     """
 
-    SUBTLE = "subtle"  # no dimming, colours drift slowly
-    MEDIUM = "medium"  # stays bright, some lights pulse on beats
-    HIGH = "high"  # dims to ~30%, bright bass/treble beats
+    SUBTLE = "subtle"  # seamless: steady level, colour just flows/shifts smoothly
+    MEDIUM = "medium"  # gentle: stays bright, sways softly with the music
+    HIGH = "high"  # dims to ~30%, the kick sweeps the room as a wavefront
     INTENSE = "intense"  # full 0-100% dimming/brightening + shimmer
+    EXTREME = "extreme"  # club: ~1% floor to full, hard beats + fast wavefronts
 
 
 class SyncEffect(StrEnum):

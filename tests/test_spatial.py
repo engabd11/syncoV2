@@ -109,7 +109,8 @@ def _aggressive_stream(n):
 
 
 @pytest.mark.parametrize(
-    "mode", [SyncMode.SUBTLE, SyncMode.MEDIUM, SyncMode.HIGH, SyncMode.INTENSE]
+    "mode",
+    [SyncMode.SUBTLE, SyncMode.MEDIUM, SyncMode.HIGH, SyncMode.INTENSE, SyncMode.EXTREME],
 )
 def test_full_predictive_spatial_pipeline_stays_within_flash_limit(mode):
     eng = EffectEngine(_spread_channels())

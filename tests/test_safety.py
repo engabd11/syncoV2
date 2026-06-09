@@ -95,7 +95,8 @@ def test_flash_limiter_is_transparent_on_calm_content():
 
 
 @pytest.mark.parametrize(
-    "mode", [SyncMode.SUBTLE, SyncMode.MEDIUM, SyncMode.HIGH, SyncMode.INTENSE]
+    "mode",
+    [SyncMode.SUBTLE, SyncMode.MEDIUM, SyncMode.HIGH, SyncMode.INTENSE, SyncMode.EXTREME],
 )
 def test_no_intensity_exceeds_the_flash_limit_on_aggressive_edm(mode):
     # Drive every intensity with relentless 200ms-spaced full-energy beats and

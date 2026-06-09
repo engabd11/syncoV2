@@ -294,18 +294,33 @@ def test_album_art_multicolour_cover_keeps_distinct_hues():
     assert hues == sorted(hues)
 
 
-def test_album_art_vivid_single_hue_becomes_a_spread():
-    # A vivid but single-hue cover should drift over an analogous spread, not sit
-    # on one flat colour.
+def test_album_art_single_hue_stays_faithful():
+    # A single-hue cover must NOT spawn invented hues — every returned colour
+    # stays within the cover's own hue family (teal ~0.5).
     teal = np.clip(
         np.tile([0.0, 0.6, 0.6], (1000, 1)).astype(np.float32)
         + np.random.RandomState(0).normal(0, 0.02, (1000, 3)).astype(np.float32),
         0, 1,
     )
     palette = _kmeans_palette(teal, k=5)
-    assert len(palette) >= 4
-    hues = [colorsys.rgb_to_hsv(*c)[0] for c in palette]
-    assert max(hues) - min(hues) > 0.02  # a spread, not identical
+    assert palette
+    for c in palette:
+        h = colorsys.rgb_to_hsv(*c)[0]
+        assert min(abs(h - 0.5), 1.0 - abs(h - 0.5)) < 0.08  # within ~28 deg of teal
+
+
+def test_album_art_does_not_invent_unrelated_colours():
+    # Two distant real colours (red + cyan) must not produce a third, in-between
+    # hue (e.g. a fabricated green/yellow) that isn't on the cover.
+    cov = np.vstack([
+        np.tile([1.0, 0.0, 0.0], (300, 1)),   # red ~0
+        np.tile([0.0, 0.8, 0.9], (300, 1)),   # cyan ~0.52
+    ]).astype(np.float32)
+    for c in _kmeans_palette(cov, k=5):
+        h = colorsys.rgb_to_hsv(*c)[0]
+        near_red = min(h, 1.0 - h) < 0.08
+        near_cyan = abs(h - 0.52) < 0.08
+        assert near_red or near_cyan  # only the two real families, nothing between
 
 
 def test_album_art_greyscale_falls_back_gracefully():
