@@ -15,6 +15,16 @@ This integration consumes the areas that already exist and drives them.
   updates (~40 Hz), bypassing normal Zigbee light commands.
 - **Real-time beat and frequency analysis** from your Snapcast server or Music
   Assistant stream; no microphone required.
+- **Predictive beat grid**: locks onto the tempo and phase of the music and
+  anticipates each beat, so the lights peak on the kick instead of chasing it.
+  Falls back to plain reactive sync on irregular or ambient material.
+- **3D spatial choreography**: uses each lamp's real position in the room, not
+  just left to right. A kick launches a wavefront that sweeps across the room,
+  treble lives up high and bass down low, and the back lamps carry an ambient
+  wash; motion that LED strips can't do.
+- **Structure awareness**: detects builds, drops, and breakdowns; tension
+  desaturates and tightens through a riser, then the whole field swells on the
+  drop.
 - **Non-uniform choreography**: bass lights thump on the kick, treble lights
   shimmer, colours spread spatially across the area.
 - **Beat-driven colour shifts**: the palette steps forward on every kick so the
@@ -27,12 +37,47 @@ This integration consumes the areas that already exist and drives them.
   soundtrack-following backlight whose brightness tracks the audio and colour
   comes from the film's artwork), and Fireworks (bursts ignite on big beats and
   fade out in the palette colours).
+- **Eye safety, enforced**: a non-bypassable final stage caps whole-room flashing
+  at the WCAG limit (3 flashes/sec), keeps a brightness floor so the room never
+  strobes black, desaturates rapid saturated-red, clamps every colour to the bulb
+  gamut, and slew-limits colour moves so nothing pops. See [Eye safety](#eye-safety).
 - **Self-healing DTLS**: a dropped channel auto-reconnects with exponential
-  backoff instead of silently stopping.
+  backoff instead of silently stopping, with a heartbeat so the area never drops
+  on quiet passages and a noise gate so true silence rests.
 - **Per-area entities**: an on/off switch, plus select entities for Intensity,
   Effect, and Colour, and number entities for Brightness and Timing offset.
 - **Services** for automation: `hue_music_sync.activate`, `deactivate`,
   and `set_options` (change settings live without restarting).
+
+## Eye safety
+
+> **Photosensitivity warning.** Audio-reactive lighting fills a large part of
+> your vision and can, on aggressive content, flash. If you, or anyone who may be
+> in the room, has photosensitive epilepsy or is sensitive to flashing light, use
+> the **Subtle** intensity or the **Movies** effect (both are guaranteed
+> flash-free) and avoid the higher intensities.
+
+Eye safety is a first-class feature, not an afterthought. Every frame, from any
+effect, intensity, colour, or the idle glow, passes through a **non-bypassable
+final safety stage** before it reaches the bridge:
+
+- **Whole-field flash limiter.** No effect or setting can make the whole room
+  flash more than **3 times per second** (the WCAG 2.3.1 "three flashes" limit).
+  The limiter is transparent on normal content and only engages on genuine
+  strobing, which it tames by compressing the global brightness swing while
+  preserving each light's colour and the spatial pattern between lights.
+- **Brightness floor.** Reactive modes pulse up over a non-zero baseline and decay
+  down; the room never fully extinguishes and re-ignites (which reads as
+  strobing). Even explosions in Movies swell rather than flash.
+- **Saturated-red guard.** Deep red has a stricter flash threshold, so rapid red
+  flashing is automatically desaturated toward white.
+- **Calm presets.** **Subtle** and **Movies** contain zero discrete flashes by
+  construction; only eased, sub-1-Hz drifts. This is enforced by unit tests, not
+  left to chance.
+
+These are guarantees the test suite asserts on worst-case (aggressive EDM) input.
+They make the integration safe to leave running in a shared space, but they cannot
+account for every individual's sensitivity, so the warning above still applies.
 
 ## Requirements
 
@@ -115,13 +160,24 @@ audio it falls back to a gentle breathing glow in the artwork colours.
 One area at a time per bridge: activating a second area on the same bridge
 automatically takes over from the one already running.
 
-### Smooth dimming
+### Smooth dimming & deterministic colour
 
 Colour is streamed in Hue's native **xy chromaticity with a dedicated
 brightness channel** (HueStream colourspace `0x01`) at ~40 Hz, the same model
 the official Spotify/Samsung integrations use. Keeping brightness on its own
 channel lets the bridge map dimming through the bulb's own smooth curve, so
 fades don't step at the low end.
+
+The bridge sends each frame straight to the bulbs without interpolating between
+them, so the stream itself is the only smoothing a bulb gets. Two things keep it
+clean and predictable:
+
+- **Gamut clamping.** Every colour is clamped to the bulb's reproducible gamut
+  (Gamut C) on our side, so colour is deterministic instead of being snapped
+  unpredictably by the bridge.
+- **xy slew-limiting.** A large colour jump (palette switch, new album art, a
+  Rainbow beat-step) is capped to a smooth per-frame move, so colour *grooves*
+  to the next hue instead of popping.
 
 ## Usage
 
@@ -169,11 +225,41 @@ All three target the area's `switch` entity. Example: go full Intense on the dro
 
 ## Choreography
 
-Lights are driven per-channel by **spatial position** and **frequency band**:
-lights are ordered left-to-right and mapped across the spectrum, so bass-side
-lights thump on the kick while treble-side lights react to highs. The palette
-advances on every beat (weighted by the kick), so the colour moves with the
-music instead of scrolling on a timer.
+Within any mode, lights are driven per-channel by **3D position** and **frequency
+band**. Each lamp's real place in the room matters:
+
+- **Left to right** maps across the spectrum and pans the colour.
+- **Height** sets which band a lamp favours: bass on the floor, treble at the
+  ceiling.
+- **Depth** (front to back) splits a reactive front from an ambient back wash.
+
+On a beat, the kick launches a **wavefront** that expands from the low centre of
+the room and sweeps outward across the lamps: spatial motion rather than every
+lamp flashing in unison (which both looks better and is easier on the eyes). The
+palette also advances on every beat (weighted by the kick) so the colour itself
+grooves with the music.
+
+## Musical intelligence
+
+The sync doesn't just react to the last 20 ms of sound; it builds a model of the
+music:
+
+- **Predictive beat grid.** A tempo and phase tracker (autocorrelation of the
+  onset envelope with a log-tempo prior to avoid half/double-tempo errors, plus a
+  phase-locked loop) predicts when the next beat will land. The lights are fired a
+  configurable few milliseconds early so they peak on the kick instead of lagging
+  it. When the music is irregular or ambient and the tempo won't lock, it silently
+  falls back to plain reactive sync.
+- **Structure awareness.** Slow envelopes of loudness and spectral brightness spot
+  builds (tension rising, the field tightens and desaturates), drops (the release,
+  the whole field swells), and breakdowns.
+
+Because the integration taps and decodes the audio stream itself (rather than a
+microphone or HDMI feed), it can also analyse *ahead* of the audible playback
+position: a true look-ahead that mic/HDMI sync can't do. The renderer already
+accepts a future-frames slice for this; wiring the decoder to run ahead is the
+next step (the `scripts/spike_ma.py` headroom check gates it). Predictive beat
+timing above needs no look-ahead; it predicts from the rhythm model.
 
 ## Validation spikes
 
@@ -211,9 +297,18 @@ pip install pytest numpy
 pytest tests/
 ```
 
-Tests cover the HueStream frame encoder, palette sampling, album-art k-means,
-the analyzer's beat detection, and the effect engine (beat-driven colour
-stepping, Fireworks bursts, and Movie-mode loudness tracking).
+Tests cover the HueStream frame encoder, palette sampling, album-art k-means, the
+analyzer's beat detection and noise gate, the effect engine (beat-driven colour
+stepping, Fireworks bursts, and Movie-mode loudness tracking), the predictive beat
+grid (`tests/test_tempo.py`: tempo lock across 90-174 BPM, phase alignment to real
+onsets, graceful unlock on noise, tempo-change re-lock), structure detection
+(`tests/test_structure.py`: build to drop, no false triggers), the 3D spatial
+renderer (`tests/test_spatial.py`: geometry, wave propagation), and the eye-safety
+invariants (`tests/test_safety.py`): the flash limiter holds the WCAG 3 flashes/sec
+ceiling on aggressive input at every intensity (re-asserted over the full
+predictive and spatial pipeline), Subtle and Movies are flash-free by
+construction, saturated-red strobing desaturates, and every colour stays inside
+the bulb gamut.
 
 ## Limitations
 

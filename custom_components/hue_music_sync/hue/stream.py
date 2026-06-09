@@ -49,8 +49,51 @@ def _gam(c: float) -> float:
     return ((c + 0.055) / 1.055) ** 2.4 if c > 0.04045 else c / 12.92
 
 
+# Philips Hue Gamut C (current colour bulbs): the triangle of xy chromaticities
+# the bulbs can actually reproduce. Points outside get snapped by the bridge
+# unpredictably, so we clamp to the triangle ourselves for deterministic colour.
+GAMUT_C = ((0.6915, 0.3038), (0.1700, 0.7000), (0.1532, 0.0475))  # red, green, blue
+# Max xy chromaticity movement per emitted frame. The bridge does not interpolate
+# between frames, so a big palette/album-art jump would "pop"; capping the step
+# turns it into a smooth slewed move (the stream is the bulb's only smoothing).
+XY_SLEW_MAX = 0.08
+
+
+def _closest_on_segment(
+    px: float, py: float, ax: float, ay: float, bx: float, by: float
+) -> tuple[float, float]:
+    abx, aby = bx - ax, by - ay
+    denom = abx * abx + aby * aby
+    t = 0.0 if denom <= 0 else ((px - ax) * abx + (py - ay) * aby) / denom
+    t = 0.0 if t < 0.0 else 1.0 if t > 1.0 else t
+    return ax + abx * t, ay + aby * t
+
+
+def clamp_to_gamut(x: float, y: float, gamut=GAMUT_C) -> tuple[float, float]:
+    """Snap an xy chromaticity into the bulb's reproducible colour triangle."""
+    (r, g, b) = gamut
+    # Sign of the cross products tells us which side of each edge the point is on;
+    # if it's inside (consistent winding) leave it, else project to the nearest edge.
+    def cross(o, a, p):
+        return (a[0] - o[0]) * (p[1] - o[1]) - (a[1] - o[1]) * (p[0] - o[0])
+
+    p = (x, y)
+    d1, d2, d3 = cross(r, g, p), cross(g, b, p), cross(b, r, p)
+    has_neg = d1 < 0 or d2 < 0 or d3 < 0
+    has_pos = d1 > 0 or d2 > 0 or d3 > 0
+    if not (has_neg and has_pos):
+        return x, y  # inside the triangle (all same sign)
+    best = None
+    for ax, ay, bx, by in ((*r, *g), (*g, *b), (*b, *r)):
+        cx, cy = _closest_on_segment(x, y, ax, ay, bx, by)
+        d = (cx - x) ** 2 + (cy - y) ** 2
+        if best is None or d < best[0]:
+            best = (d, cx, cy)
+    return best[1], best[2]
+
+
 def rgb_to_xy(r: float, g: float, b: float) -> tuple[float, float]:
-    """Standard Hue RGB -> xy chromaticity (sRGB gamma + Wide-RGB D65).
+    """Standard Hue RGB -> xy chromaticity (sRGB gamma + Wide-RGB D65), gamut-clamped.
 
     Chromaticity is scale-invariant, so callers should pass a full-brightness
     colour and carry brightness separately for stable dimming.
@@ -62,7 +105,7 @@ def rgb_to_xy(r: float, g: float, b: float) -> tuple[float, float]:
     total = x_ + y_ + z_
     if total <= 0:
         return 0.0, 0.0
-    return x_ / total, y_ / total
+    return clamp_to_gamut(x_ / total, y_ / total)
 
 
 class HueStreamEncoder:
@@ -93,6 +136,7 @@ class HueStreamEncoder:
         self._config_id = raw
         self._colorspace = colorspace
         self._seq = 0
+        self._prev_xy: dict[int, tuple[float, float]] = {}  # for xy slew-limiting
 
     def _header(self, colorspace: int) -> bytearray:
         self._seq = (self._seq + 1) & 0xFF
@@ -142,17 +186,37 @@ class HueStreamEncoder:
         the dedicated brightness through the bulb's own dimming curve instead of
         us shrinking RGB magnitudes into the bridge's coarse low-value range.
         """
-        def encode(r: float, g: float, b: float) -> tuple[int, int, int]:
+        def encode(cid: int, r: float, g: float, b: float) -> tuple[int, int, int]:
             bri = max(r, g, b)
             if bri <= 1e-6:
+                # Black: keep the last hue so the next lit frame slews from it
+                # rather than popping out of the gamut origin.
                 return 0, 0, 0
             x, y = rgb_to_xy(r / bri, g / bri, b / bri)
+            x, y = self._slew_xy(cid, x, y)
             return float_to_16(x), float_to_16(y), float_to_16(bri)
 
         return self.build_frame(
-            ((cid, *encode(r, g, b)) for cid, (r, g, b) in channels.items()),
+            ((cid, *encode(cid, r, g, b)) for cid, (r, g, b) in channels.items()),
             ColorSpaceXYB,
         )
+
+    def _slew_xy(self, cid: int, x: float, y: float) -> tuple[float, float]:
+        """Cap how far a channel's chromaticity may move in one frame.
+
+        The bridge sends each frame straight to the bulbs without interpolating,
+        so a large jump (palette switch, album-art change, rainbow step) is a
+        visible pop. Limiting the per-frame step turns it into a smooth move.
+        """
+        prev = self._prev_xy.get(cid)
+        if prev is not None:
+            dx, dy = x - prev[0], y - prev[1]
+            dist = (dx * dx + dy * dy) ** 0.5
+            if dist > XY_SLEW_MAX:
+                scale = XY_SLEW_MAX / dist
+                x, y = prev[0] + dx * scale, prev[1] + dy * scale
+        self._prev_xy[cid] = (x, y)
+        return x, y
 
     def build(self, channels: Mapping[int, tuple[float, float, float]]) -> bytes:
         """Encode a frame using the encoder's configured colourspace."""

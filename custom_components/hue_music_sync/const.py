@@ -42,6 +42,11 @@ KEEPALIVE_INTERVAL: Final = 9.0  # bridge drops the channel after ~10s of silenc
 ANALYSIS_SAMPLE_RATE: Final = 22050
 ANALYSIS_HOP: Final = 441  # ~20ms hop -> ~50 feature frames/sec at 22050 Hz
 ANALYSIS_WINDOW: Final = 1024  # FFT window size (samples)
+# Master noise gate (RMS of the decoded signal, full-scale ~1.0). Below this the
+# frame is treated as silence and rests fully, so the per-band AGC never
+# amplifies a near-silent noise floor up to full brightness. ~-54 dBFS, well
+# below any real music but above codec/dither hiss and digital-silence gaps.
+ANALYSIS_NOISE_FLOOR: Final = 2.0e-3
 
 # Frequency band edges in Hz: (sub_bass, bass, low_mid, mid, high).
 # Each tuple is (low, high). Used by the analyzer to bucket FFT energy.

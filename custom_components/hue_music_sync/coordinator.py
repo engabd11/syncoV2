@@ -24,8 +24,12 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 from .audio.metadata import MetadataSource
 from .audio.snapcast import SnapcastSource
 from .audio.source import MusicAssistantSource
+from .audio.structure import StructureTracker
+from .audio.tempo import TempoTracker
 from .color.album_art import extract_palette
 from .const import (
+    ANALYSIS_HOP,
+    ANALYSIS_SAMPLE_RATE,
     CONF_AREAS,
     CONF_BRIGHTNESS,
     CONF_COLOUR,
@@ -49,6 +53,7 @@ from .const import (
     signal_area_update,
 )
 from .effects.engine import EffectEngine
+from .effects.safety import FieldSafety
 from .hue.bridge import EntertainmentConfig, HueBridge
 from .hue.stream import DtlsStream, HueStreamEncoder
 
@@ -141,6 +146,16 @@ class SyncSession:
         self._encoder = HueStreamEncoder(config.id)
         self._stream = DtlsStream(host, app_key, client_key)
         self._engine = EffectEngine(config.channels)
+        # Non-bypassable final safety stage (whole-field flash limiter + red
+        # guard); every emitted frame — any effect, intensity or idle — passes
+        # through it in _safe_send.
+        self._safety = FieldSafety()
+        self._last_safe_t: float | None = None
+        # Predictive beat grid + musical-structure trackers, fed the analyzer's
+        # feature stream so the engine can anticipate beats and ride builds/drops.
+        _period = ANALYSIS_HOP / ANALYSIS_SAMPLE_RATE
+        self._tempo = TempoTracker(_period)
+        self._structure = StructureTracker(_period)
         self._source: MusicAssistantSource | MetadataSource | SnapcastSource | None = None
         self._task: asyncio.Task | None = None
         self._running = False
@@ -194,6 +209,10 @@ class SyncSession:
             await self._source.close()
             self._source = None
         self._last_track = None
+        # The rhythm/structure models are about to see a discontinuity (new
+        # track or seek); clear them so the grid re-locks cleanly.
+        self._tempo.reset()
+        self._structure.reset()
 
     def _resolve_player(self) -> str | None:
         if self._settings.media_player:
@@ -289,7 +308,14 @@ class SyncSession:
                         continue
 
                     self._maybe_refresh_album_art()
-                    colors = self._engine.render(frame, period)
+                    # Predictive beat grid + structure drive anticipation and
+                    # build/drop choreography. (A decode-ahead source can later
+                    # pass a real future slice as the structure lookahead.)
+                    beatgrid = self._tempo.update(
+                        frame.t_audio, frame.flux, frame.beat, frame.beat_strength
+                    )
+                    structure = self._structure.update(frame)
+                    colors = self._engine.render(frame, period, beatgrid, structure)
                     await self._send_timed(colors)
                 except ConnectionError:
                     # DTLS channel dropped: try to recover instead of ending sync.
@@ -337,6 +363,10 @@ class SyncSession:
 
     async def _safe_send(self, colors: dict[int, tuple[float, float, float]]) -> None:
         # ConnectionError propagates to the run loop, which attempts a reconnect.
+        now = time.monotonic()
+        dt = 0.025 if self._last_safe_t is None else max(0.0, now - self._last_safe_t)
+        self._last_safe_t = now
+        colors = self._safety.process(colors, dt)
         frame = self._encoder.build(colors)
         await self._stream.send(frame)
 
@@ -361,6 +391,8 @@ class SyncSession:
                 )
                 continue
             self._delay_buf.clear()  # drop stale frames buffered before the drop
+            self._safety.reset()  # field history is stale after the gap
+            self._last_safe_t = None
             _LOGGER.info("Reconnected DTLS stream for %s", self._config.name)
             return True
         return False

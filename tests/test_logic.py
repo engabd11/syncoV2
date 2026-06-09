@@ -62,7 +62,9 @@ def test_xy_frame_carries_dedicated_brightness():
     y = int.from_bytes(frame[55:57], "big") / 65535
     bri = int.from_bytes(frame[57:59], "big") / 65535
     assert bri == 1.0  # dedicated brightness, not derived from shrinking RGB
-    assert abs(x - 0.157) < 0.01 and abs(y - 0.018) < 0.01  # Hue blue chromaticity
+    # Pure sRGB blue maps just outside Gamut C and is clamped to the blue vertex
+    # (0.1532, 0.0475) — deterministic colour instead of the bridge guessing.
+    assert abs(x - 0.1532) < 0.001 and abs(y - 0.0475) < 0.001
 
 
 def test_xy_dimming_keeps_chromaticity_constant():

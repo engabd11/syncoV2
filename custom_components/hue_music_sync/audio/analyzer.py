@@ -15,6 +15,7 @@ import numpy as np
 
 from ..const import (
     ANALYSIS_HOP,
+    ANALYSIS_NOISE_FLOOR,
     ANALYSIS_SAMPLE_RATE,
     ANALYSIS_WINDOW,
     BANDS,
@@ -30,6 +31,9 @@ class AnalysisFrame:
     beat: bool = False
     beat_strength: float = 0.0  # how far flux exceeded threshold, 0..~3
     tempo_bpm: float | None = None
+    flux: float = 0.0  # onset strength (spectral flux), normalised 0..~1
+    t_audio: float = 0.0  # monotonic decode-time of this frame (seconds)
+    centroid: float = 0.0  # spectral centroid 0..1 (brightness of the sound)
 
 
 class _AGC:
@@ -56,15 +60,18 @@ class Analyzer:
         window: int = ANALYSIS_WINDOW,
         hop: int = ANALYSIS_HOP,
         beat_sensitivity: float = 1.2,
+        noise_floor: float = ANALYSIS_NOISE_FLOOR,
     ) -> None:
         self._sr = sample_rate
         self._window = window
         self._hop = hop
+        self._noise_floor = noise_floor
         self._buf = np.zeros(window, dtype=np.float32)
         self._hann = np.hanning(window).astype(np.float32)
 
         # Precompute FFT bin index ranges per band.
         freqs = np.fft.rfftfreq(window, 1.0 / sample_rate)
+        self._freqs = freqs.astype(np.float32)
         self._band_bins: dict[str, tuple[int, int]] = {}
         for name, (lo, hi) in BANDS.items():
             lo_i = int(np.searchsorted(freqs, lo, side="left"))
@@ -72,6 +79,7 @@ class Analyzer:
             self._band_bins[name] = (lo_i, max(lo_i + 1, hi_i))
         self._agc = {name: _AGC() for name in BANDS}
         self._energy_agc = _AGC()
+        self._flux_agc = _AGC()
 
         # Onset / beat state.
         self._prev_mag: np.ndarray | None = None
@@ -98,6 +106,21 @@ class Analyzer:
             self._buf = np.roll(self._buf, -n)
             self._buf[-n:] = hop
 
+        rms = float(np.sqrt(np.mean(self._buf * self._buf)))
+        if rms < self._noise_floor:
+            # Master noise gate: the signal is effectively silent, so rest fully
+            # instead of letting the per-band AGC amplify hiss/dither up to full.
+            # Keep onset state coherent (no spurious beat on the next note) while
+            # the AGC peaks decay on their own toward the floor.
+            spectrum = np.fft.rfft(self._buf * self._hann)
+            self._prev_mag = np.abs(spectrum).astype(np.float32)
+            self._since_beat += 1
+            t_audio = self._frame_index * self.frame_period
+            self._frame_index += 1
+            return AnalysisFrame(
+                bands={name: 0.0 for name in self._band_bins}, t_audio=t_audio
+            )
+
         spectrum = np.fft.rfft(self._buf * self._hann)
         mag = np.abs(spectrum).astype(np.float32)
         power = mag * mag
@@ -107,11 +130,13 @@ class Analyzer:
             raw = float(np.mean(power[lo_i:hi_i])) if hi_i > lo_i else 0.0
             bands[name] = self._agc[name].normalise(np.sqrt(raw))
 
-        rms = float(np.sqrt(np.mean(self._buf * self._buf)))
         energy = self._energy_agc.normalise(rms)
 
-        beat, strength = self._detect_beat(mag)
+        beat, strength, flux_raw = self._detect_beat(mag)
+        flux = self._flux_agc.normalise(flux_raw)
+        centroid = self._spectral_centroid(mag)
         tempo = self._estimate_tempo()
+        t_audio = self._frame_index * self.frame_period
         self._frame_index += 1
 
         return AnalysisFrame(
@@ -120,12 +145,28 @@ class Analyzer:
             beat=beat,
             beat_strength=strength,
             tempo_bpm=tempo,
+            flux=flux,
+            t_audio=t_audio,
+            centroid=centroid,
         )
 
-    def _detect_beat(self, mag: np.ndarray) -> tuple[bool, float]:
+    def _spectral_centroid(self, mag: np.ndarray) -> float:
+        """Centre-of-mass frequency, normalised 0..1 (soft-capped at ~5 kHz).
+
+        A perceptual "brightness" of the sound: rises through builds/risers and
+        treble-heavy passages, falls on bass-heavy or muffled ones. Used by the
+        structure tracker to spot tension/builds.
+        """
+        total = float(mag.sum())
+        if total <= 1e-9:
+            return 0.0
+        centroid_hz = float((self._freqs * mag).sum()) / total
+        return min(1.0, centroid_hz / 5000.0)
+
+    def _detect_beat(self, mag: np.ndarray) -> tuple[bool, float, float]:
         if self._prev_mag is None:
             self._prev_mag = mag
-            return False, 0.0
+            return False, 0.0, 0.0
         # Spectral flux: sum of positive magnitude increases.
         diff = mag - self._prev_mag
         flux = float(np.sum(diff[diff > 0]))
@@ -146,7 +187,7 @@ class Analyzer:
             self._since_beat += 1
 
         self._flux_hist.append(flux)
-        return beat, strength
+        return beat, strength, flux
 
     def _estimate_tempo(self) -> float | None:
         if len(self._beat_times) < 4:

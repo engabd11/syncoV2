@@ -32,6 +32,16 @@ class ModeParams:
     energy_gain: float = 0.0  # brightness from broadband loudness (ambient/movie)
     bri_attack: float = 0.92  # per-frame brightness rise rate (1 = instant)
     bri_decay: float = 0.24  # per-frame brightness fall rate (lower = gentler)
+    # --- 3D spatial choreography (0 = off, keeps the flat/legacy look) -------
+    wave_gain: float = 0.0     # brightness from beat wavefronts sweeping the room
+    wave_speed: float = 1.8    # wavefront speed (normalised room-units / second)
+    wave_width: float = 0.33   # wavefront shell thickness
+    height_freq: float = 0.0   # how much a lamp's height maps to its frequency band
+    depth_wash: float = 0.0    # gentle ambient wash on the back (far) lamps
+    anticipation_ms: float = 0.0  # fire the wave this early to peak on the beat
+    # --- musical structure response -----------------------------------------
+    drop_boost: float = 0.0    # extra swell on a detected drop
+    build_desat: float = 0.0   # desaturate toward white through a build (tension)
 
 
 MODE_PARAMS: dict[SyncMode, ModeParams] = {
@@ -43,26 +53,35 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         colour_beat_step=0.004, colour_lerp=0.08,
     ),
     # Like Intense but lighter: brighter baseline, gentler pulses on most beats,
-    # more colour. Colour clearly steps forward on the beat.
+    # more colour. Colour clearly steps forward on the beat. Beats sweep the room
+    # as a soft wavefront rather than flashing every lamp together.
     SyncMode.MEDIUM: ModeParams(
         base=0.22, floor=0.14, bass_gain=0.28, beat_gain=0.55, beat_threshold=1.1,
         spread=0.15, colour_speed=0.04, shimmer=0.10, colour_sat=0.8,
         colour_beat_step=0.018, colour_lerp=0.18,
+        wave_gain=0.35, wave_speed=1.6, wave_width=0.40, height_freq=0.30,
+        depth_wash=0.18, anticipation_ms=60, drop_boost=0.20, build_desat=0.30,
     ),
-    # "Heavy": immersive Intense-style, but flashes ONLY on big beats (eye-
-    # friendly, less strobing) over a sustained lit base.
+    # "Heavy": immersive Intense-style, but the beat travels as a wavefront
+    # (eye-friendly spatial distribution rather than synchronous strobing) over a
+    # sustained lit base.
     SyncMode.HIGH: ModeParams(
         base=0.30, floor=0.20, bass_gain=0.20, beat_gain=0.8, beat_threshold=2.2,
         spread=0.12, colour_speed=0.05, shimmer=0.12, colour_sat=0.6,
         colour_beat_step=0.024, colour_lerp=0.22,
+        wave_gain=0.60, wave_speed=1.9, wave_width=0.33, height_freq=0.40,
+        depth_wash=0.15, anticipation_ms=70, drop_boost=0.35, build_desat=0.40,
     ),
     # Samsung-style with visible dimming: dim baseline that clearly drops between
-    # beats and pulses up on the main beats (selective so the flash decays). Soft
-    # desaturated album colours. Colour jumps hardest per beat for a club feel.
+    # beats; the kick launches a strong wavefront across the room (and a small
+    # residual flash). Soft desaturated album colours; colour jumps hardest per
+    # beat for a club feel.
     SyncMode.INTENSE: ModeParams(
         base=0.10, floor=0.05, bass_gain=0.12, beat_gain=0.9, beat_threshold=1.6,
         spread=0.12, colour_speed=0.05, shimmer=0.2, colour_sat=0.5,
         colour_beat_step=0.034, colour_lerp=0.30,
+        wave_gain=0.85, wave_speed=2.2, wave_width=0.30, height_freq=0.50,
+        depth_wash=0.10, anticipation_ms=80, drop_boost=0.50, build_desat=0.50,
     ),
 }
 
@@ -135,6 +154,7 @@ def render(engine, frame) -> dict[int, tuple[RGB, float]]:
     bass = max(frame.bands.get("sub_bass", 0.0), frame.bands.get("bass", 0.0))
     treble = frame.bands.get("high", 0.0)
 
+    waves = engine.active_waves
     out: dict[int, tuple[RGB, float]] = {}
     for ch in engine.channels:
         info = engine.cmap[ch.channel_id]
@@ -143,6 +163,19 @@ def render(engine, frame) -> dict[int, tuple[RGB, float]]:
             bri += p.energy_gain * frame.energy  # follow overall loudness (movie)
         if p.spread:
             bri += p.spread * frame.bands.get(info["band"], 0.0)
+        if p.height_freq:
+            # Lamps high in the room favour treble, low lamps favour bass.
+            bri += p.height_freq * frame.bands.get(info["hband"], 0.0)
+        if p.depth_wash:
+            # Back/far lamps carry a gentle ambient wash; front lamps stay reactive.
+            bri += p.depth_wash * (1.0 - info["ny"])
+        if p.wave_gain and waves:
+            # Beat wavefront(s) sweeping out from the room's low centre.
+            d = info["dist_origin"]
+            amp = 0.0
+            for w in waves:
+                amp += w.amplitude_at(d)
+            bri += p.wave_gain * amp
         if p.shimmer and treble > 0.05:
             bri += p.shimmer * treble * _shimmer(t, ch.channel_id)
 
