@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -26,6 +26,7 @@ from homeassistant.util import dt as dt_util
 
 from ..const import ANALYSIS_HOP, ANALYSIS_SAMPLE_RATE
 from .analyzer import AnalysisFrame, Analyzer
+from .ma_stream import ma_stream_variants
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -44,6 +45,26 @@ class TrackInfo:
     track_id: str  # stable id used to detect track changes
     album_art_url: str | None
     is_live: bool  # True for non-seekable live streams (radio)
+    # Alternate stream URLs to try if the primary won't decode (covers
+    # flow-vs-single and output-codec differences between MA player types).
+    alt_urls: list[str] = field(default_factory=list)
+
+
+def _ma_player_codec(player) -> str:
+    """The output codec a Music Assistant player is configured to stream.
+
+    Defaults to flac (MA's default). Strips any PCM parameter suffix and falls
+    back gracefully across MA versions / config shapes.
+    """
+    try:
+        config = getattr(player, "config", None)
+        if config is not None and hasattr(config, "get_value"):
+            codec = config.get_value("output_codec", default="flac")
+            if codec:
+                return str(codec).split(";", 1)[0].strip() or "flac"
+    except Exception:  # noqa: BLE001 - defensive across MA versions
+        pass
+    return "flac"
 
 
 class PcmDecoder:
@@ -140,6 +161,11 @@ class MusicAssistantSource:
         self._mass_cache = None
         self._mass_cache_ts = 0.0
         self._analyzer = Analyzer()
+        # Remember the MA stream variant (flow/single + codec) that decoded, so a
+        # resync on the next track rebuilds the same working URL shape.
+        self._ma_kind: str | None = None
+        self._ma_fmt: str | None = None
+        self._cand_meta: dict[str, tuple[str, str]] = {}
 
     @property
     def entity_id(self) -> str:
@@ -218,6 +244,7 @@ class MusicAssistantSource:
         is_live = attrs.get("media_duration") in (None, 0)
 
         stream_url: str | None = None
+        alt_urls: list[str] = []
         source_desc = "none"
         album_art: str | None = None
         track_id: str | None = attrs.get("media_content_id")
@@ -243,19 +270,18 @@ class MusicAssistantSource:
                     getattr(media, "queue_item_id", None) if media else None,
                     getattr(media, "custom_data", None) if media else None,
                 )
+                candidates: list[str] = []
                 if media is not None:
                     album_art = getattr(media, "image_url", None)
                     track_id = uri or track_id
                     if uri and uri.startswith(("http://", "https://")):
-                        stream_url, source_desc = uri, "current_media.uri"
-                    else:
-                        # Snapcast/pipe players don't use an HTTP URL, but the
-                        # session data lets us build MA's own stream URL.
-                        built = self._build_ma_stream_url(media, base_url, player_id)
-                        if built:
-                            stream_url, source_desc = built, "built /single"
+                        # FLOW_STREAM/announcement media already carry the http URL.
+                        candidates.append(uri)
+                    # MA's own stream URL(s) — covers snapcast/pipe/squeezelite and
+                    # any player whose current_media.uri is a provider URI.
+                    candidates += self._ma_stream_candidates(media, player, base_url, player_id)
                 # Fallback: the queue item's provider stream path.
-                if stream_url is None and player is not None:
+                if player is not None:
                     src = getattr(player, "active_source", None)
                     queue = mass.player_queues.get(src) if src else None
                     item = getattr(queue, "current_item", None)
@@ -263,7 +289,13 @@ class MusicAssistantSource:
                     path = getattr(sd, "path", None)
                     _LOGGER.debug("[%s] queue streamdetails.path=%r", self._entity_id, path)
                     if isinstance(path, str) and path.startswith(("http://", "https://")):
-                        stream_url, source_desc = path, "streamdetails.path"
+                        candidates.append(path)
+                if candidates:
+                    seen: set[str] = set()
+                    candidates = [u for u in candidates if not (u in seen or seen.add(u))]
+                    stream_url = candidates[0]
+                    alt_urls = candidates[1:]
+                    source_desc = "ma-stream"
             except Exception as err:  # noqa: BLE001 - defensive across MA versions
                 _LOGGER.debug("[%s] MA client lookup failed: %s", self._entity_id, err)
 
@@ -284,8 +316,8 @@ class MusicAssistantSource:
             return None
 
         _LOGGER.debug(
-            "[%s] resolved stream via %s: %s (pos=%.1fs live=%s)",
-            self._entity_id, source_desc, stream_url, position, is_live,
+            "[%s] resolved stream via %s: %s (+%d alt) (pos=%.1fs live=%s)",
+            self._entity_id, source_desc, stream_url, len(alt_urls), position, is_live,
         )
         return TrackInfo(
             stream_url=stream_url,
@@ -293,26 +325,41 @@ class MusicAssistantSource:
             track_id=track_id or stream_url,
             album_art_url=album_art,
             is_live=bool(is_live),
+            alt_urls=alt_urls,
         )
 
-    def _build_ma_stream_url(self, media, base_url: str | None, player_id: str) -> str | None:
-        """Build MA's own stream URL from the active session data.
+    def _ma_stream_candidates(self, media, player, base_url, player_id) -> list[str]:
+        """Build MA stream URLs to try, best-guess first.
 
-        Mirrors the server's resolve_stream_url:
-        ``{base}/single|flow/{session_id}/{queue_id}/{queue_item_id}/{player_id}.flac``
+        Mirrors the server's ``resolve_stream_url``:
+        ``{base}/{flow|single}/{session_id}/{queue_id}/{queue_item_id}/{player_id}.{codec}``
+
+        The flow-vs-single choice is the *player's* flow mode (squeezelite and
+        other gapless-incapable players stream the whole queue as one flow), and
+        the extension is the player's configured output codec — not always flac.
+        Because we can't always read those exactly across MA versions, we emit a
+        small ordered set of variants and let the first one that decodes win.
         """
         if not base_url:
-            return None
+            return []
         custom = getattr(media, "custom_data", None) or {}
         session_id = custom.get("session_id")
         queue_id = getattr(media, "source_id", None)
         queue_item_id = getattr(media, "queue_item_id", None)
         if not (session_id and queue_id and queue_item_id):
-            return None
-        kind = "flow" if str(getattr(media, "media_type", "")).lower().endswith("flow_stream") else "single"
-        url = f"{base_url.rstrip('/')}/{kind}/{session_id}/{queue_id}/{queue_item_id}/{player_id}.flac"
-        _LOGGER.debug("[%s] built MA stream URL: %s", self._entity_id, url)
-        return url
+            return []
+
+        prefer = (self._ma_kind, self._ma_fmt) if self._ma_kind and self._ma_fmt else None
+        variants = ma_stream_variants(
+            base_url, session_id, queue_id, queue_item_id, player_id,
+            flow_mode=bool(getattr(player, "flow_mode", False)),
+            codec=_ma_player_codec(player),
+            prefer=prefer,
+        )
+        self._cand_meta = {url: (kind, fmt) for kind, fmt, url in variants}
+        urls = [url for _kind, _fmt, url in variants]
+        _LOGGER.debug("[%s] MA stream candidates: %s", self._entity_id, urls)
+        return urls
 
     def _absolute_url(self, path: str) -> str:
         if path.startswith(("http://", "https://")):
@@ -332,24 +379,31 @@ class MusicAssistantSource:
         info = self._resolve()
         if info is None:
             return False
-        await self._begin(info)
-        # Verify audio is actually decodable before committing to this source.
-        try:
-            first = await asyncio.wait_for(self._decoder.read_hop(), timeout=5.0)
-        except asyncio.TimeoutError:
-            first = None
-        if first is None:
-            _LOGGER.warning(
-                "[%s] resolved a stream but no audio decoded; falling back",
-                self._entity_id,
-            )
+        # Try the primary URL then each alternate until one actually decodes
+        # (handles flow-vs-single and output-codec differences between players).
+        for url in [info.stream_url, *info.alt_urls]:
+            await self._begin(info, url)
+            try:
+                first = await asyncio.wait_for(self._decoder.read_hop(), timeout=5.0)
+            except asyncio.TimeoutError:
+                first = None
+            if first is not None:
+                meta = self._cand_meta.get(url)
+                if meta is not None:
+                    self._ma_kind, self._ma_fmt = meta  # reuse this variant on resync
+                if url != info.stream_url:
+                    _LOGGER.info("[%s] using alternate stream variant %s", self._entity_id, url)
+                self._analyzer.push(first)
+                self._frames_emitted += 1
+                return True
             await self._decoder.stop()
-            return False
-        self._analyzer.push(first)
-        self._frames_emitted += 1
-        return True
+        _LOGGER.warning(
+            "[%s] resolved stream(s) but none decoded; falling back", self._entity_id
+        )
+        return False
 
-    async def _begin(self, info: TrackInfo) -> None:
+    async def _begin(self, info: TrackInfo, url: str | None = None) -> None:
+        url = url or info.stream_url
         self._track_id = info.track_id
         self._album_art_url = info.album_art_url
         self._is_live = info.is_live
@@ -359,10 +413,10 @@ class MusicAssistantSource:
         self._wall0 = time.monotonic()
         self._last_resync_check = self._wall0
         self._analyzer.reset()
-        await self._decoder.start(info.stream_url, start)
+        await self._decoder.start(url, start)
         _LOGGER.info(
             "Music sync tapping %s audio: %s (from %.1fs)",
-            self._entity_id, info.stream_url, start,
+            self._entity_id, url, start,
         )
 
     async def read_hop(self) -> np.ndarray | None:

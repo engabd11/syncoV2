@@ -315,6 +315,12 @@ Assistant player) or decoded from the Music Assistant stream and
 seeks, and track changes stay aligned. A dropped DTLS channel reconnects
 automatically with backoff.
 
+The Music Assistant tap works with any MA player type — including **squeezelite /
+slimproto** players, which stream the whole queue as one continuous *flow* and
+can use a non-FLAC output codec. The integration builds the stream URL from the
+player's actual flow mode and codec, and falls through the other variants if the
+first doesn't decode, so it finds the right stream automatically.
+
 ## Development
 
 The DSP, colour, and encoder logic has no Home Assistant dependency and is

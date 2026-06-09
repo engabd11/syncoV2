@@ -82,11 +82,16 @@ def resolve_stream(host: str, player_uid: str | None) -> str | None:
             playing = playing or sid
             if want and want in _norm(sid):
                 return sid
-    # Fall back: id match regardless of status, else any playing stream.
+    # Fall back: id match regardless of status.
     if want:
         for st in streams:
             if want in _norm(st.get("id", "")):
                 return st["id"]
+        # We were told to follow a specific player but found no snapcast stream
+        # for it (e.g. a squeezelite/slimproto player streams over slimproto, not
+        # snapcast). Don't grab an unrelated playing stream — return nothing so
+        # the caller falls back to the player-specific Music Assistant tap.
+        return None
     return playing
 
 
