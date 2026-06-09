@@ -238,6 +238,19 @@ class EffectEngine:
             sat = p.colour_sat * sat_mul
             if sat < 1.0:
                 nc = (nc[0] * sat + (1.0 - sat), nc[1] * sat + (1.0 - sat), nc[2] * sat + (1.0 - sat))
+            # Cinematic warm drift: in quiet moments (Movie) pull the colour
+            # toward a cosy tungsten white, easing back to the artwork hue as the
+            # scene gets louder. Renormalise so brightness stays on its own track.
+            if p.warm_calm:
+                calm = p.warm_calm * (1.0 - min(1.0, frame.energy))
+                if calm > 0.0:
+                    nc = (
+                        nc[0] * (1.0 - calm) + 1.00 * calm,
+                        nc[1] * (1.0 - calm) + 0.82 * calm,
+                        nc[2] * (1.0 - calm) + 0.62 * calm,
+                    )
+                    mx = max(nc) or 1.0
+                    nc = (nc[0] / mx, nc[1] / mx, nc[2] / mx)
             # Continuous brightness + sharp flash/swell, then master scaling.
             b = min(1.0, new_b + overlay) * self.brightness
             out[cid] = (nc[0] * b, nc[1] * b, nc[2] * b)

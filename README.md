@@ -29,10 +29,12 @@ This integration consumes the areas that already exist and drives them.
   shimmer, colours spread spatially across the area.
 - **Beat-driven colour shifts**: the palette steps forward on every kick so the
   colour visibly grooves with the music instead of drifting on a timer.
-- **13 colour schemes**: album art extraction (k-means palette from the current
-  cover), a full-spectrum Rainbow, and 11 preset themes (Sunset, Ocean, Forest,
-  Lavender, Ember, Aurora, plus the Philips Hue signature scenes: Tropical,
-  Savanna, Blossom, Honolulu, Galaxy).
+- **13 colour schemes**: a vivid palette **extracted from the current album
+  cover** (perceptual CIELAB clustering that rejects the grey/black background,
+  ranks colours by vividness rather than raw size, and orders them for a smooth
+  hue drift), a full-spectrum Rainbow, and 11 preset themes (Sunset, Ocean,
+  Forest, Lavender, Ember, Aurora, plus the Philips Hue signature scenes:
+  Tropical, Savanna, Blossom, Honolulu, Galaxy).
 - **Three effects**: Music (beat/frequency choreography), Movies (calm
   soundtrack-following backlight whose brightness tracks the audio and colour
   comes from the film's artwork), and Fireworks (bursts ignite on big beats and
@@ -43,7 +45,12 @@ This integration consumes the areas that already exist and drives them.
   gamut, and slew-limits colour moves so nothing pops. See [Eye safety](#eye-safety).
 - **Self-healing DTLS**: a dropped channel auto-reconnects with exponential
   backoff instead of silently stopping, with a heartbeat so the area never drops
-  on quiet passages and a noise gate so true silence rests.
+  on quiet passages and a noise gate so true silence rests. If a channel can't be
+  recovered the area is handed straight back to the bridge, which restores the
+  prior light state immediately rather than leaving the lamps frozen.
+- **Large-area safe**: frames are split into packets of at most 10 lights (the
+  bridge's per-packet limit), so big setups with several lamps plus gradient-strip
+  segments stream reliably instead of dropping over-stuffed datagrams.
 - **Per-area entities**: an on/off switch, plus select entities for Intensity,
   Effect, and Colour, and number entities for Brightness and Timing offset.
 - **Services** for automation: `hue_music_sync.activate`, `deactivate`,
@@ -151,14 +158,18 @@ backlight that won't distract from the screen:
   rather than strobe.
 - **Colour comes from the film's artwork** (poster / now-playing image),
   drifting slowly and softened toward white.
+- **Warm cinematic drift**: in quiet scenes the colour eases toward a cosy
+  tungsten white and back to the artwork hue as the scene swells, so dialogue
+  moments feel like candlelight rather than a tinted wash.
 - **Adjust the overall level** with the Brightness slider.
 
 Movie brightness reacts to real audio, so the film's sound must be tappable
 (routed through your Snapcast server or Music Assistant). Without tappable
 audio it falls back to a gentle breathing glow in the artwork colours.
 
-One area at a time per bridge: activating a second area on the same bridge
-automatically takes over from the one already running.
+One area at a time: only a single entertainment area streams at once (a bridge
+supports one stream, and the integration enforces this across every area and
+bridge). Activating any area automatically deactivates whichever one was running.
 
 ### Smooth dimming & deterministic colour
 

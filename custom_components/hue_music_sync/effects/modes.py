@@ -42,6 +42,7 @@ class ModeParams:
     # --- musical structure response -----------------------------------------
     drop_boost: float = 0.0    # extra swell on a detected drop
     build_desat: float = 0.0   # desaturate toward white through a build (tension)
+    warm_calm: float = 0.0     # pull colour toward warm white in quiet moments
 
 
 MODE_PARAMS: dict[SyncMode, ModeParams] = {
@@ -96,7 +97,7 @@ MOVIE_PARAMS = ModeParams(
     base=0.28, floor=0.16, bass_gain=0.0, beat_gain=0.0, beat_threshold=99.0,
     spread=0.0, colour_speed=0.012, shimmer=0.0, colour_sat=0.6,
     colour_beat_step=0.0, colour_lerp=0.05, energy_gain=0.5,
-    bri_attack=0.16, bri_decay=0.07,
+    bri_attack=0.16, bri_decay=0.07, warm_calm=0.45,
 )
 
 

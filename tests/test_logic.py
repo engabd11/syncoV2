@@ -52,6 +52,26 @@ def test_config_id_padding_does_not_crash():
     assert len(frame[16:52]) == 36  # padded to fixed width
 
 
+def test_build_packets_splits_large_areas_at_ten_lights():
+    # The bridge caps a packet at ~10 lights; a 14-channel area must split into
+    # two datagrams (10 + 4), each a complete HueStream frame.
+    enc = HueStreamEncoder(_UUID)
+    colors = {i: (0.0, 0.0, 1.0) for i in range(14)}
+    packets = enc.build_packets(colors)
+    assert len(packets) == 2
+    counts = [(len(p) - 52) // 7 for p in packets]  # channels per datagram
+    assert counts == [10, 4]
+    for p in packets:
+        assert p[:9] == b"HueStream"
+
+
+def test_build_packets_single_for_small_areas():
+    enc = HueStreamEncoder(_UUID)
+    packets = enc.build_packets({0: (1.0, 0.0, 0.0), 1: (0.0, 1.0, 0.0)})
+    assert len(packets) == 1
+    assert (len(packets[0]) - 52) // 7 == 2
+
+
 def test_xy_frame_carries_dedicated_brightness():
     # Default colourspace is xy+brightness; build() must select it.
     enc = HueStreamEncoder(_UUID)
@@ -207,7 +227,32 @@ def test_fireworks_respects_master_brightness():
     assert max(max(c) for c in out.values()) <= 0.5 + 1e-6
 
 
+def test_movie_warm_drift_in_quiet_moments():
+    # In Movie, the colour eases toward warm tungsten white in quiet scenes and
+    # back to the artwork hue as the scene gets louder. Use a cool palette so the
+    # warm pull shows up as added red relative to blue.
+    def warmth(out):
+        vals = []
+        for c in out.values():
+            m = max(c) or 1.0
+            vals.append((c[0] - c[2]) / m)  # chromaticity red-minus-blue
+        return sum(vals) / len(vals)
+
+    eng = EffectEngine(_channels())
+    eng.set_effect(SyncEffect.MOVIES)
+    eng.set_scheme(ColorScheme.OCEAN)  # blue-leaning palette
+    for _ in range(200):
+        loud = eng.render(AnalysisFrame(bands={"sub_bass": 0.1}, energy=0.9), 0.025)
+    for _ in range(200):
+        quiet = eng.render(AnalysisFrame(bands={"sub_bass": 0.1}, energy=0.02), 0.025)
+    assert warmth(quiet) > warmth(loud) + 0.05  # quieter scenes are warmer
+
+
 # --- album-art k-means ---------------------------------------------------
+
+def _hues(palette):
+    return sorted(round(colorsys.rgb_to_hsv(*c)[0] * 360) for c in palette)
+
 
 def test_kmeans_recovers_distinct_hues():
     # Equal blocks of red, green, blue.
@@ -215,12 +260,66 @@ def test_kmeans_recovers_distinct_hues():
     green = np.tile([0.0, 1.0, 0.0], (100, 1))
     blue = np.tile([0.0, 0.0, 1.0], (100, 1))
     pixels = np.vstack([red, green, blue]).astype(np.float32)
-    palette = _kmeans_palette(pixels, k=3)
-    hues = sorted(round(colorsys.rgb_to_hsv(*c)[0] * 360) for c in palette[:3])
+    hues = _hues(_kmeans_palette(pixels, k=3))
     # Expect hues near 0/120/240.
     assert any(h <= 10 or h >= 350 for h in hues)
     assert any(100 <= h <= 140 for h in hues)
     assert any(220 <= h <= 260 for h in hues)
+
+
+def test_album_art_rejects_grey_background():
+    # A mostly-grey cover with a small vivid orange accent must yield the orange,
+    # not the dominant-by-population grey (pure population ranking would fail).
+    grey = np.tile([0.5, 0.5, 0.5], (920, 1))
+    orange = np.tile([1.0, 0.5, 0.0], (80, 1))
+    palette = _kmeans_palette(np.vstack([grey, orange]).astype(np.float32), k=5)
+    assert palette  # not empty
+    # Every returned colour is warm/orange-ish, none is the grey background.
+    for c in palette:
+        h, s, _v = colorsys.rgb_to_hsv(*c)
+        assert s >= 0.4  # vivid, not grey
+        assert h <= 0.20 or h >= 0.95  # warm hue family
+
+
+def test_album_art_multicolour_cover_keeps_distinct_hues():
+    cov = np.vstack([
+        np.tile([0.5, 0.0, 0.6], (250, 1)),   # purple
+        np.tile([1.0, 0.4, 0.0], (250, 1)),   # orange
+        np.tile([1.0, 0.8, 0.0], (250, 1)),   # gold
+        np.tile([1.0, 0.3, 0.6], (250, 1)),   # pink
+    ]).astype(np.float32)
+    hues = _hues(_kmeans_palette(cov, k=5))
+    assert len(hues) >= 3  # multiple distinct families recovered
+    # Sorted by hue (smooth cyclic drift between related colours).
+    assert hues == sorted(hues)
+
+
+def test_album_art_vivid_single_hue_becomes_a_spread():
+    # A vivid but single-hue cover should drift over an analogous spread, not sit
+    # on one flat colour.
+    teal = np.clip(
+        np.tile([0.0, 0.6, 0.6], (1000, 1)).astype(np.float32)
+        + np.random.RandomState(0).normal(0, 0.02, (1000, 3)).astype(np.float32),
+        0, 1,
+    )
+    palette = _kmeans_palette(teal, k=5)
+    assert len(palette) >= 4
+    hues = [colorsys.rgb_to_hsv(*c)[0] for c in palette]
+    assert max(hues) - min(hues) > 0.02  # a spread, not identical
+
+
+def test_album_art_greyscale_falls_back_gracefully():
+    grey = np.tile([0.4, 0.4, 0.42], (1000, 1)).astype(np.float32)
+    palette = _kmeans_palette(grey, k=5)
+    assert len(palette) >= 1  # graceful, not empty or a crash
+
+
+def test_album_art_saturation_floor_keeps_colours_vivid():
+    red = np.tile([1.0, 0.0, 0.0], (100, 1))
+    blue = np.tile([0.0, 0.0, 1.0], (100, 1))
+    palette = _kmeans_palette(np.vstack([red, blue]).astype(np.float32), k=4)
+    for c in palette:
+        assert colorsys.rgb_to_hsv(*c)[1] >= 0.5  # vivid floor for bulbs
 
 
 # --- analyzer ------------------------------------------------------------

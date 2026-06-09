@@ -21,6 +21,7 @@ from ..const import (
     HUE_STREAM_PROTOCOL,
     HUE_STREAM_VERSION,
     KEEPALIVE_INTERVAL,
+    MAX_CHANNELS_PER_PACKET,
 )
 from .dtls import DtlsError, DtlsPskClient
 
@@ -223,6 +224,25 @@ class HueStreamEncoder:
         if self._colorspace == ColorSpaceXYB:
             return self.build_frame_xy(channels)
         return self.build_frame_rgb(channels)
+
+    def build_packets(
+        self, channels: Mapping[int, tuple[float, float, float]]
+    ) -> list[bytes]:
+        """Encode one logical frame as one or more datagrams.
+
+        The Entertainment API caps a packet at ~10 lights, so areas with more
+        channels (several lamps plus gradient-strip segments) are split across
+        multiple datagrams. Each datagram is a complete HueStream frame carrying
+        an explicit channel id per entry, so the bridge applies each subset
+        correctly. Small areas still produce exactly one packet.
+        """
+        items = list(channels.items())
+        if len(items) <= MAX_CHANNELS_PER_PACKET:
+            return [self.build(channels)]
+        return [
+            self.build(dict(items[i : i + MAX_CHANNELS_PER_PACKET]))
+            for i in range(0, len(items), MAX_CHANNELS_PER_PACKET)
+        ]
 
 
 class DtlsStream:

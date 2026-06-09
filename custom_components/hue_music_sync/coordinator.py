@@ -46,6 +46,7 @@ from .const import (
     DEFAULT_MODE,
     DEFAULT_STREAM_FPS,
     DEFAULT_TIMING_MS,
+    DOMAIN,
     TIMING_BUFFER_MS,
     ColorScheme,
     SyncEffect,
@@ -331,10 +332,25 @@ class SyncSession:
         except Exception:  # noqa: BLE001
             _LOGGER.exception("Music sync loop crashed for %s", self._config.name)
         finally:
-            # If the loop ended on its own (DTLS dropped, crash) rather than via
-            # stop(), let the manager reconcile state and refresh the switch.
-            if not self._stopping and self._on_finished is not None:
-                self._on_finished()
+            # If the loop ended on its own (DTLS gave up, crash) rather than via
+            # stop(), hand the area back to the bridge so it restores the prior
+            # light state immediately, instead of leaving the lamps frozen on the
+            # last frame until the bridge times the stream out (~10 s).
+            if not self._stopping:
+                await self._safe_release_stream()
+                if self._on_finished is not None:
+                    self._on_finished()
+
+    async def _safe_release_stream(self) -> None:
+        """Best-effort teardown of a self-ended session (never raises)."""
+        try:
+            await self._stream.stop()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            await self._bridge.stop_stream(self._config.id)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Release of %s stream failed: %s", self._config.name, err)
 
     async def _send_idle(self, phase: float) -> None:
         # Gentle dim glow drifting through the palette (paused / waiting for audio).
@@ -367,8 +383,9 @@ class SyncSession:
         dt = 0.025 if self._last_safe_t is None else max(0.0, now - self._last_safe_t)
         self._last_safe_t = now
         colors = self._safety.process(colors, dt)
-        frame = self._encoder.build(colors)
-        await self._stream.send(frame)
+        # Split large areas across packets (the bridge caps a packet at ~10 lights).
+        for frame in self._encoder.build_packets(colors):
+            await self._stream.send(frame)
 
     async def _reconnect_stream(self) -> bool:
         """Re-establish a dropped DTLS channel with backoff; True on success."""
@@ -495,19 +512,36 @@ class SyncManager:
             session.apply_settings(updated)
         await self._persist_settings()
 
+    def _all_managers(self) -> list[SyncManager]:
+        """Every SyncManager registered across the integration (all bridges)."""
+        data = self.hass.data.get(DOMAIN, {})
+        return [m for m in data.values() if isinstance(m, SyncManager)]
+
+    async def _enforce_single_active_area(self, keep_area_id: str) -> None:
+        """Stop every other active area so only one streams at a time.
+
+        A Hue bridge supports a single entertainment stream, and we extend that
+        to a hard guarantee across the whole integration: starting any area first
+        deactivates every other active area (on this or any other bridge).
+        """
+        for manager in self._all_managers():
+            for other_id in list(manager._sessions):
+                if manager is self and other_id == keep_area_id:
+                    continue
+                _LOGGER.info(
+                    "Stopping area %s so %s can take the single active stream",
+                    other_id, keep_area_id,
+                )
+                await manager.stop_area(other_id)
+
     async def start_area(self, area_id: str) -> None:
         if area_id in self._sessions:
             return
         config = self.configs.get(area_id)
         if config is None:
             raise ValueError(f"Unknown entertainment area {area_id}")
-        # A Hue bridge streams to only one entertainment area at a time, so
-        # gracefully take over from any area already syncing on this bridge.
-        for other_id in list(self._sessions):
-            _LOGGER.info(
-                "Taking over Hue stream from area %s for %s", other_id, area_id
-            )
-            await self.stop_area(other_id)
+        # Only one entertainment area may be active at a time, anywhere.
+        await self._enforce_single_active_area(area_id)
         # Refresh channels/status in case the area changed in the Hue app.
         config = await self.bridge.get_entertainment_config(area_id)
         self.configs[area_id] = config

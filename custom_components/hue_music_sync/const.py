@@ -35,6 +35,10 @@ HUE_DTLS_PORT: Final = 2100
 HUE_STREAM_PROTOCOL: Final = b"HueStream"
 HUE_STREAM_VERSION: Final = b"\x02\x00"
 KEEPALIVE_INTERVAL: Final = 9.0  # bridge drops the channel after ~10s of silence
+# The Entertainment API accepts at most ~10 lights per UDP packet; larger areas
+# (multiple lamps + gradient-strip segments) must be split across packets or the
+# bridge can drop the over-stuffed frame.
+MAX_CHANNELS_PER_PACKET: Final = 10
 
 # --- Audio analysis ------------------------------------------------------
 # Decode rate for ffmpeg PCM output. 22050 mono is plenty for beat/band work
