@@ -39,6 +39,11 @@ _WINDOW_S = 1.0
 _EMA_ALPHA = 0.04  # slow anchor (~0.5 s) the field is pinned toward when limiting
 _ENGAGE_RATE = 1.0  # compression engages instantly once the budget is exceeded
 _RELEASE_RATE = 0.02  # …and releases slowly, so it can't oscillate back to strobing
+# Release is also gated on the *incoming* field going quiet: while the content is
+# still actively swinging we keep the field pinned, so a sustained strobe can't
+# leak a few flashes back through on every slow-release cycle.
+_ACTIVITY_DECAY = 0.92  # peak-hold decay of the raw-field activity measure
+_ACTIVITY_CALM = 0.04  # per-frame field swing below which the content is "calm"
 _DIR_EPS = 1e-4
 
 
@@ -85,6 +90,8 @@ class FieldSafety:
         self._half = 0  # half-transitions; two make one flash
         self._flashes: deque[float] = deque()  # timestamps within the window
         self._comp = 1.0  # 1 = transparent, 0 = field pinned to its slow average
+        self._prev_raw: float | None = None
+        self._activity = 0.0  # how hard the incoming field is currently swinging
 
     def reset(self) -> None:
         self._ema = None
@@ -93,6 +100,8 @@ class FieldSafety:
         self._half = 0
         self._flashes.clear()
         self._comp = 1.0
+        self._prev_raw = None
+        self._activity = 0.0
 
     def process(self, colors: dict[int, RGB], dt: float) -> dict[int, RGB]:
         """Return a copy of ``colors`` with whole-field flashing bounded.
@@ -108,6 +117,13 @@ class FieldSafety:
             self._prev_field = field
             self._last_extreme = field
 
+        # Track how hard the *incoming* field is swinging (peak-held), so we only
+        # release once the content genuinely calms — not merely on a timer.
+        if self._prev_raw is None:
+            self._prev_raw = field
+        self._activity = max(self._activity * _ACTIVITY_DECAY, abs(field - self._prev_raw))
+        self._prev_raw = field
+
         # Decide compression from the flash budget *measured on what we emitted*
         # last frame, then ramp the compression factor (fast in, slow out).
         self._prune()
@@ -116,7 +132,10 @@ class FieldSafety:
         # ceiling itself would let a final (N+1)th flash leak out. Triggering at
         # ceiling-1 keeps the emitted field at or below ``max_flashes`` per second.
         over = len(self._flashes) >= max(1, self._max_flashes - 1)
-        comp_target = 0.0 if over else 1.0
+        # Only release when both the flash budget is clear *and* the incoming
+        # field has gone quiet; otherwise stay pinned through a sustained strobe.
+        calm = self._activity < _ACTIVITY_CALM
+        comp_target = 1.0 if (not over and calm) else 0.0
         rate = _ENGAGE_RATE if comp_target < self._comp else _RELEASE_RATE
         self._comp += (comp_target - self._comp) * rate
         limiting = self._comp < 0.999
@@ -179,21 +198,22 @@ class FieldSafety:
         self._prev_field = field
 
     def _apply_red_guard(self, colors: dict[int, RGB]) -> dict[int, RGB]:
-        """Desaturate a flashing saturated-red field toward white.
+        """Desaturate a rapidly-changing saturated-red field toward white.
 
-        Saturated red carries a stricter flash threshold, so even a couple of
-        red flashes per second pull the colour toward white (which both lowers
-        the red-flash risk and softens the look) without dimming the field.
+        Saturated red carries a stricter flash threshold, so rapidly swinging red
+        is pulled toward white (which both lowers the red-flash risk and softens
+        the look) without dimming the field. Driven by the raw-field *activity*
+        plus any registered flashes — the brightness limiter may already be
+        pinning the field, but the red content is still swinging underneath.
         """
-        if len(self._flashes) <= MAX_RED_FLASHES_PER_S:
-            return colors
         redness = _field_redness(colors)
         if redness < RED_SATURATION:
             return colors
-        # Scale desat with how far over the red budget we are (cap at 50% white).
-        over = len(self._flashes) - MAX_RED_FLASHES_PER_S
-        mix = min(0.5, 0.15 * over) * redness
-        if mix <= 0.0:
+        over = max(0, len(self._flashes) - MAX_RED_FLASHES_PER_S)
+        # Strength from over-budget flashes plus how hard the field is swinging.
+        drive = 0.15 * over + max(0.0, self._activity - _ACTIVITY_CALM)
+        mix = min(0.5, drive) * redness
+        if mix <= 0.01:
             return colors
         out: dict[int, RGB] = {}
         for cid, (r, g, b) in colors.items():

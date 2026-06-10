@@ -131,10 +131,12 @@ reactivity relative to the brightness ceiling:
 - **High**: dims to ~30% of the ceiling; the kick sweeps the room as a wavefront.
 - **Intense**: full dimming/brightening across the whole range, strong wavefronts
   and treble shimmer.
-- **Extreme**: the maximum, club-style. Near-black (~1%) between beats, snapping
-  to full on the kick with fast, hard wavefronts (still held under the flash
-  limit by the eye-safety stage, since the wavefronts spread the energy across
-  the room rather than flashing it all at once).
+- **Extreme**: the maximum, a real club. The room sits dark and vivid colour
+  beams snap to full and sweep across the lamps on every beat, with hard fast
+  colour jumps and treble sparkle — distinctly harder than Intense's lit,
+  immersive baseline. The eye-safety stage holds whole-room flashing under the
+  WCAG limit, so the energy stays in the moving beams and the colour rather than
+  the whole room strobing.
 
 **Brightness** sets the overall ceiling; intensity varies brightness below it.
 At Subtle, brightness is simply the steady level.

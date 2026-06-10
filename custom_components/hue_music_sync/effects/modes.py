@@ -85,16 +85,21 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         wave_gain=0.85, wave_speed=2.2, wave_width=0.30, height_freq=0.50,
         depth_wash=0.10, anticipation_ms=80, drop_boost=0.50, build_desat=0.50,
     ),
-    # Club: the maximum. Near-black (~1%) between beats, snapping to full on the
-    # kick with fast, hard wavefronts sweeping the room, treble shimmer and colour
-    # jumping hard per beat. Still bounded by the non-bypassable flash limiter (the
-    # spatial wavefronts distribute the energy so it stays under the WCAG ceiling).
+    # Club: the maximum, and unmistakably so. Unlike Intense (a lit, immersive
+    # baseline), Extreme keeps the room *dark* and fires vivid colour beams that
+    # snap to full and sweep across the lamps on every beat — a strobe-like
+    # wavefront in a black room, with hard fast colour jumps and treble sparkle.
+    # The darkness is the point: there's no continuous baseline (base/height/depth
+    # ~0), so each light slams from black to full as the wave passes and drops
+    # fast. The beams are spatially distributed, so it stays under the WCAG
+    # full-field flash ceiling while feeling far harder than Intense.
     SyncMode.EXTREME: ModeParams(
-        base=0.05, floor=0.01, bass_gain=0.10, beat_gain=1.0, beat_threshold=1.3,
-        spread=0.12, colour_speed=0.06, shimmer=0.30, colour_sat=0.45,
-        colour_beat_step=0.040, colour_lerp=0.38,
-        wave_gain=1.0, wave_speed=2.6, wave_width=0.26, height_freq=0.60,
-        depth_wash=0.08, anticipation_ms=85, drop_boost=0.70, build_desat=0.60,
+        base=0.0, floor=0.0, bass_gain=0.06, beat_gain=1.0, beat_threshold=1.0,
+        spread=0.0, colour_speed=0.12, shimmer=0.35, colour_sat=0.92,
+        colour_beat_step=0.070, colour_lerp=0.50,
+        wave_gain=1.4, wave_speed=3.2, wave_width=0.25, height_freq=0.0,
+        depth_wash=0.0, anticipation_ms=90, drop_boost=1.0, build_desat=0.60,
+        bri_attack=1.0, bri_decay=0.50,
     ),
 }
 
