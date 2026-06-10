@@ -246,11 +246,12 @@ reflect what's playing — recolour to the album and lock a visualizer to the so
 | `album_colors` | The extracted album palette as `#rrggbb` hex (when **Colour = Album colours**). |
 | `bpm` | Detected tempo, once the rhythm model locks. |
 | `media_title` / `media_artist` / `media_image` | Now-playing track, artist and album art of the followed player. |
+| `media_position` / `media_position_updated_at` | Playback position anchors so a visualizer can run a beat grid locked to the song. |
 | `source_player` | The `media_player` entity the sync is following. |
 
-The attributes are only written when they change (per track / on tempo lock), so
-they don't spam the state machine or recorder, and they disappear when the area
-stops syncing.
+The attributes are only written when they change (per track / on tempo lock / on
+seek), so they don't spam the state machine or recorder, and they disappear when
+the area stops syncing.
 
 ## Services
 

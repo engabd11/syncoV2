@@ -511,6 +511,14 @@ class SyncSession:
                 # `media_image`.
                 if a.get("entity_picture"):
                     state["media_image"] = a["entity_picture"]
+                # Playback position anchors so a card's visualizer can run a beat
+                # grid locked to the song. These re-anchor only on seek / play-
+                # pause / track-change, so mirroring them doesn't spam the recorder
+                # (the card extrapolates the live position between updates).
+                if a.get("media_position") is not None:
+                    state["media_position"] = a["media_position"]
+                if a.get("media_position_updated_at") is not None:
+                    state["media_position_updated_at"] = a["media_position_updated_at"]
                 state["source_player"] = entity_id
         return state
 
