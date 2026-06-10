@@ -20,6 +20,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_send
+from homeassistant.util import dt as dt_util
 
 from .audio.metadata import MetadataSource
 from .audio.snapcast import SnapcastSource
@@ -70,6 +71,12 @@ _IDLE_REOPEN_S = 2.0
 _RECONNECT_ATTEMPTS = 5
 _RECONNECT_BASE_S = 1.0
 _RECONNECT_MAX_S = 8.0
+
+
+def _circular_distance(a: float, b: float, period: float) -> float:
+    """Smallest distance between two phases on a cyclic timeline of ``period``."""
+    d = abs(a - b) % period
+    return min(d, period - d)
 
 
 @dataclass(slots=True)
@@ -174,6 +181,7 @@ class SyncSession:
         self.public_state: dict = {}
         self._album_hex: list[str] = []
         self._last_beatgrid: BeatGrid | None = None
+        self._beat_anchor: float | None = None  # stable downbeat ref for the card
         self._last_publish = 0.0
 
     @property
@@ -236,6 +244,7 @@ class SyncSession:
         # track or seek); clear them so the grid re-locks cleanly.
         self._tempo.reset()
         self._structure.reset()
+        self._beat_anchor = None  # downbeat ref is stale after a discontinuity
 
     def _resolve_player(self) -> str | None:
         if self._settings.media_player:
@@ -519,8 +528,39 @@ class SyncSession:
                     state["media_position"] = a["media_position"]
                 if a.get("media_position_updated_at") is not None:
                     state["media_position_updated_at"] = a["media_position_updated_at"]
+                anchor = self._beat_anchor_on_timeline(bg, a)
+                if anchor is not None:
+                    state["beat_anchor"] = anchor
                 state["source_player"] = entity_id
         return state
+
+    def _beat_anchor_on_timeline(self, bg: BeatGrid | None, attrs) -> float | None:
+        """A recent detected-beat position (s) on the player's media timeline.
+
+        Lets a card lock its beat grid to the real downbeats instead of assuming
+        beat 0 sits at position 0. Folded into ``[0, beat_period)`` and held stable
+        (re-published only when it shifts meaningfully), so steady tempo doesn't
+        churn the recorder.
+        """
+        if bg is None or not bg.locked or bg.bpm <= 0:
+            return None
+        pos = attrs.get("media_position")
+        if pos is None:
+            return None
+        period = 60.0 / bg.bpm
+        live = float(pos)
+        updated = attrs.get("media_position_updated_at")
+        if updated is not None:
+            try:
+                live += max(0.0, (dt_util.utcnow() - updated).total_seconds())
+            except (TypeError, ValueError):
+                pass
+        # Position of the most recent beat, folded to one beat period.
+        anchor = (live - bg.phase * period) % period
+        prev = self._beat_anchor
+        if prev is None or _circular_distance(anchor, prev, period) > 0.04:
+            self._beat_anchor = round(anchor, 3)
+        return self._beat_anchor
 
     def _maybe_publish(self) -> None:
         """Update the exposed attributes, but only fire a state write when they

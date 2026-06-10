@@ -1,6 +1,6 @@
 {
   "domain": "hue_music_sync",
-  "name": "Hue Music Sync",
+  "name": "Hue Synco",
   "after_dependencies": ["music_assistant"],
   "codeowners": ["@engabd11"],
   "config_flow": true,
@@ -10,5 +10,5 @@
   "iot_class": "local_push",
   "issue_tracker": "https://github.com/engabd11/synco/issues",
   "requirements": ["numpy"],
-  "version": "1.0.0"
+  "version": "1.1.0"
 }

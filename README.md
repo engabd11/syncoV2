@@ -1,10 +1,16 @@
-# Hue Music Sync for Home Assistant
+# Hue Synco for Home Assistant
 
 Syncs **Philips Hue Entertainment areas** to music played through **Music Assistant**.
 Streams colour directly to the bridge over the Hue Entertainment API
 (~40 Hz over DTLS). Reacts to the beat and frequency content of the audio,
 lighting each bulb based on its position in the area and the frequency band
 it represents.
+
+Hue Synco ships as **one install**: the integration does the real-time backend
+sync, and a bundled **dashboard card** (the Ambient Glow card) is served straight
+from the integration — no separate download or manual resource setup. The card
+recolours to the album, shows what's playing and runs a visualiser locked to the
+song's tempo and beat.
 
 Manage and arrange the lights inside an entertainment area in the **Hue app**.
 This integration consumes the areas that already exist and drives them.
@@ -234,24 +240,46 @@ automation:
           colour: album_art
 ```
 
-### Dashboard card attributes
+## Dashboard card
 
-While an area is syncing, its `switch` exposes extra state attributes so a
-dashboard card (e.g. the companion
-[Hue Music Sync Card](https://github.com/engabd11/hue-music-sync-card)) can
-reflect what's playing — recolour to the album and lock a visualizer to the song:
+The **Ambient Glow** card is bundled with the integration and registered
+automatically on setup, so it shows up in the dashboard card picker as **Hue
+Synco Card** with no manual resource step. Add it like any card:
+
+```yaml
+type: custom:hue-music-sync-card
+areas:
+  - name: Living Room
+    switch: switch.music_sync_living_room
+    intensity: select.music_sync_living_room_intensity
+    effect: select.music_sync_living_room_effect
+    colour: select.music_sync_living_room_colour
+    brightness: number.music_sync_living_room_brightness
+    timing: number.music_sync_living_room_timing_offset
+    media_player: media_player.living_room   # optional
+```
+
+It drives every area control, recolours to the album, and runs an ambient
+visualiser locked to the song.
+
+### How the card stays in sync
+
+While an area is syncing, its `switch` publishes the state the card reads (off the
+switch, or off a configured `media_player`):
 
 | Attribute | Meaning |
 | --- | --- |
-| `album_colors` | The extracted album palette as `#rrggbb` hex (when **Colour = Album colours**). |
+| `album_colors` | The integration's extracted album palette as `#rrggbb` hex (when **Colour = Album colours**). |
 | `bpm` | Detected tempo, once the rhythm model locks. |
+| `beat_anchor` | A recent detected-beat position on the playback timeline, so the visualiser lands on the real downbeats. |
 | `media_title` / `media_artist` / `media_image` | Now-playing track, artist and album art of the followed player. |
-| `media_position` / `media_position_updated_at` | Playback position anchors so a visualizer can run a beat grid locked to the song. |
+| `media_position` / `media_position_updated_at` | Playback position anchors so the visualiser runs in time with the song. |
 | `source_player` | The `media_player` entity the sync is following. |
 
-The attributes are only written when they change (per track / on tempo lock / on
-seek), so they don't spam the state machine or recorder, and they disappear when
-the area stops syncing.
+The card uses the **integration's** real palette, tempo and beat phase, so its
+colours and beat-locked bars match the lights exactly instead of approximating.
+The attributes are only written when they change (per track / tempo lock / seek),
+so they don't spam the recorder, and they disappear when the area stops syncing.
 
 ## Services
 

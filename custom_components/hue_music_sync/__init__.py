@@ -40,6 +40,11 @@ SERVICE_SET_OPTIONS = "set_options"
 
 # switch entity_id -> (SyncManager, area_id), populated by switch entities.
 DATA_AREA_INDEX = "area_index"
+DATA_CARD_REGISTERED = "card_registered"
+
+# The bundled dashboard card (the frontend "beauty") served straight from the
+# integration, so a single install gives both the backend sync and the card.
+CARD_URL = "/hue_music_sync/hue-music-sync-card.js"
 
 
 def _build_ssl_context() -> ssl.SSLContext:
@@ -59,10 +64,47 @@ def _ffmpeg_binary(hass: HomeAssistant) -> str:
         return "ffmpeg"
 
 
+async def _register_frontend_card(hass: HomeAssistant) -> None:
+    """Serve and register the bundled dashboard card once.
+
+    Installing the integration then provides the Hue Synco Card automatically —
+    no manual dashboard-resource step. Best-effort: a failure here never blocks
+    the integration (the card can still be added as a resource by hand).
+    """
+    if hass.data[DOMAIN].get(DATA_CARD_REGISTERED):
+        return
+    hass.data[DOMAIN][DATA_CARD_REGISTERED] = True
+    try:
+        from pathlib import Path
+
+        from homeassistant.components.frontend import add_extra_js_url
+        from homeassistant.components.http import StaticPathConfig
+        from homeassistant.loader import async_get_integration
+
+        path = Path(__file__).parent / "frontend" / "hue-music-sync-card.js"
+        await hass.http.async_register_static_paths(
+            [StaticPathConfig(CARD_URL, str(path), False)]
+        )
+        try:
+            version = (await async_get_integration(hass, DOMAIN)).version
+        except Exception:  # noqa: BLE001
+            version = None
+        add_extra_js_url(hass, f"{CARD_URL}?v={version}" if version else CARD_URL)
+        _LOGGER.debug("Registered bundled Hue Synco dashboard card at %s", CARD_URL)
+    except Exception as err:  # noqa: BLE001 - never block setup on the card
+        hass.data[DOMAIN][DATA_CARD_REGISTERED] = False
+        _LOGGER.warning(
+            "Could not auto-register the Hue Synco dashboard card (%s); add it "
+            "manually as a dashboard resource pointing at %s.",
+            err, CARD_URL,
+        )
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up Hue Music Sync from a config entry."""
+    """Set up Hue Synco from a config entry."""
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN].setdefault(DATA_AREA_INDEX, {})
+    await _register_frontend_card(hass)
 
     if "music_assistant" not in hass.config.components:
         _LOGGER.warning(
