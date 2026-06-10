@@ -25,7 +25,7 @@ from .audio.metadata import MetadataSource
 from .audio.snapcast import SnapcastSource
 from .audio.source import MusicAssistantSource
 from .audio.structure import StructureTracker
-from .audio.tempo import TempoTracker
+from .audio.tempo import BeatGrid, TempoTracker
 from .color.album_art import extract_palette
 from .const import (
     ANALYSIS_HOP,
@@ -169,6 +169,12 @@ class SyncSession:
         self._last_track: str | None = None
         self._art_task: asyncio.Task | None = None
         self._delay_buf: deque[tuple[float, dict]] = deque()
+        # Now-playing / album-colour / tempo snapshot surfaced on the switch entity
+        # so dashboard cards can recolour and lock a visualizer to the song.
+        self.public_state: dict = {}
+        self._album_hex: list[str] = []
+        self._last_beatgrid: BeatGrid | None = None
+        self._last_publish = 0.0
 
     @property
     def settings(self) -> AreaSettings:
@@ -300,6 +306,12 @@ class SyncSession:
                 dt = now - last_t
                 last_t = now
 
+                # Refresh the card-facing attributes (~1 Hz; only writes HA state
+                # when something actually changed). Runs in every branch below.
+                if now - self._last_publish >= 1.0:
+                    self._last_publish = now
+                    self._maybe_publish()
+
                 try:
                     if self._source is None:
                         if now - last_reopen >= _IDLE_REOPEN_S:
@@ -331,6 +343,7 @@ class SyncSession:
                     beatgrid = self._tempo.update(
                         frame.t_audio, frame.flux, frame.beat, frame.beat_strength
                     )
+                    self._last_beatgrid = beatgrid
                     structure = self._structure.update(frame)
                     colors = self._engine.render(frame, period, beatgrid, structure)
                     await self._send_timed(colors)
@@ -453,6 +466,8 @@ class SyncSession:
         palette = await extract_palette(self._ffmpeg, url)
         if palette is not None and self._settings.colour == ColorScheme.ALBUM_ART:
             self._engine.set_palette(palette)
+            self._album_hex = self._palette_to_hex(palette)
+            self._maybe_publish()  # surface the new album colours to cards at once
             _LOGGER.info(
                 "Album colours for %s: %s",
                 self._config.name,
@@ -460,6 +475,53 @@ class SyncSession:
             )
         elif palette is None:
             _LOGGER.warning("Album-art extraction failed for %s (%s)", self._config.name, url)
+
+    @staticmethod
+    def _palette_to_hex(palette) -> list[str]:
+        """Render a Palette's anchor colours as ``#rrggbb`` strings for the UI."""
+        out: list[str] = []
+        for c in palette.colors:
+            r, g, b = (int(round(max(0.0, min(1.0, x)) * 255)) for x in c)
+            out.append(f"#{r:02x}{g:02x}{b:02x}")
+        return out
+
+    def _compute_public_state(self) -> dict:
+        """Now-playing / album-colour / tempo data exposed on the switch entity.
+
+        Lets a dashboard card recolour itself to the extracted album palette and
+        lock a visualizer to the song (position from the player, tempo here).
+        """
+        state: dict = {}
+        if self._album_hex:
+            state["album_colors"] = self._album_hex
+        bg = self._last_beatgrid
+        if bg is not None and bg.locked and bg.bpm > 0:
+            state["bpm"] = round(bg.bpm)
+        entity_id = self._source.entity_id if self._source is not None else None
+        if entity_id:
+            ps = self._hass.states.get(entity_id)
+            if ps is not None:
+                a = ps.attributes
+                if a.get("media_title"):
+                    state["media_title"] = a["media_title"]
+                if a.get("media_artist"):
+                    state["media_artist"] = a["media_artist"]
+                # Deliberately NOT `entity_picture` (a reserved attribute that
+                # would replace the switch's own icon in the UI); the card reads
+                # `media_image`.
+                if a.get("entity_picture"):
+                    state["media_image"] = a["entity_picture"]
+                state["source_player"] = entity_id
+        return state
+
+    def _maybe_publish(self) -> None:
+        """Update the exposed attributes, but only fire a state write when they
+        actually change — keeps the state machine and recorder quiet."""
+        state = self._compute_public_state()
+        if state == self.public_state:
+            return
+        self.public_state = state
+        async_dispatcher_send(self._hass, signal_area_update(self._config.id))
 
     async def stop(self) -> None:
         self._stopping = True
@@ -541,6 +603,14 @@ class SyncManager:
 
     def is_active(self, area_id: str) -> bool:
         return area_id in self._sessions
+
+    def area_attributes(self, area_id: str) -> dict:
+        """Now-playing / album-colour / bpm data for an active area (for cards).
+
+        Empty when the area isn't syncing, so the switch drops the attributes.
+        """
+        session = self._sessions.get(area_id)
+        return dict(session.public_state) if session is not None else {}
 
     async def update_settings(self, area_id: str, **changes) -> None:
         current = self.get_settings(area_id)

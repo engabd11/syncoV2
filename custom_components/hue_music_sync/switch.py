@@ -40,6 +40,15 @@ class HueMusicSyncSwitch(HueMusicSyncAreaEntity, SwitchEntity):
         super().__init__(manager, area_id, "sync")
         self._attr_is_on = manager.is_active(area_id)
 
+    @property
+    def extra_state_attributes(self) -> dict | None:
+        """Now-playing, extracted album colours and detected tempo while syncing.
+
+        Lets dashboard cards recolour to the album and lock a visualizer to the
+        song. Empty (so the attributes disappear) when the area isn't active.
+        """
+        return self._manager.area_attributes(self._area_id) or None
+
     @callback
     def _sync_state(self) -> None:
         self._attr_is_on = self._manager.is_active(self._area_id)

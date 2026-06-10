@@ -234,6 +234,24 @@ automation:
           colour: album_art
 ```
 
+### Dashboard card attributes
+
+While an area is syncing, its `switch` exposes extra state attributes so a
+dashboard card (e.g. the companion
+[Hue Music Sync Card](https://github.com/engabd11/hue-music-sync-card)) can
+reflect what's playing — recolour to the album and lock a visualizer to the song:
+
+| Attribute | Meaning |
+| --- | --- |
+| `album_colors` | The extracted album palette as `#rrggbb` hex (when **Colour = Album colours**). |
+| `bpm` | Detected tempo, once the rhythm model locks. |
+| `media_title` / `media_artist` / `media_image` | Now-playing track, artist and album art of the followed player. |
+| `source_player` | The `media_player` entity the sync is following. |
+
+The attributes are only written when they change (per track / on tempo lock), so
+they don't spam the state machine or recorder, and they disappear when the area
+stops syncing.
+
 ## Services
 
 | Service | Description |
