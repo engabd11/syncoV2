@@ -101,6 +101,44 @@ def test_sections_split_quiet_intro_from_loud_chorus():
     assert late.energy > early.energy + 0.2
 
 
+def test_features_are_stored_and_normalised(map_120: TrackMap):
+    f = map_120.features
+    assert f is not None
+    n = f.energy.shape[0]
+    assert f.bands.shape == (n, 5)
+    assert f.flux.shape == (n,) and f.bass_flux.shape == (n,) and f.centroid.shape == (n,)
+    for arr in (f.bands, f.energy, f.flux, f.bass_flux, f.centroid):
+        assert float(arr.min()) >= 0.0 and float(arr.max()) <= 1.0
+    # The kicks are 60 Hz: loud frames carry their energy in the low bands.
+    loud = f.bands[f.energy > 0.5]
+    assert loud.size and float(loud[:, :2].max()) > 0.5  # sub_bass/bass active
+    assert float(loud[:, 4].mean()) < 0.3  # not treble
+
+
+def test_frame_at_replays_beats_exactly_once(map_120: TrackMap):
+    # Sweeping the position forward fires bass_beat exactly once per map beat.
+    beats_in_window = np.sum((map_120.beats >= 10.0) & (map_120.beats < 14.0))
+    fired = 0
+    prev = 10.0
+    for pos in np.arange(10.0, 14.0, 0.02):
+        fr = map_120.frame_at(float(pos), prev)
+        prev = float(pos)
+        assert fr is not None
+        if fr.bass_beat:
+            fired += 1
+            assert fr.bass_strength >= 1.0  # accent-scaled like the live path
+    assert fired == beats_in_window
+
+
+def test_frame_at_bands_follow_the_audio(map_120: TrackMap):
+    fr = map_120.frame_at(12.0)
+    assert fr is not None
+    assert set(fr.bands) == {"sub_bass", "bass", "low_mid", "mid", "high"}
+    assert fr.t_audio == 12.0
+    assert map_120.frame_at(-5.0) is None
+    assert map_120.frame_at(10_000.0) is None
+
+
 def test_noise_is_not_usable():
     rng = np.random.default_rng(7)
     noise = (rng.standard_normal(_SR * 20) * 0.3).astype(np.float32)

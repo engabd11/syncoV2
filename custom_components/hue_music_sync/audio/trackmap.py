@@ -37,8 +37,9 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from ..const import ANALYSIS_HOP, ANALYSIS_SAMPLE_RATE, ANALYSIS_WINDOW
+from ..const import ANALYSIS_HOP, ANALYSIS_SAMPLE_RATE, ANALYSIS_WINDOW, BANDS
 from .analyzer import (
+    AnalysisFrame,
     band_means,
     log_spectrum,
     make_onset_filterbank,
@@ -80,6 +81,24 @@ class Section:
 
 
 @dataclass(slots=True)
+class TrackFeatures:
+    """Per-frame audio features, globally normalised, ready to *play back*.
+
+    This is what makes the integration universal: a player we cannot tap live
+    (AirPlay, Chromecast, Sonos, DLNA, ...) can still get a fully beat-accurate
+    show by replaying these precomputed frames against its playback position.
+    Global normalisation (95th percentile = 1.0) replaces the live AGC — and is
+    better, because it sees the whole track at once. ~400 KB per track.
+    """
+
+    bands: np.ndarray  # (n_frames, len(BANDS)) float32, 0..1
+    energy: np.ndarray  # (n_frames,) float32, 0..1
+    flux: np.ndarray  # (n_frames,) float32, 0..~1 (tempo-model food)
+    bass_flux: np.ndarray  # (n_frames,) float32, 0..~1
+    centroid: np.ndarray  # (n_frames,) float32, 0..1 (structure brightness)
+
+
+@dataclass(slots=True)
 class TrackMap:
     """Precomputed beat/section schedule for one track."""
 
@@ -90,10 +109,48 @@ class TrackMap:
     accents: np.ndarray  # onset strength at each beat, 0..1
     downbeat: int  # index into ``beats`` of the first bar start
     sections: list[Section] = field(default_factory=list)
+    features: TrackFeatures | None = None  # per-frame playback features
 
     @property
     def usable(self) -> bool:
         return self.confidence >= MIN_MAP_CONFIDENCE and self.beats.size >= 8
+
+    def frame_at(self, pos: float, prev_pos: float | None = None) -> AnalysisFrame | None:
+        """Synthesise the :class:`AnalysisFrame` for playback position ``pos``.
+
+        ``prev_pos`` bounds the beat-window so each scheduled beat fires exactly
+        once as the position advances. Returns None outside the analysed span
+        (callers fall back to their own behaviour).
+        """
+        f = self.features
+        if f is None:
+            return None
+        i = int(pos / _FRAME_PERIOD)
+        if i < 0 or i >= f.energy.shape[0]:
+            return None
+        # A beat fires when one of the scheduled beat times falls inside
+        # (prev_pos, pos] — exactly once per beat as the clock sweeps past it.
+        lo = prev_pos if prev_pos is not None and prev_pos < pos else pos - _FRAME_PERIOD
+        j0 = int(np.searchsorted(self.beats, lo, side="right"))
+        j1 = int(np.searchsorted(self.beats, pos, side="right"))
+        beat = j1 > j0
+        # Accent-weighted strength on the live detector's ~1..3 scale, so the
+        # per-mode beat_threshold gates behave exactly like the live path.
+        strength = 1.0 + 2.0 * float(self.accents[j1 - 1]) if beat else 0.0
+        bands = {name: float(v) for name, v in zip(BANDS, f.bands[i])}
+        return AnalysisFrame(
+            bands=bands,
+            energy=float(f.energy[i]),
+            beat=beat,
+            beat_strength=strength,
+            tempo_bpm=self.bpm,
+            flux=float(f.flux[i]),
+            t_audio=pos,
+            centroid=float(f.centroid[i]),
+            bass_flux=float(f.bass_flux[i]),
+            bass_beat=beat,
+            bass_strength=strength,
+        )
 
     def grid_at(self, pos: float, prev_pos: float | None = None) -> BeatGrid | None:
         """The authoritative beat grid at playback position ``pos`` (seconds).
@@ -176,12 +233,21 @@ class EnvelopeExtractor:
         self._fb_starts, self._fb_counts, self.n_bass = make_onset_filterbank(
             freqs.astype(np.float32)
         )
+        self._freqs = freqs.astype(np.float32)
+        # Bin ranges of the named output bands (same edges as the live analyzer).
+        self._named_bins = []
+        for lo, hi in BANDS.values():
+            lo_i = int(np.searchsorted(freqs, lo, side="left"))
+            hi_i = int(np.searchsorted(freqs, hi, side="right"))
+            self._named_bins.append((lo_i, max(lo_i + 1, hi_i)))
         self._tail = np.zeros(0, dtype=np.float32)
         self._prev_log: np.ndarray | None = None
         self.env: list[float] = []  # SuperFlux onset envelope per frame
         self.bass_env: list[float] = []  # bass-band log-flux per frame
         self.rms: list[float] = []
         self.bands: list[np.ndarray] = []  # linear filterbank means per frame
+        self.named_bands: list[np.ndarray] = []  # the 5 output bands per frame
+        self.centroid: list[float] = []
 
     def push(self, samples: np.ndarray) -> None:
         buf = np.concatenate([self._tail, samples]) if self._tail.size else samples
@@ -209,6 +275,17 @@ class EnvelopeExtractor:
         self.bass_env.extend(np.sum(bdiff, axis=1).tolist())
         self.rms.extend(np.sqrt(np.mean(frames * frames, axis=1)).tolist())
         self.bands.extend(lin)
+        # The 5 named output bands (same maths as the live analyzer: RMS of the
+        # band's power) and the spectral centroid, per frame.
+        power = mags * mags
+        named = np.stack(
+            [np.sqrt(np.mean(power[:, lo:hi], axis=1)) for lo, hi in self._named_bins],
+            axis=1,
+        )
+        self.named_bands.extend(named)
+        total = np.maximum(mags.sum(axis=1), 1e-9)
+        cent = np.minimum(1.0, (mags @ self._freqs) / total / 5000.0)
+        self.centroid.extend(cent.tolist())
         self._prev_log = logb[-1]
         consumed = n_frames * self._hop
         self._tail = buf[consumed:].copy()
@@ -315,8 +392,13 @@ def _segment_sections(
     for i in range(k, n_blocks - k):
         novelty[i] = float(np.sum(ssm[i - k : i + k, i - k : i + k] * kernel))
 
-    # Peak-pick boundaries: local maxima above mean+std, min section length.
-    thresh = novelty.mean() + novelty.std()
+    # Peak-pick boundaries: local maxima well above the robust noise level
+    # (median + 5*MAD ~ 3.4 sigma). A plain mean+std threshold fragments
+    # uniform tracks, because with flat novelty *everything* sits near it.
+    core = novelty[k : n_blocks - k]
+    med = float(np.median(core))
+    mad = float(np.median(np.abs(core - med)))
+    thresh = med + 5.0 * max(mad, 1e-6)
     min_gap = max(1, int(round(_MIN_SECTION_S / _BLOCK_S)))
     bounds: list[int] = []
     for i in range(1, n_blocks - 1):
@@ -379,6 +461,37 @@ def _finish_analysis(ex: EnvelopeExtractor) -> TrackMap | None:
         accents=accents,
         downbeat=downbeat,
         sections=sections,
+        features=_build_features(ex, env, bass_env, rms),
+    )
+
+
+def _norm_p(a: np.ndarray, pct: float, floor: float) -> np.ndarray:
+    """Normalise so the ``pct`` percentile maps to 1.0 (clipped 0..1).
+
+    ``floor`` is an absolute minimum reference so a band that is genuinely
+    silent throughout the track doesn't get its noise amplified to full scale
+    (the offline counterpart of the live analyzer's noise gate).
+    """
+    ref = float(np.percentile(a, pct))
+    return np.clip(a / max(ref, floor), 0.0, 1.0).astype(np.float32)
+
+
+def _build_features(
+    ex: EnvelopeExtractor, env: np.ndarray, bass_env: np.ndarray, rms: np.ndarray
+) -> TrackFeatures:
+    """Globally-normalised playback features (offline equivalent of the AGC)."""
+    named = np.asarray(ex.named_bands, dtype=np.float32)
+    bands = np.empty_like(named)
+    for c in range(named.shape[1]):
+        bands[:, c] = _norm_p(named[:, c], 95.0, floor=0.5)
+    return TrackFeatures(
+        bands=bands,
+        energy=_norm_p(rms, 95.0, floor=0.01),
+        # Onset envelopes are sparse spikes: anchor on a high percentile so a
+        # typical beat lands near 1.0 like the live flux AGC.
+        flux=_norm_p(env, 99.0, floor=2.5),
+        bass_flux=_norm_p(bass_env, 99.0, floor=2.5),
+        centroid=np.asarray(ex.centroid, dtype=np.float32),
     )
 
 
@@ -456,6 +569,13 @@ class TrackMapper:
             return None
         tm = self._cache.get(track_id)
         return tm if tm is not None and tm.usable else None
+
+    def failed(self, track_id: str | None) -> bool:
+        """True when analysis for ``track_id`` completed but yielded no usable map."""
+        if not track_id or track_id not in self._cache:
+            return False
+        tm = self._cache[track_id]
+        return tm is None or not tm.usable
 
     def ensure(self, track_id: str | None, url: str | None) -> None:
         """Kick off analysis for ``track_id`` if it isn't cached or running."""

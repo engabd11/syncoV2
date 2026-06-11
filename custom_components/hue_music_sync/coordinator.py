@@ -22,6 +22,7 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.util import dt as dt_util
 
+from .audio.map_source import TrackMapSource
 from .audio.metadata import MetadataSource
 from .audio.snapcast import SnapcastSource
 from .audio.source import MusicAssistantSource, resolve_map_url
@@ -181,7 +182,10 @@ class SyncSession:
         self._map_check = 0.0
         self._map_prev_pos: float | None = None
         self._map_section: Section | None = None
-        self._source: MusicAssistantSource | MetadataSource | SnapcastSource | None = None
+        self._fallback_track: str | None = None  # track the metadata source opened on
+        self._source: (
+            MusicAssistantSource | MetadataSource | SnapcastSource | TrackMapSource | None
+        ) = None
         self._task: asyncio.Task | None = None
         self._running = False
         self._stopping = False
@@ -309,13 +313,24 @@ class SyncSession:
             return True
         await ma.close()
 
-        # 3. Metadata-driven animation (universal fallback).
+        # 3. Offline track-map playback: no live tap needed at all, so this
+        # covers every remaining player type (AirPlay, Cast, Sonos, DLNA, ...)
+        # that reports a playback position and a resolvable per-track URL.
+        ms = TrackMapSource(self._hass, entity_id, self._mapper)
+        if await ms.open():
+            self._source = ms
+            return True
+        await ms.close()
+
+        # 4. Metadata-driven animation (universal fallback). Remember the track
+        # it opened on, so a track change re-evaluates the better sources.
         meta = MetadataSource(self._hass, entity_id)
         if await meta.open():
             _LOGGER.info(
                 "No tappable audio for %s; using metadata-driven sync", entity_id
             )
             self._source = meta
+            self._fallback_track = meta.track_id
             return True
         return False
 
@@ -371,6 +386,15 @@ class SyncSession:
                     if now - self._map_check >= 1.0:
                         self._map_check = now
                         self._maybe_track_map()
+                        # A metadata fallback shouldn't be a life sentence: on a
+                        # track change, drop it and re-evaluate the better
+                        # sources (the next track may be tappable/analysable).
+                        if (
+                            isinstance(self._source, MetadataSource)
+                            and self._source.track_id != self._fallback_track
+                        ):
+                            await self._reset_source()
+                            continue
                     # Causal beat grid (always running; the fallback rhythm model).
                     beatgrid = self._tempo.update(
                         frame.t_audio, frame.flux, frame.beat, frame.beat_strength,
@@ -511,12 +535,17 @@ class SyncSession:
     def _analysis_position(self) -> float | None:
         """The track position our *analysis frames* currently correspond to.
 
-        The live playhead from the player, plus the source's analysis lead
-        (snapcast decodes chunks ``bufferMs`` before the speakers play them).
+        A source that tracks its own playhead (track-map playback) reports it
+        directly; otherwise it's the live playhead from the player plus the
+        source's analysis lead (snapcast decodes chunks ``bufferMs`` before
+        the speakers play them).
         """
         src = self._source
         if src is None:
             return None
+        own = getattr(src, "analysis_position", None)
+        if own is not None:
+            return float(own)
         state = self._hass.states.get(src.entity_id)
         if state is None:
             return None
