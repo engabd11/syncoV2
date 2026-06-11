@@ -7,13 +7,17 @@ photosensitive-epilepsy limits) caps a flashing field at **3 flashes/second**,
 where a "flash" is a pair of opposing luminance changes of ≥10% of max, and
 treats **saturated red** more strictly still.
 
-:class:`FieldSafety` enforces those limits as a *non-bypassable* final stage:
-every renderer (Music, Movies, Fireworks, idle glow) and every intensity is fed
-through it before encoding, so no effect or setting can defeat it. It is
-deliberately transparent on well-behaved content — it only engages when the
-aggregate field actually starts to strobe — and degrades gracefully by
-compressing the *global* brightness swing while preserving each light's colour
-and the spatial pattern between lights (which is what makes the show look good).
+:class:`FieldSafety` enforces those limits as the final stage before encoding
+for every renderer (Music, Movies, Fireworks, idle glow) — with one explicit,
+documented exception: the **Intense** and **Extreme** intensities are
+*unrestrained club modes* that the user opts into knowing they flash as hard as
+the Hue pipeline allows (see ``modes.UNRESTRAINED_MODES`` and the README's
+photosensitivity warning). Subtle, Medium, High and the Movies effect are always
+protected. When engaged it is deliberately transparent on well-behaved content —
+it only acts when the aggregate field actually starts to strobe — and degrades
+gracefully by compressing the *global* brightness swing while preserving each
+light's colour and the spatial pattern between lights (which is what makes the
+show look good).
 
 Pure and dt-driven (no Home Assistant or hardware dependency) so the invariants
 are unit-tested directly.

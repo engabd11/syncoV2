@@ -24,8 +24,9 @@ from homeassistant.util import dt as dt_util
 
 from .audio.map_source import TrackMapSource
 from .audio.metadata import MetadataSource
+from .audio.ma_stream import is_snapcast_backed
 from .audio.snapcast import SnapcastSource
-from .audio.source import MusicAssistantSource, resolve_map_url
+from .audio.source import MusicAssistantSource, ma_player_provider, resolve_map_url
 from .audio.structure import StructureTracker
 from .audio.tempo import BeatGrid, TempoTracker
 from .audio.trackmap import Section, TrackMapper
@@ -60,6 +61,7 @@ from .const import (
     signal_area_update,
 )
 from .effects.engine import EffectEngine
+from .effects.modes import UNRESTRAINED_MODES
 from .effects.safety import FieldSafety
 from .hue.bridge import EntertainmentConfig, HueBridge
 from .hue.stream import DtlsStream, HueStreamEncoder
@@ -162,10 +164,12 @@ class SyncSession:
         self._encoder = HueStreamEncoder(config.id)
         self._stream = DtlsStream(host, app_key, client_key)
         self._engine = EffectEngine(config.channels)
-        # Non-bypassable final safety stage (whole-field flash limiter + red
-        # guard); every emitted frame — any effect, intensity or idle — passes
-        # through it in _safe_send.
+        # Final safety stage (whole-field flash limiter + red guard). Applied to
+        # every emitted frame in _safe_send EXCEPT in the explicitly
+        # unrestrained club modes (Intense/Extreme with a non-Movies effect),
+        # which the user opts into knowing they flash as hard as Hue allows.
         self._safety = FieldSafety()
+        self._was_unrestrained = False
         self._last_safe_t: float | None = None
         # Predictive beat grid + musical-structure trackers, fed the analyzer's
         # feature stream so the engine can anticipate beats and ride builds/drops.
@@ -292,8 +296,14 @@ class SyncSession:
         if entity_id is None:
             return False
 
-        # 1. Snapcast tap (primary): real, beat-accurate audio for any MA player.
-        if self._snapserver_host:
+        # 1. Snapcast tap (primary for snapcast-backed players): real,
+        # beat-accurate audio straight off the snapserver. Gated on the
+        # player's MA provider — a Sendspin/squeezelite/cast session must never
+        # latch onto some other room's snapcast stream via the resolver's
+        # playing-stream fallback.
+        if self._snapserver_host and is_snapcast_backed(
+            ma_player_provider(self._hass, entity_id)
+        ):
             entry = er.async_get(self._hass).async_get(entity_id)
             player_uid = entry.unique_id if entry else None
             snap = SnapcastSource(
@@ -479,12 +489,24 @@ class SyncSession:
         if send is not None:
             await self._safe_send(send)  # else still filling the buffer; hold
 
+    def _unrestrained(self) -> bool:
+        """True in the explicit club modes that bypass the flash limiter."""
+        return (
+            self._settings.mode in UNRESTRAINED_MODES
+            and self._settings.effect is not SyncEffect.MOVIES
+        )
+
     async def _safe_send(self, colors: dict[int, tuple[float, float, float]]) -> None:
         # ConnectionError propagates to the run loop, which attempts a reconnect.
         now = time.monotonic()
         dt = 0.025 if self._last_safe_t is None else max(0.0, now - self._last_safe_t)
         self._last_safe_t = now
-        colors = self._safety.process(colors, dt)
+        unrestrained = self._unrestrained()
+        if not unrestrained:
+            if self._was_unrestrained:
+                self._safety.reset()  # field history is stale after a bypass
+            colors = self._safety.process(colors, dt)
+        self._was_unrestrained = unrestrained
         # Split large areas across packets (the bridge caps a packet at ~10 lights).
         for frame in self._encoder.build_packets(colors):
             await self._stream.send(frame)

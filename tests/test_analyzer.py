@@ -90,6 +90,23 @@ def test_pure_treble_bursts_do_not_drive_bass_stream():
     assert sum(f.bass_beat for f in frames) <= 1  # visible stream does not
 
 
+# --- source selection -------------------------------------------------------
+
+def test_snapcast_tap_gated_by_player_provider():
+    from hue_music_sync.audio.ma_stream import is_snapcast_backed
+
+    # Snapcast-backed players (incl. multi-instance ids) keep the tap.
+    assert is_snapcast_backed("snapcast")
+    assert is_snapcast_backed("snapcast--abc123")
+    # Other protocols must never inherit another room's snapcast stream.
+    assert not is_snapcast_backed("sendspin")
+    assert not is_snapcast_backed("slimproto")
+    assert not is_snapcast_backed("airplay")
+    assert not is_snapcast_backed("chromecast")
+    # Unknown provider (lookup failed): legacy behaviour, tap stays eligible.
+    assert is_snapcast_backed(None)
+
+
 # --- snapcast ServerSettings ----------------------------------------------
 
 def test_parse_server_settings_extracts_buffer():

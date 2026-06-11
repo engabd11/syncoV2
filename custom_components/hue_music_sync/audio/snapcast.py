@@ -1,10 +1,14 @@
-"""Tap live audio from a Snapcast server (the primary audio source).
+"""Tap live audio from a Snapcast server (primary for snapcast-backed players).
 
-Music Assistant streams every player's audio through Snapcast, so connecting as a
-Snapcast client and pointing our own group at the currently-playing stream gives
-us the exact, beat-accurate audio of whatever is playing — regardless of the MA
-player type (Snapcast/Sendspin/group). FLAC chunks are decoded with ffmpeg and
-analysed, producing the same :class:`AnalysisFrame` stream as the other sources.
+For Music Assistant players that play through Snapcast, connecting as a Snapcast
+client and pointing our own group at the player's stream gives us the exact,
+beat-accurate audio of whatever is playing. FLAC chunks are decoded with ffmpeg
+and analysed, producing the same :class:`AnalysisFrame` stream as the other
+sources. The coordinator only offers this tap to snapcast-backed players (see
+``source.is_snapcast_backed``): the resolver below deliberately falls back to
+"the playing stream" when no stream id matches the player uid, which is right
+for snapcast players with renamed streams but would hijack another room's audio
+for a Sendspin/squeezelite/cast player.
 
 The Snapcast binary protocol (validated against snapserver 0.35) and ffmpeg are
 driven on worker threads; analysis frames are handed to the async ``read_frame``

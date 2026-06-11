@@ -28,7 +28,8 @@ CONF_RESTORE_LIGHTS: Final = "restore_lights"  # snapshot + restore light state 
 # --- Defaults ------------------------------------------------------------
 DEFAULT_LATENCY_MS: Final = 150
 DEFAULT_INTENSITY: Final = 1.0
-DEFAULT_STREAM_FPS: Final = 40  # Hue sweet spot; bulbs update ~12.5Hz, bridge eases
+DEFAULT_STREAM_FPS: Final = 50  # Hue Entertainment's documented max packet rate
+# (matches the 50 Hz analysis frame rate, so every analysed hop becomes a frame)
 DEFAULT_NAME: Final = "hue_music_sync#ha"
 
 # Hue entertainment streaming

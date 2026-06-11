@@ -20,9 +20,13 @@ from .fireworks import FireworksEffect
 from .modes import (
     MODE_PARAMS,
     MOVIE_PARAMS,
+    ROLE_BASS,
+    ROLE_MID,
+    assign_roles,
     band_for_rank,
     beat_colour_advance,
-    beat_flash,
+    kick_flash,
+    mid_flash,
     render,
 )
 from .spatial import Wave, distance, floor_origin, height_band, normalize_positions
@@ -56,12 +60,17 @@ class EffectEngine:
         self.brightness = 1.0  # master ceiling (0..1), independent of mode
         self.time: float = 0.0
         self.colour_phase: float = 0.0  # palette position: time drift + beat steps
-        self._flash = 0.0  # beat-flash overlay (decays fast)
         self._swell = 0.0  # structural drop swell (decays)
         # Smoothed track-section level (1.0 when unknown): quiet sections pull
         # the show in (dimmer base, tighter colour span, softer waves) so the
         # chorus visibly *arrives*. Eased over ~2 s so changes feel musical.
         self.section_level = 1.0
+        # Instrument-role state: which light is "the bass", "the guitar", "the
+        # vocal" right now. Rotated every few bars and on drops so the band
+        # members trade places around the room.
+        self.roles: dict[int, int] = {}
+        self._role_offset = 0
+        self._beats_seen = 0
         self._waves: list[Wave] = []  # live beat wavefronts
         self._wave_armed = True  # PLL anticipation: ready to fire the next wave
         self._fireworks = FireworksEffect()
@@ -70,6 +79,7 @@ class EffectEngine:
     def set_channels(self, channels: list[EntertainmentChannel]) -> None:
         self.channels = channels
         order = sorted(channels, key=lambda c: c.x)
+        self._rank_ids = [c.channel_id for c in order]
         n = len(order)
         positions = normalize_positions(channels)  # (nx, ny, nz) in 0..1
         self._origin = floor_origin(positions)
@@ -92,6 +102,10 @@ class EffectEngine:
             ch.channel_id: ((0.0, 0.0, 0.0), 0.0) for ch in channels
         }
         self._env: dict[str, float] = {}
+        self._light_flash: dict[int, float] = {}
+        self.roles = {}
+        self._role_offset = 0
+        self._beats_seen = 0
 
     @property
     def band_env(self) -> dict[str, float]:
@@ -103,6 +117,33 @@ class EffectEngine:
             prev = self._env.get(name, 0.0)
             alpha = _ENV_RISE if value > prev else _ENV_FALL
             self._env[name] = prev + (value - prev) * alpha
+
+    @property
+    def role_offset(self) -> int:
+        """Rotation counter of the instrument-role layout (read by modes)."""
+        return self._role_offset
+
+    def _update_roles(self, p, frame: AnalysisFrame, beatgrid, structure) -> None:
+        """Refresh which light plays which instrument; rotate musically.
+
+        Rotation advances every ``role_rotate_beats`` musical beats (grid ticks
+        when locked, kicks otherwise) and reshuffles instantly on a drop, so
+        the band members keep trading places around the room.
+        """
+        ticked = (
+            beatgrid.predicted_beat
+            if (beatgrid is not None and beatgrid.locked)
+            else frame.bass_beat
+        )
+        if ticked and p.role_rotate_beats > 0:
+            self._beats_seen += 1
+            if self._beats_seen >= p.role_rotate_beats:
+                self._beats_seen = 0
+                self._role_offset += 1
+        if structure is not None and structure.drop_now:
+            self._role_offset += 1  # a drop reshuffles the band
+        role_list = assign_roles(len(self._rank_ids), p.role_mix, self._role_offset)
+        self.roles = dict(zip(self._rank_ids, role_list))
 
     @staticmethod
     def _visible_event(frame: AnalysisFrame, beatgrid: BeatGrid | None) -> tuple[float, float]:
@@ -246,8 +287,17 @@ class EffectEngine:
         """
         p = self.active_params
         self._update_env(frame)
-        # One decision for everything visible: which onset (if any) qualifies.
+        # Refresh the instrument-role assignments (rotate on schedule + drops).
+        self._update_roles(p, frame, beatgrid, structure)
+        # One decision for everything visible: which kick (if any) qualifies.
         vis_strength, vis_bass = self._visible_event(frame, beatgrid)
+        # Mid (guitar/snare) onsets: broadband hits that are NOT bass. They are
+        # deliberately not grid-gated — syncopated guitar is the point — and they
+        # only ever reach the mid-role lights, so they read as "that light is
+        # the guitar" rather than as noise.
+        mid_strength = (
+            frame.beat_strength if (frame.beat and not frame.bass_beat) else 0.0
+        )
         # Advance the palette position: a slow continuous drift plus a step on
         # every visible beat so the colour moves with the music (bolder steps
         # in loud sections, gentler in quiet ones).
@@ -263,14 +313,23 @@ class EffectEngine:
                 w.advance(dt, decay_tau=0.45)
             self._waves = [w for w in self._waves if not w.dead()]
 
-        # Beat-flash overlay: the wave carries most of the beat in spatial modes,
-        # so the synchronous flash is scaled down (spatial distribution is both
-        # nicer and safer than flashing every lamp together).
-        flash_scale = max(0.0, 1.0 - p.wave_gain)
-        self._flash = max(
-            self._flash * _FLASH_DECAY,
-            beat_flash(p, vis_strength, vis_bass) * flash_scale,
-        )
+        # Per-light beat snaps: bass-role lights snap on kicks, mid-role lights
+        # pop on guitar hits. In the wavefront-led classic modes the synchronous
+        # snap is scaled down (the wave carries the beat); hard-snap modes slam
+        # on top of the wave — that is the point of them.
+        flash_scale = 1.0 if p.hard_snap else max(0.0, 1.0 - p.wave_gain)
+        kick = kick_flash(p, vis_strength, vis_bass) * flash_scale
+        midf = mid_flash(p, mid_strength)
+        lf = self._light_flash
+        for cid in lf:
+            lf[cid] *= _FLASH_DECAY
+        if kick > 0.0 or midf > 0.0:
+            for cid, role in self.roles.items():
+                if role == ROLE_MID:
+                    if midf > 0.0:
+                        lf[cid] = max(lf.get(cid, 0.0), midf)
+                elif kick > 0.0 and role == ROLE_BASS:
+                    lf[cid] = max(lf.get(cid, 0.0), kick)
 
         # Structure choreography: builds desaturate (tension), drops swell, and
         # the section arc (from the track map) scales the show's whole range.
@@ -288,9 +347,9 @@ class EffectEngine:
 
         colour_lerp = p.colour_lerp
         attack, decay = p.bri_attack, p.bri_decay
-        overlay = self._flash + self._swell
         out: dict[int, RGB] = {}
         for cid, (target_color, target_b) in targets.items():
+            overlay = self._light_flash.get(cid, 0.0) + self._swell
             prev_color, prev_b = self._state[cid]
             alpha = attack if target_b >= prev_b else decay
             new_b = prev_b + (target_b - prev_b) * alpha

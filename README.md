@@ -41,9 +41,14 @@ to the bridge over the Hue Entertainment API (~40 Hz over DTLS), and a bundled
   breakdowns breathe - predictively when the track map knows what is coming.
 - **Effects**: Music (beat/frequency choreography), Movies (calm soundtrack
   backlight with a warm cinematic drift) and Fireworks (bursts on big beats).
-- **Eye safety, enforced**: a non-bypassable stage caps whole-room flashing at
-  the WCAG limit (3 flashes/sec), keeps a brightness floor, desaturates rapid
-  red and clamps colour to the bulb gamut. See [Eye safety](#eye-safety).
+- **Instrument roles per bulb**: in the higher intensities the room becomes the
+  band - one light *is* the bass and snaps on kicks, another pops with the
+  guitar, a third shimmers dimly with the vocal - and the assignments rotate
+  every few bars and on drops.
+- **Eye safety where you want it**: Subtle, Medium, High and Movies pass
+  through a flash limiter (3 flashes/sec, WCAG), a red guard and gamut
+  clamping. Intense and Extreme are explicitly **unrestrained club modes** that
+  go as hard as the Hue pipeline allows. See [Eye safety](#eye-safety).
 - **Reliable**: auto-reconnect with heartbeat, a silence noise-gate, large-area
   packet splitting, one-area-at-a-time, and optional exact light-state restore
   on stop.
@@ -54,18 +59,25 @@ to the bridge over the Hue Entertainment API (~40 Hz over DTLS), and a bundled
 ## Eye safety
 
 > **Photosensitivity warning.** Audio-reactive lighting fills much of your
-> vision and can flash on aggressive content. If you, or anyone who may be in
-> the room, has photosensitive epilepsy or is sensitive to flashing light, use
-> the **Subtle** intensity or the **Movies** effect (both are guaranteed
-> flash-free) and avoid the higher intensities.
+> vision and can flash on aggressive content. **Intense and Extreme run with
+> the flash limiter deliberately bypassed** and can strobe the whole room hard
+> and fast. If you, or anyone who may be in the room, has photosensitive
+> epilepsy or is sensitive to flashing light, do NOT use Intense or Extreme;
+> use the **Subtle** intensity or the **Movies** effect (both are guaranteed
+> flash-free).
 
-Every frame passes through a non-bypassable final stage that no effect or
-setting can defeat: a **whole-room flash limiter** (3 flashes/sec, the WCAG
-2.3.1 limit), a **brightness floor** (the room never strobes black), a
-**saturated-red guard**, and **gamut clamping plus slew-limiting** so colour
-never pops. Subtle and Movies are flash-free by construction. These guarantees
-are asserted by the test suite, but they cannot account for every individual's
-sensitivity, so the warning stands.
+**Subtle, Medium, High and the Movies effect** pass through a final protective
+stage: a **whole-room flash limiter** (3 flashes/sec, the WCAG 2.3.1 limit), a
+**brightness floor** (the room never strobes black), a **saturated-red guard**,
+and **gamut clamping plus slew-limiting** so colour never pops. Subtle and
+Movies are flash-free by construction, and these guarantees are asserted by the
+test suite.
+
+**Intense and Extreme are unrestrained club modes**: selecting them is an
+explicit choice to disable the limiter for that area and let the show flash as
+hard as the Hue pipeline can drive it. The protective stage re-engages the
+moment you switch back to any other intensity. The limits cannot account for
+every individual's sensitivity, so the warning above stands regardless of mode.
 
 ## Requirements
 
@@ -99,10 +111,20 @@ Each area becomes a device with a **switch** plus the controls below.
 | Brightness | Master brightness ceiling, 5-100% |
 | Timing offset | Fine trim, -500..+500 ms (alignment is otherwise automatic) |
 
-**Intensity** sets how the lights move (dimming range, beat reactivity)
-relative to the brightness ceiling: from **Subtle** (seamless colour drift, no
-flashing) through **High** and **Intense** (room-sweeping wavefronts) to
-**Extreme** (a dark club: vivid colour beams snap to full on every beat).
+**Intensity** sets how the lights move relative to the brightness ceiling:
+
+- **Subtle** - no dimming at all; the colour drifts and steps with the music.
+- **Medium** - the classic club look: visible dimming, a wavefront per kick,
+  colours stepping on the beat.
+- **High** - the band on your lights: bass lights snap on kicks, guitar lights
+  pop on mid hits, vocal lights shimmer dimly with the singing; roles rotate
+  every few bars. Flash-limited.
+- **Intense** - *unrestrained*: bass and guitar split the room 2:1 and snap
+  hard to full; roles rotate as the song plays.
+- **Extreme** - *unrestrained*: a dark room where only the BIG kicks count -
+  each one slams every lamp and launches a fast wavefront with hard colour
+  jumps.
+
 **Effect** swaps the renderer: **Music** (default), **Movies** (calm
 soundtrack-following backlight) or **Fireworks**. **Colour** picks the palette
 independently. Only one area streams at a time per install.
@@ -181,8 +203,13 @@ beat-accurate too. A dropped DTLS channel reconnects with backoff.
 | --- | --- | --- |
 | Snapcast-backed (incl. live radio) | live snapserver tap, buffer-aligned | live + track map |
 | squeezelite / slimproto | MA stream tap, position-locked | live + track map |
+| Sendspin | MA stream tap when decodable, else track-map playback | live + track map |
 | AirPlay / Cast / Sonos / DLNA / ESPHome / groups | track-map playback | track map |
 | Anything else playing in HA | metadata-driven animation | ambient |
+
+The snapcast tap is only offered to players whose MA provider is actually
+snapcast, so a Sendspin or squeezelite session can never latch onto another
+room's snapcast stream.
 
 ## Development
 
@@ -197,10 +224,11 @@ pytest tests/
 Tests cover the HueStream encoder, theme-palette extraction, SuperFlux onset
 detection (vibrato immunity, kick-vs-hihat discrimination), the offline track
 map (beat tracking, sections, scheduled playback), the predictive beat grid and
-structure detection, the effect engine, the 3D spatial renderer, and the
-eye-safety invariants (the flash limiter holding the 3 flashes/sec ceiling at
-every intensity). `python scripts/analyze_track.py <file>` dumps the track map
-for a local song.
+structure detection, the effect engine, the instrument-role assignment, the 3D
+spatial renderer, and the eye-safety invariants (the flash limiter holding the
+3 flashes/sec ceiling whenever it is engaged; Intense/Extreme bypass it by
+design). `python scripts/analyze_track.py <file>` dumps the track map for a
+local song.
 
 ## Limitations
 

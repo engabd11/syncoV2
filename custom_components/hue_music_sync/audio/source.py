@@ -63,6 +63,23 @@ def _find_mass_client(hass: HomeAssistant):
     return None
 
 
+def ma_player_provider(hass: HomeAssistant, entity_id: str) -> str | None:
+    """The Music Assistant provider backing this player (e.g. ``snapcast``,
+    ``sendspin``, ``slimproto``), or None when it cannot be determined."""
+    try:
+        mass = _find_mass_client(hass)
+        entry = er.async_get(hass).async_get(entity_id)
+        player_id = entry.unique_id if entry else None
+        if mass is None or player_id is None:
+            return None
+        player = mass.players.get(player_id)
+        provider = getattr(player, "provider", None)
+        return str(provider) if provider else None
+    except Exception as err:  # noqa: BLE001 - defensive across MA versions
+        _LOGGER.debug("[%s] provider lookup failed: %s", entity_id, err)
+        return None
+
+
 def resolve_map_url(hass: HomeAssistant, entity_id: str) -> str | None:
     """A per-track URL suitable for *offline* analysis of the current track.
 

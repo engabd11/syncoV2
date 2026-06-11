@@ -1,10 +1,23 @@
-"""Pure helpers for building Music Assistant stream URLs (no HA imports).
+"""Pure helpers for Music Assistant stream/player logic (no HA imports).
 
 Kept separate from :mod:`source` (which depends on Home Assistant) so the
-URL-variant logic can be unit-tested on its own.
+URL-variant and provider logic can be unit-tested on their own.
 """
 
 from __future__ import annotations
+
+
+def is_snapcast_backed(provider: str | None) -> bool:
+    """Whether the snapcast tap may be used for a player of this MA provider.
+
+    The snapserver's stream resolver has a deliberate fallback to "the playing
+    stream" (MA's snapcast stream ids don't always contain the player uid), so
+    pointing it at a non-snapcast player (Sendspin, squeezelite, AirPlay...)
+    while *any* snapcast stream is live would sync the lights to the wrong
+    room's audio. Unknown providers stay eligible so exotic MA versions where
+    the lookup fails keep the legacy behaviour.
+    """
+    return provider is None or "snap" in provider.lower()
 
 
 def ma_stream_variants(
