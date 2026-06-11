@@ -24,12 +24,15 @@ import subprocess
 import threading
 import time
 
-import numpy as np
+from typing import TYPE_CHECKING
 
-from homeassistant.core import HomeAssistant
+import numpy as np
 
 from ..const import ANALYSIS_HOP
 from .analyzer import AnalysisFrame, Analyzer
+
+if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -41,13 +44,28 @@ _HOP_BYTES = ANALYSIS_HOP * 2  # s16le mono
 # Snapcast message types
 _T_CODEC_HEADER = 1
 _T_WIRE_CHUNK = 2
+_T_SERVER_SETTINGS = 3
 _T_HELLO = 5
+
+# Until the server tells us otherwise, assume its default end-to-end buffer.
+# Real clients play each chunk ``bufferMs`` after its server timestamp, so our
+# tap (which decodes chunks on arrival) leads the audible sound by this much.
+DEFAULT_BUFFER_MS = 1000
 
 _BASE = struct.Struct("<HHHiiiiI")
 
 
 def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", s.lower())
+
+
+def parse_server_settings(payload: bytes) -> dict | None:
+    """Decode a ServerSettings message payload (uint32-length-prefixed JSON)."""
+    try:
+        (n,) = struct.unpack_from("<I", payload, 0)
+        return json.loads(payload[4 : 4 + n].decode())
+    except (struct.error, ValueError, UnicodeDecodeError):
+        return None
 
 
 def _control(host: str, method: str, params=None, timeout: float = 5.0) -> dict:
@@ -118,6 +136,17 @@ class SnapcastSource:
         self._album_art_url: str | None = None
         self._track_id: str | None = None
         self._meta_ts = 0.0
+        self._buffer_ms = DEFAULT_BUFFER_MS  # updated from ServerSettings
+
+    @property
+    def playback_lead_ms(self) -> int:
+        """How far this tap's analysis runs ahead of the audible sound.
+
+        Snapcast clients play each chunk ``bufferMs`` after its server
+        timestamp; we decode chunks the moment they arrive, so our feature
+        frames lead the speakers by the server's buffer.
+        """
+        return self._buffer_ms
 
     @property
     def entity_id(self) -> str:
@@ -238,6 +267,17 @@ class SnapcastSource:
                         decoder.start()
                     elif bytes(hdr) != header_bytes:
                         break  # stream/format changed -> let coordinator reopen
+                elif mtype == _T_SERVER_SETTINGS:
+                    settings = parse_server_settings(payload)
+                    if settings and "bufferMs" in settings:
+                        try:
+                            self._buffer_ms = int(settings["bufferMs"])
+                            _LOGGER.debug(
+                                "Snapserver buffer for %s: %d ms",
+                                self._entity_id, self._buffer_ms,
+                            )
+                        except (TypeError, ValueError):
+                            pass
                 elif mtype == _T_WIRE_CHUNK and ff is not None:
                     (sz,) = struct.unpack_from("<I", payload, 8)
                     try:

@@ -296,6 +296,12 @@ const CARD_CSS = `
 
   /* ── ambient hero ── */
   .hue-hero { position: relative; padding: 18px 20px 16px; overflow: hidden; }
+  /* Blurred album art behind the colour wash: the card becomes "this song's
+     card". Hidden (opacity 0) until the art URL has actually loaded. */
+  .hue-hero-art { position: absolute; inset: -24%; z-index: 0; background-size: cover;
+    background-position: center; filter: blur(26px) saturate(1.25) brightness(0.62);
+    opacity: 0; transition: opacity .6s; }
+  .hue-hero-art.show { opacity: .55; }
   .hue-hero-wash { position: absolute; inset: -20%; z-index: 0; filter: blur(8px); transition: opacity .4s; }
   .hue-hero-bars { position: absolute; left: 0; right: 0; bottom: 0; height: 64px; z-index: 0; opacity: .55;
     mask: linear-gradient(to top, #000, transparent); -webkit-mask: linear-gradient(to top, #000, transparent); padding: 0 6px; }
@@ -390,6 +396,13 @@ class HueMusicSyncCard extends HTMLElement {
     this._albumColors = null; // client-extracted album palette (fallback)
     this._artKey = null;      // album-art URL we last extracted from
     this._play = null;        // playback timing snapshot for the viz loop
+
+    // Album-art display pipeline: URLs are preloaded before being applied so a
+    // stale/broken URL keeps the placeholder instead of an empty dark tile.
+    this._coverArtNode = null; // the cover tile's art layer (this render)
+    this._heroArtNode = null;  // the blurred hero background layer (this render)
+    this._artGoodUrl = null;   // last URL that actually loaded
+    this._artWanted = null;    // URL currently loading/desired
   }
 
   /* ── config ── */
@@ -458,7 +471,13 @@ class HueMusicSyncCard extends HTMLElement {
       }
       // switch carries the area state plus any integration-published now-playing /
       // album-colour / bpm attributes, so re-render when those change.
-      if (a.switch) out += `${a.switch}=${npSig(hass.states[a.switch])};`;
+      if (a.switch) {
+        const swe = hass.states[a.switch];
+        out += `${a.switch}=${npSig(swe)};`;
+        // The live player the integration follows (for artwork/title updates).
+        const src = swe && swe.attributes.source_player;
+        if (src) out += `${src}=${npSig(hass.states[src])};`;
+      }
       if (a.media_player) out += `${a.media_player}=${npSig(hass.states[a.media_player])};`;
     }
     return out;
@@ -576,21 +595,25 @@ class HueMusicSyncCard extends HTMLElement {
     const timingMax = timingEnt ? Number(timingEnt.attributes.max ?? 200) : 200;
     const timingStep = timingEnt ? Number(timingEnt.attributes.step ?? 5) : 5;
 
-    // now playing — prefer the media_player (richest source), then attributes the
-    // integration may publish on the switch, then demo data. Carries playback
-    // position/updatedAt so the visualizer can lock to the song.
+    // now playing — prefer the *live* player the integration is actually
+    // following (published as `source_player` on the switch; zero config),
+    // then a configured media_player, then the switch's mirrored attributes,
+    // then demo data. Reading the live entity matters for artwork: the
+    // mirrored `media_image` is a tokenised proxy URL that can go stale.
     const posOf = (a) => ({
       position: Number(a.media_position || 0),
       updatedAt: a.media_position_updated_at ? Date.parse(a.media_position_updated_at) : Date.now(),
     });
+    const live = st(swAttr.source_player) || mp;
     let now;
-    if (mp) {
+    if (live) {
+      const la = live.attributes;
       now = {
-        track: mpAttr.media_title || titleize(mp.state) || "—",
-        artist: mpAttr.media_artist || mpAttr.media_album_name || "",
-        art: mpAttr.entity_picture || null,
-        playing: mp.state === "playing",
-        ...posOf(mpAttr),
+        track: la.media_title || swAttr.media_title || titleize(live.state) || "—",
+        artist: la.media_artist || la.media_album_name || swAttr.media_artist || "",
+        art: la.entity_picture || swAttr.media_image || null,
+        playing: live.state === "playing",
+        ...posOf(la.media_position != null ? la : swAttr),
       };
     } else if (sw && (swAttr.media_title || swAttr.entity_picture || swAttr.media_image)) {
       now = {
@@ -706,6 +729,13 @@ class HueMusicSyncCard extends HTMLElement {
     /* hero */
     const hero = document.createElement("div");
     hero.className = "hue-hero";
+
+    // Blurred album art sits under the colour wash, making the whole hero
+    // carry the current song. Applied via _applyArt once the URL has loaded.
+    const heroArt = document.createElement("div");
+    heroArt.className = "hue-hero-art";
+    this._heroArtNode = heroArt;
+    hero.appendChild(heroArt);
 
     const wash = document.createElement("div");
     wash.className = "hue-hero-wash";
@@ -824,6 +854,43 @@ class HueMusicSyncCard extends HTMLElement {
 
     this.shadowRoot.innerHTML = `<style>${CARD_CSS}</style>`;
     this.shadowRoot.appendChild(card);
+
+    // Apply the artwork last (nodes for this render are in place). Synchronous
+    // for an already-validated URL, so there is no flicker on re-renders.
+    this._applyArt(m.now.art);
+  }
+
+  /* ── album-art application (preload-validated) ── */
+  _applyArt(url) {
+    if (!url) {
+      // No artwork: the cover keeps its placeholder gradient and the hero
+      // background stays hidden.
+      this._artWanted = null;
+      return;
+    }
+    const apply = (u) => {
+      const css = `url("${u}")`;
+      if (this._coverArtNode) this._coverArtNode.style.backgroundImage = css;
+      if (this._heroArtNode) {
+        this._heroArtNode.style.backgroundImage = css;
+        this._heroArtNode.classList.add("show");
+      }
+    };
+    if (url === this._artGoodUrl) {
+      apply(url);
+      return;
+    }
+    // Validate before applying: a stale tokenised proxy URL that 404s would
+    // otherwise wipe the placeholder and leave an empty dark tile.
+    this._artWanted = url;
+    const img = new Image();
+    img.onload = () => {
+      if (this._artWanted !== url) return; // track moved on while loading
+      this._artGoodUrl = url;
+      apply(url);
+    };
+    img.onerror = () => {}; // keep placeholder / previous art
+    img.src = url;
   }
 
   /* ── primitives ── */
@@ -846,7 +913,7 @@ class HueMusicSyncCard extends HTMLElement {
     return btn;
   }
 
-  _cover(size, radius, art) {
+  _cover(size, radius, _art) {
     const wrap = document.createElement("div");
     wrap.className = "hue-cover";
     wrap.style.width = size + "px";
@@ -855,9 +922,9 @@ class HueMusicSyncCard extends HTMLElement {
     const a = document.createElement("div");
     a.className = "hue-cover-art";
     a.style.borderRadius = radius + "px";
-    if (art) {
-      a.style.backgroundImage = `url("${art}")`;
-    }
+    // The art URL is applied by _applyArt after preload-validation; until then
+    // (or when there is no art) the CSS placeholder gradient shows.
+    this._coverArtNode = a;
     const gloss = document.createElement("div");
     gloss.className = "hue-cover-gloss";
     gloss.style.borderRadius = radius + "px";

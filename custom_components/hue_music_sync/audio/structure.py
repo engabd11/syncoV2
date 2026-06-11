@@ -40,6 +40,10 @@ class StructureState:
     drop_now: bool = False  # the single frame a drop lands
     drop_imminent: bool = False  # a drop is expected very soon
     breakdown: bool = False
+    # Filled in from the offline track map when one is available: the current
+    # section's loudness relative to the track's peak (1.0 when unknown), so
+    # choreography can save its full range for the chorus.
+    section_level: float = 1.0
 
 
 def _alpha(tau_s: float, dt: float) -> float:

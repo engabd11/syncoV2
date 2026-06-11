@@ -134,56 +134,66 @@ def _shimmer(t: float, cid: int) -> float:
     return 0.5 + 0.5 * math.sin(t * 23.0 + cid * 2.7) * math.sin(t * 8.0 + cid * 1.3)
 
 
-def beat_colour_advance(params: ModeParams, frame) -> float:
-    """Extra palette phase to add on this frame's beat (0 if no beat).
+def beat_colour_advance(params: ModeParams, strength: float, bass: float) -> float:
+    """Extra palette phase to add for a *visible* beat event.
 
     This is what makes the colour *move with the music* rather than only drifting
-    on a timer: every detected beat nudges the whole palette forward, weighted by
-    how strong the beat is and how much bass it carries, so the colour visibly
-    steps on the kick. Any beat counts (not just the big ``beat_threshold`` ones)
-    so the colour keeps grooving even in quieter sections.
+    on a timer: every visible beat nudges the whole palette forward, weighted by
+    how strong it is and how much bass it carries, so the colour steps on the
+    kick. The engine decides which onsets qualify (bass onsets, on-grid when the
+    tempo is locked); any qualifying beat counts (not just the big
+    ``beat_threshold`` ones) so the colour keeps grooving in quieter sections.
     """
-    if not frame.beat or params.colour_beat_step <= 0.0:
+    if strength <= 0.0 or params.colour_beat_step <= 0.0:
         return 0.0
-    bass = max(frame.bands.get("sub_bass", 0.0), frame.bands.get("bass", 0.0))
     weight = 0.5 + 0.5 * bass
-    return params.colour_beat_step * min(1.5, 0.5 + frame.beat_strength) * weight
+    return params.colour_beat_step * min(1.5, 0.5 + strength) * weight
 
 
-def beat_flash(params: ModeParams, frame) -> float:
-    """Flash amount a qualifying beat contributes (0 if it doesn't qualify).
+def beat_flash(params: ModeParams, strength: float, bass: float) -> float:
+    """Flash amount a qualifying visible beat contributes (0 if it doesn't).
 
     Weighted by bass content so the flashes track the kick/bass beat rather than
-    incidental onsets (hi-hats etc.). The engine keeps this as a fast-decaying
-    overlay so beats always snap to full, independent of the slower continuous
-    brightness smoothing.
+    incidental onsets. The engine keeps this as a fast-decaying overlay so beats
+    always snap to full, independent of the slower continuous smoothing.
     """
-    if frame.beat and frame.beat_strength >= params.beat_threshold:
-        bass = max(frame.bands.get("sub_bass", 0.0), frame.bands.get("bass", 0.0))
+    if strength >= params.beat_threshold:
         weight = 0.4 + 0.6 * bass  # full on kicks, dimmer on bass-less onsets
-        return params.beat_gain * min(1.0, frame.beat_strength / 2.0) * weight
+        return params.beat_gain * min(1.0, strength / 2.0) * weight
     return 0.0
 
 
 def render(engine, frame) -> dict[int, tuple[RGB, float]]:
-    """Per-channel (colour, continuous brightness) — no beat flash (added later)."""
+    """Per-channel (colour, continuous brightness) — no beat flash (added later).
+
+    Continuous contributions read the engine's asymmetric band envelope
+    followers (snap up on energy, decay gently) rather than the raw per-frame
+    band values, so brightness *moves with* the music instead of jittering.
+    """
     p: ModeParams = engine.active_params
     t = engine.time
-    bass = max(frame.bands.get("sub_bass", 0.0), frame.bands.get("bass", 0.0))
-    treble = frame.bands.get("high", 0.0)
+    env = engine.band_env
+    bass = max(env.get("sub_bass", 0.0), env.get("bass", 0.0))
+    treble = env.get("high", 0.0)
+    # Track-section arc (1.0 when no map): quiet sections dim the base, soften
+    # the waves and tighten the colour spread so the chorus visibly opens up.
+    lvl = engine.section_level
+    base_mul = 0.75 + 0.25 * lvl
+    wave_mul = 0.6 + 0.4 * lvl
+    span = 0.4 + 0.6 * lvl
 
     waves = engine.active_waves
     out: dict[int, tuple[RGB, float]] = {}
     for ch in engine.channels:
         info = engine.cmap[ch.channel_id]
-        bri = p.base + p.bass_gain * bass
+        bri = p.base * base_mul + p.bass_gain * bass
         if p.energy_gain:
             bri += p.energy_gain * frame.energy  # follow overall loudness (movie)
         if p.spread:
-            bri += p.spread * frame.bands.get(info["band"], 0.0)
+            bri += p.spread * env.get(info["band"], 0.0)
         if p.height_freq:
             # Lamps high in the room favour treble, low lamps favour bass.
-            bri += p.height_freq * frame.bands.get(info["hband"], 0.0)
+            bri += p.height_freq * env.get(info["hband"], 0.0)
         if p.depth_wash:
             # Back/far lamps carry a gentle ambient wash; front lamps stay reactive.
             bri += p.depth_wash * (1.0 - info["ny"])
@@ -193,14 +203,21 @@ def render(engine, frame) -> dict[int, tuple[RGB, float]]:
             amp = 0.0
             for w in waves:
                 amp += w.amplitude_at(d)
-            bri += p.wave_gain * amp
-        if p.shimmer and treble > 0.05:
+            bri += p.wave_gain * wave_mul * amp
+        if p.shimmer:
             bri += p.shimmer * treble * _shimmer(t, ch.channel_id)
 
         bri = p.floor if bri < p.floor else 1.0 if bri > 1.0 else bri
-        # Palette position = this light's spatial rank + the engine's accumulated
-        # colour phase (time drift + per-beat steps), so colour moves to the beat.
-        colour = engine.palette.sample(info["xrank"] + engine.colour_phase)
+        # Palette position = this light's spatial rank (compressed in quiet
+        # sections) + the engine's accumulated colour phase (time drift +
+        # per-beat steps), so colour moves to the beat.
+        colour = engine.palette.sample(info["xrank"] * span + engine.colour_phase)
+        # Theme-faithful value: a dark palette swatch (dark silver, deep purple)
+        # renders as dimmer light, so moody album art gives a moody show. The
+        # engine's chroma pipeline renormalises colour, so the value must be
+        # folded into brightness here. Full-value palettes are unaffected.
+        cval = max(colour)
+        bri *= 0.35 + 0.65 * cval
         out[ch.channel_id] = (colour, bri)
 
     return out

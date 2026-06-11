@@ -1,27 +1,29 @@
-"""Extract a vivid, coherent colour palette from the current track's album art.
+"""Extract a *theme-faithful* colour palette from the current track's album art.
 
 ffmpeg decodes the artwork to a small raw RGB thumbnail; the pixels are then
 turned into a handful of lighting colours. The approach borrows from Android's
-Palette / Vibrant.js but is tuned for *lights* rather than UI swatches:
+Palette / Vibrant.js, keeping **two swatch classes** so the palette captures the
+album's mood, not just its brightest accent:
 
 * **Perceptual clustering.** Pixels are clustered in CIELAB, where Euclidean
   distance matches perceived colour difference, so similar hues group and
   distinct ones separate (RGB clustering muddles both).
-* **Background rejection.** Near-white, near-black and near-grey pixels (the
-  usual cover background / matte) are dropped before clustering, so the palette
-  comes from the *subject*, not the wall behind it.
-* **Vividness-weighted ranking.** Clusters are scored by population *and*
-  saturation, so a small splash of vivid colour can beat a large dull field —
-  the opposite of pure population ranking, which always picks the background.
-* **Hue diversity + smooth ordering.** The chosen colours are spread across the
-  hue wheel (no near-duplicates) and ordered by hue, so the palette drifts and
-  the per-beat colour steps move through *related* hues instead of jumping.
-* **Graceful monochrome fallback.** A genuinely single-colour cover yields a
-  tasteful analogous spread around its dominant hue instead of one flat colour.
+* **Accents** — vivid clusters, ranked by population × saturation so a small
+  splash of vivid colour beats a large dull field.
+* **Theme bases** — the muted / dark / metallic clusters that *are* the cover's
+  atmosphere (a dark-silver-and-gold cover is mostly dark silver and gold).
+  These keep their real saturation and **value**: a dark swatch renders as a
+  dimmer light, and a near-neutral one becomes a warm- or cool-tinted white
+  matched to its cast (silver → cool, gold → warm). Forcing everything vivid
+  and full-bright (the old behaviour) destroyed exactly this.
+* **Hue diversity + smooth ordering.** Accents are spread across the hue wheel
+  and the final palette is ordered by hue, so colour drifts through related
+  hues instead of jumping.
+* **Graceful monochrome fallback.** A near-colourless cover yields its own
+  dominant tint rather than an invented rainbow.
 
-Brightness is driven by the music, so the chromaticity is what matters here:
-colours are emitted at full value with a saturation floor so even muted covers
-read as lively on the bulbs, while keeping the cover's actual hues.
+Colours may carry value < 1: the effect engine folds a swatch's value into the
+light's brightness, so dark album themes give an authentically moodier show.
 """
 
 from __future__ import annotations
@@ -37,9 +39,18 @@ from .palette import RGB, Palette
 _LOGGER = logging.getLogger(__name__)
 
 _THUMB = 64  # decode artwork to THUMB x THUMB before clustering
-_SAT_FLOOR = 0.40  # minimum output saturation so bulbs stay vivid (kept gentle so
-# a muted cover doesn't get pushed into a colour it doesn't actually contain)
-_HUE_MIN_SEP = 0.055  # ~20 deg: reject near-duplicate hues in the palette
+_HUE_MIN_SEP = 0.055  # ~20 deg: reject near-duplicate accent hues in the palette
+_SAT_FLOOR = 0.40  # fallback path only: floor for a rescued single dominant hue
+# Swatch classification: vivid accents vs muted/dark theme bases.
+_ACCENT_SAT = 0.35
+_ACCENT_VAL = 0.35
+_NEUTRAL_SAT = 0.12  # below this a swatch is a tinted white, not a colour
+_BASE_MIN_POP = 0.10  # a base must really be part of the cover, not noise
+_VALUE_FLOOR = 0.15  # keep even the darkest swatch faintly visible
+# Tinted whites for near-neutral theme swatches, chosen by their colour cast.
+_WARM_WHITE = (1.0, 0.84, 0.60)
+_COOL_WHITE = (0.78, 0.86, 1.0)
+_PLAIN_WHITE = (1.0, 0.92, 0.82)
 # Soft warm white for covers with no real colour (black & white art) — nothing to
 # be faithful to, so a neutral candle white reads better than an invented hue.
 _NEUTRAL = (1.0, 0.86, 0.70)
@@ -112,60 +123,94 @@ def _low_colour_fallback(pixels: np.ndarray) -> list[RGB]:
     _, sat, _luma = _rgb_to_hsv_components(pixels)
     colourful = pixels[sat >= 0.12]
     if colourful.shape[0] >= 4:
-        h, s, _v = colorsys.rgb_to_hsv(*colourful.mean(axis=0))
-        return [colorsys.hsv_to_rgb(h, max(s, _SAT_FLOOR), 1.0)]
+        h, s, v = colorsys.rgb_to_hsv(*colourful.mean(axis=0))
+        return [colorsys.hsv_to_rgb(h, max(s, _SAT_FLOOR), max(0.3, v))]
     return [_NEUTRAL]
 
 
-def _kmeans_palette(pixels: np.ndarray, k: int = 5) -> list[RGB]:
-    """Return up to ``k`` vivid, hue-diverse lighting colours from RGB pixels.
+def _tinted_white(mean_rgb: np.ndarray, value: float) -> RGB:
+    """A near-neutral swatch as a white tinted by its own colour cast.
 
-    ``pixels`` is an (N,3) float array in 0..1. ``k`` is the desired number of
-    output colours.
+    Bulbs can't show "silver" or "charcoal", but a dim cool white reads as
+    silver and a dim warm white as gold — keeping the value carries the mood.
+    """
+    r, _g, b = (float(x) for x in mean_rgb)
+    if r - b > 0.02:
+        tint = _WARM_WHITE
+    elif b - r > 0.02:
+        tint = _COOL_WHITE
+    else:
+        tint = _PLAIN_WHITE
+    v = max(_VALUE_FLOOR, min(1.0, value))
+    return (tint[0] * v, tint[1] * v, tint[2] * v)
+
+
+def _kmeans_palette(pixels: np.ndarray, k: int = 5) -> list[RGB]:
+    """Return up to ``k`` theme-faithful lighting colours from RGB pixels.
+
+    ``pixels`` is an (N,3) float array in 0..1. Output colours keep their real
+    saturation and value (the engine renders dark swatches as dimmer light).
     """
     if pixels.shape[0] == 0:
         return []
-    _, sat, luma = _rgb_to_hsv_components(pixels)
-    keep = (sat >= 0.12) & (luma >= 0.06) & (luma <= 0.97)
-    vivid = pixels[keep]
-    # If almost nothing colourful survives, the cover is effectively monochrome.
-    if vivid.shape[0] < max(6, int(0.02 * pixels.shape[0])):
+    _, _sat, luma = _rgb_to_hsv_components(pixels)
+    # Drop only the true extremes (matte black frames, paper white); greys and
+    # dark tones are kept — they are often the album's actual theme.
+    body = pixels[(luma >= 0.04) & (luma <= 0.98)]
+    if body.shape[0] < 6:
         return _low_colour_fallback(pixels)
 
-    lab = _rgb_to_lab(vivid)
-    n_clusters = min(14, vivid.shape[0], max(2 * k, 8))
+    lab = _rgb_to_lab(body)
+    n_clusters = min(14, body.shape[0], max(2 * k, 8))
     labels = _kmeans(lab, n_clusters)
 
-    clusters: list[tuple[float, float, float, float]] = []  # (score, h, s, v)
-    total = float(vivid.shape[0])
+    accents: list[tuple[float, float, float, float]] = []  # (score, h, s, v)
+    bases: list[tuple[float, float, float, float, np.ndarray]] = []  # (pop, h, s, v, rgb)
+    total = float(body.shape[0])
     for c in range(n_clusters):
-        members = vivid[labels == c]
+        members = body[labels == c]
         if not members.shape[0]:
             continue
-        h, s, v = colorsys.rgb_to_hsv(*members.mean(axis=0))
+        mean = members.mean(axis=0)
+        h, s, v = colorsys.rgb_to_hsv(*mean)
         pop = members.shape[0] / total
-        # Vividness-weighted population: a small vivid splash can outrank a large
-        # dull field (pure population ranking would always pick the background).
-        score = pop * (0.25 + 0.75 * s)
-        clusters.append((score, h, s, v))
+        if s >= _ACCENT_SAT and v >= _ACCENT_VAL:
+            # Vividness-weighted population: a small vivid splash can outrank a
+            # large dull field.
+            accents.append((pop * (0.25 + 0.75 * s), h, s, v))
+        else:
+            bases.append((pop, h, s, v, mean))
 
-    clusters.sort(key=lambda t: -t[0])
-    # Greedily pick the top scorers, rejecting near-duplicate hues for variety.
-    picked: list[tuple[float, float, float]] = []  # (h, s, v)
-    for _score, h, s, v in clusters:
-        if len(picked) >= k:
+    # Theme bases first: the dominant muted/dark swatches that set the mood.
+    bases.sort(key=lambda t: -t[0])
+    base_out: list[RGB] = []
+    for pop, h, s, v, mean in bases:
+        if len(base_out) >= 2 or pop < _BASE_MIN_POP:
             break
-        if all(_hue_distance(h, ph) >= _HUE_MIN_SEP for ph, _, _ in picked):
-            picked.append((h, s, v))
-    if not picked:
-        picked = [(clusters[0][1], clusters[0][2], clusters[0][3])]
+        if s < _NEUTRAL_SAT:
+            base_out.append(_tinted_white(mean, v))
+        else:
+            base_out.append(colorsys.hsv_to_rgb(h, s, max(_VALUE_FLOOR, v)))
 
+    # Vivid accents fill the remaining slots, hue-diverse.
+    accents.sort(key=lambda t: -t[0])
+    accent_out: list[RGB] = []
+    picked_hues: list[float] = []
+    for _score, h, s, v in accents:
+        if len(base_out) + len(accent_out) >= k:
+            break
+        if all(_hue_distance(h, ph) >= _HUE_MIN_SEP for ph in picked_hues):
+            picked_hues.append(h)
+            accent_out.append(colorsys.hsv_to_rgb(h, s, max(_VALUE_FLOOR, v)))
+
+    out = base_out + accent_out
+    if not out:
+        return _low_colour_fallback(pixels)
     # Return only the real colours found — never invent hues that aren't on the
-    # cover. A cover with one dominant colour yields a one-colour palette; the
-    # show is faithful even if that means fewer colours.
-    # Order by hue so the cyclic gradient drifts smoothly between related hues.
-    picked.sort(key=lambda t: t[0])
-    return [colorsys.hsv_to_rgb(h, max(s, _SAT_FLOOR), 1.0) for h, s, _v in picked]
+    # cover. Order by hue so the cyclic gradient drifts smoothly between
+    # related hues (tinted whites sort by their tint).
+    out.sort(key=lambda c: colorsys.rgb_to_hsv(*c)[0])
+    return out
 
 
 async def extract_palette(ffmpeg_bin: str, url: str, k: int = 5) -> Palette | None:

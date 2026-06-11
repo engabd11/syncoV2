@@ -138,7 +138,10 @@ def _channels(n: int = 3) -> list[EntertainmentChannel]:
 
 def _frame(beat: bool, strength: float = 0.0) -> AnalysisFrame:
     bands = {"sub_bass": 1.0, "bass": 1.0, "low_mid": 0.5, "mid": 0.3, "high": 0.2}
-    return AnalysisFrame(bands=bands, energy=1.0, beat=beat, beat_strength=strength)
+    return AnalysisFrame(
+        bands=bands, energy=1.0, beat=beat, beat_strength=strength,
+        bass_beat=beat, bass_strength=strength,  # kicks: the visible beat stream
+    )
 
 
 def test_colour_phase_advances_faster_with_beats():
@@ -167,6 +170,23 @@ def test_subtle_mode_barely_steps_on_beats():
     for i in range(40):
         intense.render(_frame(beat=(i % 5 == 0), strength=2.0), 0.025)
     assert intense.colour_phase > eng.colour_phase
+
+
+def test_quiet_sections_pull_the_show_in():
+    # With a track map reporting a quiet section, the same audio renders dimmer
+    # than in a loud section (the chorus visibly "arrives").
+    from hue_music_sync.audio.structure import StructureState
+
+    def run(level: float) -> float:
+        eng = EffectEngine(_channels())
+        eng.set_mode(SyncMode.HIGH)
+        st = StructureState(section_level=level)
+        out = {}
+        for _ in range(200):  # let the eased section level settle
+            out = eng.render(_frame(beat=False), 0.025, None, st)
+        return sum(max(c) for c in out.values()) / len(out)
+
+    assert run(0.2) < run(1.0) - 0.02
 
 
 # --- fireworks effect ----------------------------------------------------
@@ -215,7 +235,7 @@ def test_movie_mode_does_not_flash_on_beats():
     out = eng.render(
         AnalysisFrame(
             bands={"sub_bass": 1.0, "bass": 1.0}, energy=0.3,
-            beat=True, beat_strength=3.0,
+            beat=True, beat_strength=3.0, bass_beat=True, bass_strength=3.0,
         ),
         0.025,
     )
@@ -317,18 +337,22 @@ def test_kmeans_recovers_distinct_hues():
     assert any(220 <= h <= 260 for h in hues)
 
 
-def test_album_art_rejects_grey_background():
-    # A mostly-grey cover with a small vivid orange accent must yield the orange,
-    # not the dominant-by-population grey (pure population ranking would fail).
+def test_album_art_keeps_accent_over_grey_background():
+    # A mostly-grey cover with a small vivid orange accent must still surface
+    # the orange (vividness-weighted ranking), while the grey becomes a tinted
+    # white *theme base* rather than disappearing or staying muddy grey.
     grey = np.tile([0.5, 0.5, 0.5], (920, 1))
     orange = np.tile([1.0, 0.5, 0.0], (80, 1))
     palette = _kmeans_palette(np.vstack([grey, orange]).astype(np.float32), k=5)
     assert palette  # not empty
-    # Every returned colour is warm/orange-ish, none is the grey background.
+    sats = [colorsys.rgb_to_hsv(*c)[1] for c in palette]
+    hues = [colorsys.rgb_to_hsv(*c)[0] for c in palette]
+    # The vivid orange accent survives the dominant grey.
+    assert any(s >= 0.4 and (h <= 0.20 or h >= 0.95) for h, s in zip(hues, sats))
+    # Any kept base is a soft tinted white (low saturation), never muddy grey.
     for c in palette:
-        h, s, _v = colorsys.rgb_to_hsv(*c)
-        assert s >= 0.4  # vivid, not grey
-        assert h <= 0.20 or h >= 0.95  # warm hue family
+        h, s, v = colorsys.rgb_to_hsv(*c)
+        assert s >= 0.4 or s <= 0.30
 
 
 def test_album_art_multicolour_cover_keeps_distinct_hues():

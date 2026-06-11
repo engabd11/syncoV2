@@ -137,6 +137,8 @@ def _aggressive(i: int):
         energy=lvl,
         beat=beat,
         beat_strength=3.0 if beat else 0.0,
+        bass_beat=beat,
+        bass_strength=3.0 if beat else 0.0,
     )
 
 

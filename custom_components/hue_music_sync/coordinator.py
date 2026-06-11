@@ -24,9 +24,10 @@ from homeassistant.util import dt as dt_util
 
 from .audio.metadata import MetadataSource
 from .audio.snapcast import SnapcastSource
-from .audio.source import MusicAssistantSource
+from .audio.source import MusicAssistantSource, resolve_map_url
 from .audio.structure import StructureTracker
 from .audio.tempo import BeatGrid, TempoTracker
+from .audio.trackmap import Section, TrackMapper
 from .color.album_art import extract_palette
 from .const import (
     ANALYSIS_HOP,
@@ -50,6 +51,7 @@ from .const import (
     DEFAULT_STREAM_FPS,
     DEFAULT_TIMING_MS,
     DOMAIN,
+    LIGHT_PIPELINE_MS,
     TIMING_BUFFER_MS,
     ColorScheme,
     SyncEffect,
@@ -169,6 +171,16 @@ class SyncSession:
         _period = ANALYSIS_HOP / ANALYSIS_SAMPLE_RATE
         self._tempo = TempoTracker(_period)
         self._structure = StructureTracker(_period)
+        # Offline track maps (Hue×Spotify-style scheduled beats): analysed in the
+        # background per track, then queried by playback position each frame.
+        self._mapper = TrackMapper(
+            ffmpeg_bin,
+            spawner=lambda coro, name: hass.async_create_background_task(coro, name),
+        )
+        self._map_track: str | None = None  # last track a map URL was resolved for
+        self._map_check = 0.0
+        self._map_prev_pos: float | None = None
+        self._map_section: Section | None = None
         self._source: MusicAssistantSource | MetadataSource | SnapcastSource | None = None
         self._task: asyncio.Task | None = None
         self._running = False
@@ -245,6 +257,9 @@ class SyncSession:
         self._tempo.reset()
         self._structure.reset()
         self._beat_anchor = None  # downbeat ref is stale after a discontinuity
+        self._map_track = None
+        self._map_prev_pos = None
+        self._map_section = None
 
     def _resolve_player(self) -> str | None:
         if self._settings.media_player:
@@ -353,14 +368,25 @@ class SyncSession:
                         continue
 
                     self._maybe_refresh_album_art()
-                    # Predictive beat grid + structure drive anticipation and
-                    # build/drop choreography. (A decode-ahead source can later
-                    # pass a real future slice as the structure lookahead.)
+                    if now - self._map_check >= 1.0:
+                        self._map_check = now
+                        self._maybe_track_map()
+                    # Causal beat grid (always running; the fallback rhythm model).
                     beatgrid = self._tempo.update(
-                        frame.t_audio, frame.flux, frame.beat, frame.beat_strength
+                        frame.t_audio, frame.flux, frame.beat, frame.beat_strength,
+                        bass=max(
+                            frame.bands.get("sub_bass", 0.0),
+                            frame.bands.get("bass", 0.0),
+                        ),
                     )
-                    self._last_beatgrid = beatgrid
                     structure = self._structure.update(frame)
+                    # The offline track map, when ready, supplies the *authoritative*
+                    # grid (exact scheduled beats, real downbeats) and the section
+                    # arc — the live analyzer keeps supplying the actual energies.
+                    map_grid = self._apply_track_map(structure)
+                    if map_grid is not None:
+                        beatgrid = map_grid
+                    self._last_beatgrid = beatgrid
                     colors = self._engine.render(frame, period, beatgrid, structure)
                     await self._send_timed(colors)
                 except ConnectionError:
@@ -405,11 +431,17 @@ class SyncSession:
     async def _send_timed(self, colors: dict) -> None:
         """Send the frame through the timing-offset delay buffer.
 
-        Effective delay = TIMING_BUFFER_MS + the user's offset (can be negative
-        down to zero). Positive = lights later; negative = earlier (within the
-        baseline buffer). Lets the user align lights to the sound.
+        The baseline delay aligns the lights with the *audible* sound: a source
+        whose analysis runs ahead of the speakers (snapcast decodes chunks
+        ``bufferMs`` before clients play them) reports that lead, and we hold
+        frames for the lead minus the light pipeline's own latency. Sources
+        already position-locked to playback use the small fixed buffer instead.
+        The user's timing offset remains a fine trim on top (positive = lights
+        later; negative = earlier, within the baseline buffer).
         """
-        delay_s = max(0.0, (TIMING_BUFFER_MS + self._settings.timing_ms) / 1000.0)
+        lead_ms = getattr(self._source, "playback_lead_ms", 0) or 0
+        base_ms = max(0, lead_ms - LIGHT_PIPELINE_MS) if lead_ms > 0 else TIMING_BUFFER_MS
+        delay_s = max(0.0, (base_ms + self._settings.timing_ms) / 1000.0)
         if delay_s <= 0.001:
             self._delay_buf.clear()
             await self._safe_send(colors)
@@ -459,6 +491,86 @@ class SyncSession:
             _LOGGER.info("Reconnected DTLS stream for %s", self._config.name)
             return True
         return False
+
+    def _maybe_track_map(self) -> None:
+        """Kick off offline analysis of the current track (once per track)."""
+        src = self._source
+        if src is None:
+            return
+        track = src.track_id
+        if not track or track == self._map_track:
+            return
+        url = resolve_map_url(self._hass, src.entity_id)
+        if url is None:
+            return  # nothing tappable per-track (radio/flow); retried next poll
+        self._map_track = track
+        self._map_prev_pos = None
+        self._map_section = None
+        self._mapper.ensure(track, url)
+
+    def _analysis_position(self) -> float | None:
+        """The track position our *analysis frames* currently correspond to.
+
+        The live playhead from the player, plus the source's analysis lead
+        (snapcast decodes chunks ``bufferMs`` before the speakers play them).
+        """
+        src = self._source
+        if src is None:
+            return None
+        state = self._hass.states.get(src.entity_id)
+        if state is None:
+            return None
+        pos = state.attributes.get("media_position")
+        if pos is None:
+            return None
+        live = float(pos)
+        updated = state.attributes.get("media_position_updated_at")
+        if state.state == "playing" and updated is not None:
+            try:
+                live += max(0.0, (dt_util.utcnow() - updated).total_seconds())
+            except (TypeError, ValueError):
+                pass
+        lead_ms = getattr(src, "playback_lead_ms", 0) or 0
+        return live + lead_ms / 1000.0
+
+    def _apply_track_map(self, structure) -> BeatGrid | None:
+        """Query the track map at the current position; enrich ``structure``.
+
+        Returns the scheduled beat grid (or None to stay on the causal one) and
+        fills in the section level / predictive drop flags from the map.
+        """
+        src = self._source
+        if src is None:
+            return None
+        tm = self._mapper.get(src.track_id)
+        if tm is None:
+            return None
+        pos = self._analysis_position()
+        if pos is None:
+            return None
+        grid = tm.grid_at(pos, self._map_prev_pos)
+        self._map_prev_pos = pos
+
+        section = tm.section_at(pos)
+        prev = self._map_section
+        if section is not None:
+            structure.section_level = section.energy
+            # A boundary into a clearly louder section is a *scheduled* drop.
+            boundary = tm.next_boundary(pos)
+            if (
+                boundary is not None
+                and boundary[0] <= 1.5
+                and boundary[1] > section.energy + 0.15
+            ):
+                structure.drop_imminent = True
+            if (
+                prev is not None
+                and section is not prev
+                and section.energy > prev.energy + 0.15
+            ):
+                structure.drop_now = True
+        self._map_section = section
+        return grid
 
     def _maybe_refresh_album_art(self) -> None:
         # Only when the Album colour is selected; preset themes are static.
@@ -513,6 +625,9 @@ class SyncSession:
         bg = self._last_beatgrid
         if bg is not None and bg.locked and bg.bpm > 0:
             state["bpm"] = round(bg.bpm)
+        if self._map_section is not None:
+            # Current track-map section loudness (0..1) for dashboards.
+            state["section_energy"] = round(self._map_section.energy, 2)
         entity_id = self._source.entity_id if self._source is not None else None
         if entity_id:
             ps = self._hass.states.get(entity_id)
@@ -549,14 +664,9 @@ class SyncSession:
         (re-published only when it shifts meaningfully), so steady tempo doesn't
         churn the recorder.
         """
-        if bg is None or not bg.locked or bg.bpm <= 0:
-            return None
         pos = attrs.get("media_position")
         if pos is None:
             return None
-        # Fold with the *rounded* bpm we publish, so the card (which reads that
-        # integer bpm) and this anchor agree and the bars don't slowly drift.
-        period = 60.0 / max(1.0, round(bg.bpm))
         live = float(pos)
         updated = attrs.get("media_position_updated_at")
         if updated is not None:
@@ -564,6 +674,19 @@ class SyncSession:
                 live += max(0.0, (dt_util.utcnow() - updated).total_seconds())
             except (TypeError, ValueError):
                 pass
+        # The track map knows the beats at the *audible* position directly; the
+        # live grid's phase refers to the analysis playhead (which leads the
+        # speakers on a snapcast tap), so the map is both simpler and righter.
+        tm = self._mapper.get(self._source.track_id) if self._source else None
+        if tm is not None:
+            mg = tm.grid_at(live)
+            if mg is not None:
+                bg = mg
+        if bg is None or not bg.locked or bg.bpm <= 0:
+            return None
+        # Fold with the *rounded* bpm we publish, so the card (which reads that
+        # integer bpm) and this anchor agree and the bars don't slowly drift.
+        period = 60.0 / max(1.0, round(bg.bpm))
         # Position of the most recent beat, folded to one beat period.
         anchor = (live - bg.phase * period) % period
         prev = self._beat_anchor
@@ -586,6 +709,7 @@ class SyncSession:
         if self._task is not None:
             self._task.cancel()
             self._task = None
+        await self._mapper.close()
         if self._source is not None:
             await self._source.close()
             self._source = None

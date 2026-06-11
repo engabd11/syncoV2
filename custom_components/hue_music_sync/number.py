@@ -56,8 +56,8 @@ class TimingNumber(HueMusicSyncAreaEntity, NumberEntity):
     _attr_entity_category = EntityCategory.CONFIG
     _attr_translation_key = "timing"
     _attr_icon = "mdi:timer-sync-outline"
-    _attr_native_min_value = -200
-    _attr_native_max_value = 1000
+    _attr_native_min_value = -500
+    _attr_native_max_value = 500
     _attr_native_step = 10
     _attr_native_unit_of_measurement = UnitOfTime.MILLISECONDS
     _attr_mode = NumberMode.SLIDER

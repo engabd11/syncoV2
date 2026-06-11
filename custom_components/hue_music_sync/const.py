@@ -68,6 +68,10 @@ DEFAULT_RESTORE_LIGHTS: Final = False  # opt-in: restore exact pre-sync light st
 DEFAULT_BRIGHTNESS: Final = 1.0  # master brightness ceiling (0..1)
 DEFAULT_TIMING_MS: Final = 0  # +ve delays lights, -ve advances (within buffer)
 TIMING_BUFFER_MS: Final = 200  # baseline delay buffer enabling -ve offsets
+# Estimated latency of the light pipeline itself (DTLS -> bridge -> Zigbee ->
+# bulb ramp). When a source's analysis leads the audible sound (snapcast), we
+# delay the frames by the lead *minus* this, so the photons land on the beat.
+LIGHT_PIPELINE_MS: Final = 100
 
 
 class ColorScheme(StrEnum):

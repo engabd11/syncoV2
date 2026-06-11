@@ -50,6 +50,51 @@ class TrackInfo:
     alt_urls: list[str] = field(default_factory=list)
 
 
+def _find_mass_client(hass: HomeAssistant):
+    """Best-effort lookup of the Music Assistant client object."""
+    for entry in hass.config_entries.async_entries("music_assistant"):
+        runtime = getattr(entry, "runtime_data", None)
+        mass = getattr(runtime, "mass", None) or runtime
+        if mass is not None and hasattr(mass, "players"):
+            return mass
+    data = hass.data.get("music_assistant")
+    if data and hasattr(data, "players"):
+        return data
+    return None
+
+
+def resolve_map_url(hass: HomeAssistant, entity_id: str) -> str | None:
+    """A per-track URL suitable for *offline* analysis of the current track.
+
+    Prefers the queue item's provider stream path (a plain file/HTTP stream that
+    decodes faster than realtime), falling back to an http ``current_media.uri``.
+    Returns None when the player exposes nothing tappable per-track (radio,
+    flow streams) — callers then stay on live-only analysis.
+    """
+    try:
+        mass = _find_mass_client(hass)
+        entry = er.async_get(hass).async_get(entity_id)
+        player_id = entry.unique_id if entry else None
+        if mass is None or player_id is None:
+            return None
+        player = mass.players.get(player_id)
+        if player is not None:
+            src = getattr(player, "active_source", None)
+            queue = mass.player_queues.get(src) if src else None
+            item = getattr(queue, "current_item", None)
+            sd = getattr(item, "streamdetails", None)
+            path = getattr(sd, "path", None)
+            if isinstance(path, str) and path.startswith(("http://", "https://")):
+                return path
+        media = getattr(player, "current_media", None) if player else None
+        uri = getattr(media, "uri", None) if media else None
+        if isinstance(uri, str) and uri.startswith(("http://", "https://")):
+            return uri
+    except Exception as err:  # noqa: BLE001 - defensive across MA versions
+        _LOGGER.debug("[%s] map URL lookup failed: %s", entity_id, err)
+    return None
+
+
 def _ma_player_codec(player) -> str:
     """The output codec a Music Assistant player is configured to stream.
 
@@ -196,20 +241,9 @@ class MusicAssistantSource:
         now = time.monotonic()
         if self._mass_cache is not None and now - self._mass_cache_ts < 30.0:
             return self._mass_cache
-        client = None
-        for entry in self._hass.config_entries.async_entries("music_assistant"):
-            runtime = getattr(entry, "runtime_data", None)
-            mass = getattr(runtime, "mass", None) or runtime
-            if mass is not None and hasattr(mass, "players"):
-                client = mass
-                break
-        if client is None:
-            data = self._hass.data.get("music_assistant")
-            if data and hasattr(data, "players"):
-                client = data
-        self._mass_cache = client
+        self._mass_cache = _find_mass_client(self._hass)
         self._mass_cache_ts = now
-        return client
+        return self._mass_cache
 
     def _ha_position(self) -> tuple[float, bool]:
         """Return (estimated position seconds, is_playing) from HA state."""

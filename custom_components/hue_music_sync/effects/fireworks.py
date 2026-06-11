@@ -65,12 +65,13 @@ class FireworksEffect:
             r, g, b = self._state[cid]
             self._state[cid] = (r * fade, g * fade, b * fade)
 
-        # Decide whether to ignite new bursts this frame.
+        # Decide whether to ignite new bursts this frame (kick/bass onsets only,
+        # so vocals and hi-hats don't launch fireworks).
         self._since_launch += dt
-        qualifying = frame.beat and frame.beat_strength >= params.beat_threshold
+        qualifying = frame.bass_beat and frame.bass_strength >= params.beat_threshold
         if qualifying or self._since_launch >= _AUTO_LAUNCH_S:
             self._since_launch = 0.0
-            strength = frame.beat_strength if qualifying else 1.0
+            strength = frame.bass_strength if qualifying else 1.0
             self._launch(engine, channels, strength, params)
 
         floor = params.floor * 0.25  # faint palette ember so it's never pitch black

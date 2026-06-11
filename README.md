@@ -168,8 +168,9 @@ flash limiter holding the 3 flashes/sec ceiling at every intensity).
 
 - Needs **Music Assistant** audio; arbitrary HA players without a tappable stream
   are not supported.
-- Perfect lip-sync is not possible due to player buffering; use the timing offset
-  to align by ear.
+- Snapcast playback is aligned automatically (the server's buffer is read from
+  the wire protocol); the timing offset remains as a fine trim for other player
+  types or unusual light latency.
 - Requires a **v2** Hue bridge; entertainment streaming is not available on v1.
 
 ## License

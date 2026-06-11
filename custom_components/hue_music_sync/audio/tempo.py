@@ -47,9 +47,17 @@ _MIN_BPM = 70.0
 _MAX_BPM = 190.0
 _PRIOR_CENTER_BPM = 120.0
 _PRIOR_WIDTH = 0.55  # log-tempo Gaussian width (octave ~= 0.69)
-_LOCK_CONFIDENCE = 0.35  # autocorr peak strength to consider the tempo "locked"
-# (real music measures ~0.7-0.9; noise/irregular onsets stay well below, so an
-# uncertain track falls back to plain reactive behaviour rather than mis-locking)
+# Lock hysteresis: engage at the higher confidence, release at the lower one.
+# A single threshold made the choreography flip between grid-paced and reactive
+# behaviour mid-song whenever confidence hovered near it — which *looks* random.
+# (Real music measures ~0.7-0.9; noise/irregular onsets stay well below.)
+_LOCK_ON = 0.40
+_LOCK_OFF = 0.25
+# PLL discipline: only onsets near a predicted beat may nudge the clock; this
+# many consecutive far-off onsets instead snap the phase to the onsets (the
+# grid was simply anchored wrong, e.g. locked onto the off-beat).
+_PLL_GATE = 0.20  # max |phase error| (in beats) for a nudge
+_RESYNC_STREAK = 4
 
 
 class TempoTracker:
@@ -72,6 +80,8 @@ class TempoTracker:
         self._bpm = 0.0
         self._period_s = 0.0
         self._confidence = 0.0
+        self._locked = False
+        self._offgrid_streak = 0
         self._phase = 0.0
         self._beat_count = 0
         self._frames = 0
@@ -81,12 +91,31 @@ class TempoTracker:
         self._bar_accent = np.zeros(4, dtype=np.float64)
         self._downbeat = 0
 
-    def update(self, t_audio: float, flux: float, beat: bool, beat_strength: float) -> BeatGrid:
-        """Advance the grid by one frame and return the current prediction."""
+    def update(
+        self,
+        t_audio: float,
+        flux: float,
+        beat: bool,
+        beat_strength: float,
+        bass: float = 1.0,
+    ) -> BeatGrid:
+        """Advance the grid by one frame and return the current prediction.
+
+        ``bass`` (0..1, the frame's low-band level) weights how hard an onset
+        may pull the clock: kicks steer, hi-hats barely do.
+        """
         self._flux.append(max(0.0, flux))
         self._frames += 1
         if self._frames % self._recompute_every == 0 and len(self._flux) >= self._maxlen // 2:
             self._recompute_tempo()
+
+        # Lock hysteresis (engage high, release low) so behaviour can't flap.
+        if self._locked:
+            if self._confidence < _LOCK_OFF or self._period_s <= 0.0:
+                self._locked = False
+        elif self._confidence >= _LOCK_ON and self._period_s > 0.0:
+            self._locked = True
+            self._offgrid_streak = 0
 
         # Advance the beat clock by the real elapsed audio time (frames may be
         # produced and consumed at slightly different rates).
@@ -106,15 +135,26 @@ class TempoTracker:
                 self._phase -= 1.0
                 self._beat_count += 1
                 predicted = True
-            # PLL: a confirmed onset nudges the clock toward a beat boundary.
-            if beat and self._confidence >= _LOCK_CONFIDENCE:
+            # PLL: an onset *near a predicted beat* nudges the clock toward the
+            # boundary; off-grid onsets (vocal hits, hi-hat flams) are ignored
+            # — unless they form a streak, which means the grid is anchored on
+            # the wrong phase and should snap to where the onsets actually are.
+            if beat and self._locked:
                 # Phase error in (-0.5, 0.5]: how far we are from the nearest beat.
                 err = self._phase if self._phase <= 0.5 else self._phase - 1.0
-                self._phase -= 0.10 * err  # gentle correction, stays smooth
-                self._phase %= 1.0
-                self._accumulate_accent(beat_strength)
+                if abs(err) <= _PLL_GATE:
+                    self._offgrid_streak = 0
+                    gain = 0.10 * (0.4 + 0.6 * min(1.0, max(0.0, bass)))
+                    self._phase -= gain * err
+                    self._phase %= 1.0
+                    self._accumulate_accent(beat_strength)
+                else:
+                    self._offgrid_streak += 1
+                    if self._offgrid_streak >= _RESYNC_STREAK:
+                        self._phase = 0.0  # re-anchor the clock on the onsets
+                        self._offgrid_streak = 0
 
-        locked = self._confidence >= _LOCK_CONFIDENCE and self._period_s > 0.0
+        locked = self._locked
         ttn = (1.0 - self._phase) * self._period_s if self._period_s > 0.0 else 0.0
         beat_idx = (self._beat_count - self._downbeat) % 4
         return BeatGrid(
@@ -167,6 +207,8 @@ class TempoTracker:
         self._bpm = 0.0
         self._period_s = 0.0
         self._confidence = 0.0
+        self._locked = False
+        self._offgrid_streak = 0
         self._phase = 0.0
         self._beat_count = 0
         self._bar_accent[:] = 0.0

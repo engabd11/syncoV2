@@ -82,7 +82,7 @@ def test_beat_produces_a_non_uniform_field():
     eng.set_mode(SyncMode.INTENSE)
     beat = AnalysisFrame(
         bands={"sub_bass": 1.0, "bass": 1.0, "high": 0.4}, energy=0.8,
-        beat=True, beat_strength=2.5,
+        beat=True, beat_strength=2.5, bass_beat=True, bass_strength=2.5,
     )
     quiet = AnalysisFrame(bands={"sub_bass": 0.1, "bass": 0.1, "high": 0.1}, energy=0.2)
     eng.render(beat, _DT)
@@ -104,6 +104,7 @@ def _aggressive_stream(n):
         yield AnalysisFrame(
             bands={"sub_bass": lvl, "bass": lvl, "low_mid": lvl * 0.7, "mid": lvl * 0.5, "high": lvl * 0.6},
             energy=lvl, beat=beat, beat_strength=3.0 if beat else 0.0,
+            bass_beat=beat, bass_strength=3.0 if beat else 0.0,
             flux=1.0 if beat else 0.05, t_audio=i * _PERIOD, centroid=0.4,
         )
 
