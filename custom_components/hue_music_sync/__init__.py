@@ -44,7 +44,8 @@ DATA_CARD_REGISTERED = "card_registered"
 
 # The bundled dashboard card (the frontend "beauty") served straight from the
 # integration, so a single install gives both the backend sync and the card.
-CARD_URL = "/hue_music_sync/hue-music-sync-card.js"
+CARD_BASE_URL = "/hue_music_sync"  # the served frontend/ directory
+CARD_URL = f"{CARD_BASE_URL}/hue-music-sync-card.js"
 
 
 def _build_ssl_context() -> ssl.SSLContext:
@@ -71,32 +72,49 @@ async def _register_frontend_card(hass: HomeAssistant) -> None:
     no manual dashboard-resource step. Best-effort: a failure here never blocks
     the integration (the card can still be added as a resource by hand).
     """
+    from pathlib import Path
+
     if hass.data[DOMAIN].get(DATA_CARD_REGISTERED):
+        return
+    frontend_dir = Path(__file__).parent / "frontend"
+    if not (frontend_dir / "hue-music-sync-card.js").is_file():
+        _LOGGER.error(
+            "Hue Synco card file is missing under %s; reinstall/update the "
+            "integration so the bundled card ships with it", frontend_dir
+        )
         return
     hass.data[DOMAIN][DATA_CARD_REGISTERED] = True
     try:
-        from pathlib import Path
-
         from homeassistant.components.frontend import add_extra_js_url
-        from homeassistant.components.http import StaticPathConfig
         from homeassistant.loader import async_get_integration
 
-        path = Path(__file__).parent / "frontend" / "hue-music-sync-card.js"
-        await hass.http.async_register_static_paths(
-            [StaticPathConfig(CARD_URL, str(path), False)]
-        )
+        # Serve the whole frontend/ directory (directory static serving is the
+        # most robust form), with a legacy fallback for older HA cores.
+        try:
+            from homeassistant.components.http import StaticPathConfig
+
+            await hass.http.async_register_static_paths(
+                [StaticPathConfig(CARD_BASE_URL, str(frontend_dir), False)]
+            )
+        except (ImportError, AttributeError):
+            hass.http.register_static_path(CARD_BASE_URL, str(frontend_dir), False)
+
         try:
             version = (await async_get_integration(hass, DOMAIN)).version
         except Exception:  # noqa: BLE001
             version = None
-        add_extra_js_url(hass, f"{CARD_URL}?v={version}" if version else CARD_URL)
-        _LOGGER.debug("Registered bundled Hue Synco dashboard card at %s", CARD_URL)
-    except Exception as err:  # noqa: BLE001 - never block setup on the card
+        url = f"{CARD_URL}?v={version}" if version else CARD_URL
+        add_extra_js_url(hass, url)
+        _LOGGER.info(
+            "Hue Synco dashboard card registered at %s. If it doesn't appear in "
+            "the card picker, hard-refresh the browser (Ctrl+Shift+R).", url
+        )
+    except Exception:  # noqa: BLE001 - never block setup on the card
         hass.data[DOMAIN][DATA_CARD_REGISTERED] = False
         _LOGGER.warning(
-            "Could not auto-register the Hue Synco dashboard card (%s); add it "
-            "manually as a dashboard resource pointing at %s.",
-            err, CARD_URL,
+            "Could not auto-register the Hue Synco dashboard card; add it manually "
+            "as a dashboard resource pointing at %s (module).", CARD_URL,
+            exc_info=True,
         )
 
 
