@@ -317,9 +317,16 @@ class SyncSession:
 
                 # Refresh the card-facing attributes (~1 Hz; only writes HA state
                 # when something actually changed). Runs in every branch below.
+                # Never let a publish error take down the sync loop.
                 if now - self._last_publish >= 1.0:
                     self._last_publish = now
-                    self._maybe_publish()
+                    try:
+                        self._maybe_publish()
+                    except Exception:  # noqa: BLE001
+                        _LOGGER.debug(
+                            "Card attribute publish failed for %s",
+                            self._config.name, exc_info=True,
+                        )
 
                 try:
                     if self._source is None:
