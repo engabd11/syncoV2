@@ -156,6 +156,10 @@ class _AGC:
         self._peak = max(value, self._peak * self._decay, self._floor)
         return min(1.0, value / self._peak)
 
+    def reset(self) -> None:
+        """Forget the peak (rising is instant, so this is always safe)."""
+        self._peak = self._floor
+
 
 class Analyzer:
     """Turns a stream of audio hops into :class:`AnalysisFrame` features."""
@@ -439,6 +443,12 @@ class Analyzer:
     def reset(self) -> None:
         """Clear transient state, e.g. on a track change."""
         self._buf[:] = 0.0
+        # The band/energy AGC decays over ~70 s now (to keep verse/chorus
+        # contrast within a track), so the peaks MUST reset between tracks —
+        # otherwise a quiet song after a loud one renders dim for a minute.
+        for agc in self._agc.values():
+            agc.reset()
+        self._energy_agc.reset()
         self._prev_log = None
         self._prev_lin = None
         self._mid_e_prev = 0.0

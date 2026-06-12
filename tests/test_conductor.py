@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 
 from hue_music_sync.audio.analyzer import Analyzer, AnalysisFrame
-from hue_music_sync.audio.tempo import BeatGrid, TempoTracker
+from hue_music_sync.audio.tempo import BeatGrid, TempoTracker, _schedule_weight
 from hue_music_sync.audio.trackmap import _rolling_accents, analyze_pcm
 from hue_music_sync.const import ANALYSIS_HOP, ANALYSIS_SAMPLE_RATE, SyncMode
 from hue_music_sync.effects.engine import EffectEngine
@@ -143,6 +143,48 @@ def test_causal_tracker_predicts_normalised_accents():
     # Uniform clicks: prediction settles high (every beat is "strong here").
     assert 0.5 <= grid.accent <= 1.0
     assert 0 <= grid.beat_in_bar <= 3
+
+
+def test_schedule_weight_ramps_with_confidence():
+    # A marginal causal lock pulses modestly; a solid one pulses at full.
+    assert abs(_schedule_weight(0.40) - 0.6) < 1e-9
+    assert _schedule_weight(0.50) == 0.8
+    assert _schedule_weight(0.60) == 1.0
+    assert _schedule_weight(0.95) == 1.0
+    # The track map's grid never ramps (BeatGrid default).
+    assert BeatGrid().schedule_strength == 1.0
+
+
+def test_marginal_lock_pulses_smaller_than_solid_lock():
+    def pulse_at(weight: float) -> float:
+        eng = EffectEngine(_channels(3))
+        eng.set_mode(SyncMode.INTENSE)
+        for _ in range(10):
+            eng.render(_quiet(), _DT, beatgrid=_grid(False, phase=0.4))
+        g = _grid(True)
+        g.schedule_strength = weight
+        out = eng.render(_quiet(), _DT, beatgrid=g)
+        bass = [c for c, r in eng.roles.items() if r == ROLE_BASS]
+        return max(max(out[c]) for c in bass)
+
+    assert pulse_at(1.0) > pulse_at(0.6) + 0.1
+
+
+def test_agc_resets_between_tracks():
+    # Loud track, then reset, then a much quieter track: the quiet track's own
+    # peaks must still read near full scale immediately (the slow ~70 s AGC
+    # decay otherwise leaves the next song dim for a minute).
+    a = Analyzer()
+    loud = _click_track(120, 4.0)
+    for k in range(len(loud) // ANALYSIS_HOP):
+        a.push(loud[k * ANALYSIS_HOP : (k + 1) * ANALYSIS_HOP])
+    a.reset()
+    quiet = (_click_track(120, 4.0) * 0.08).astype(np.float32)
+    peak_bass = 0.0
+    for k in range(len(quiet) // ANALYSIS_HOP):
+        f = a.push(quiet[k * ANALYSIS_HOP : (k + 1) * ANALYSIS_HOP])
+        peak_bass = max(peak_bass, f.bands.get("bass", 0.0), f.bands.get("sub_bass", 0.0))
+    assert peak_bass > 0.9
 
 
 def test_rolling_accents_survive_one_huge_transient():

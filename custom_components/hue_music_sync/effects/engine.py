@@ -284,7 +284,11 @@ class EffectEngine:
                 acc = max(0.0, min(1.0, beatgrid.accent))
                 nb = (beatgrid.beat_in_bar + 1) % 4
                 w = pulse_weight(p, acc, nb)
-                strength = (0.45 + 1.05 * acc) * (0.35 + 0.65 * w)
+                strength = (
+                    (0.45 + 1.05 * acc)
+                    * (0.35 + 0.65 * w)
+                    * beatgrid.schedule_strength
+                )
         elif vis_strength > 0.0:
             knee = accent_knee(vis_strength, p.beat_threshold)
             if knee > 0.2:
@@ -374,7 +378,11 @@ class EffectEngine:
             kick = 0.0
             if vis_strength > 0.0:
                 acc = max(0.0, min(1.0, (vis_strength - 1.0) / 2.0))
-                kick = beat_pulse(p, acc, beatgrid.beat_in_bar, vis_bass) * flash_scale
+                kick = (
+                    beat_pulse(p, acc, beatgrid.beat_in_bar, vis_bass)
+                    * flash_scale
+                    * beatgrid.schedule_strength
+                )
         else:
             kick = kick_flash(p, vis_strength, vis_bass) * flash_scale
         midf = mid_flash(p, mid_strength)

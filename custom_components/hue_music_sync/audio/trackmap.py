@@ -604,7 +604,15 @@ def _finish_analysis(ex: EnvelopeExtractor) -> TrackMap | None:
     if beat_frames.size < 4:
         return None
     beats = beat_frames.astype(np.float64) * _FRAME_PERIOD
-    accents_raw = env[np.minimum(beat_frames, env.size - 1)]
+    idx = np.minimum(beat_frames, env.size - 1)
+    accents_raw = env[idx]
+    # Bass-weight each beat's accent (same formula as the live tracker:
+    # flux * (0.5 + 0.5*bass)): rhythmic "impact" is perceived almost entirely
+    # in the low end, so a treble stab shouldn't read as a big beat.
+    bass_at = bass_env[np.minimum(idx, bass_env.size - 1)]
+    bass_ref = float(np.percentile(bass_at, 95)) if bass_at.size else 0.0
+    if bass_ref > 1e-9:
+        accents_raw = accents_raw * (0.5 + 0.5 * np.clip(bass_at / bass_ref, 0.0, 1.0))
     accents = _rolling_accents(accents_raw)
     downbeat = _find_downbeat(bass_env, beat_frames)
     # Refine the bpm from the actual tracked beats (more honest than the lag).

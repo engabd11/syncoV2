@@ -52,6 +52,11 @@ class BeatGrid:
     # Which beat of the bar just started (0 = downbeat). Drives the musical
     # pulse hierarchy: downbeats hit hardest, beats 2/4 land softer.
     beat_in_bar: int = 0
+    # How hard scheduled pulses may drive the show (0..1). The causal tracker
+    # ramps this with its lock confidence so a marginal, possibly-wrong lock
+    # pulses modestly instead of confidently; the track map (authoritative,
+    # offline) always leaves it at full.
+    schedule_strength: float = 1.0
 
 
 _MIN_BPM = 70.0
@@ -69,6 +74,18 @@ _LOCK_OFF = 0.25
 # grid was simply anchored wrong, e.g. locked onto the off-beat).
 _PLL_GATE = 0.20  # max |phase error| (in beats) for a nudge
 _RESYNC_STREAK = 4
+# Scheduled pulses ramp in with lock quality: a lock at the engage threshold
+# drives them at this fraction, reaching full at _FULL_CONFIDENCE. Detection
+# (which still rides along via max()) carries the difference meanwhile.
+_MARGINAL_SCHEDULE = 0.6
+_FULL_CONFIDENCE = 0.60
+
+
+def _schedule_weight(confidence: float) -> float:
+    """0.6..1.0 scheduled-pulse weight from causal lock confidence."""
+    span = max(1e-6, _FULL_CONFIDENCE - _LOCK_ON)
+    t = max(0.0, min(1.0, (confidence - _LOCK_ON) / span))
+    return _MARGINAL_SCHEDULE + (1.0 - _MARGINAL_SCHEDULE) * t
 
 
 class TempoTracker:
@@ -195,6 +212,7 @@ class TempoTracker:
             accent=self._acc_pred,
             accent_now=self._acc_pred,
             beat_in_bar=beat_idx,
+            schedule_strength=_schedule_weight(self._confidence) if locked else 1.0,
         )
 
     def _finish_beat_accent(self) -> None:
