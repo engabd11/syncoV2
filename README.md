@@ -52,6 +52,13 @@ to the bridge over the Hue Entertainment API (~40 Hz over DTLS), and a bundled
   muted and dark theme tones (dark silver reads as a dim cool white, gold as a
   warm one), so a moody album gives a moody show. Plus a full-spectrum Rainbow
   and 11 preset themes.
+- **Song colours from the music itself**: a `Song` colour scheme derives the
+  palette from the track's *own harmony* - the dominant pitch classes of each
+  section map to hues (C=red ... B=violet), tonal sections read more saturated,
+  and the colours shift as the song moves from verse to chorus. Computed offline
+  from the analysis, so every player gets it. The same approach the official
+  Hue+Spotify integration uses (it reflects the song's pitch and mood), done
+  locally - no external service.
 - **Structure-aware**: builds tighten and desaturate, drops detonate a swell,
   breakdowns breathe - predictively when the track map knows what is coming.
 - **Effects**: Music (beat/frequency choreography), Movies (calm soundtrack
@@ -248,8 +255,11 @@ punch.
 Players with no tappable stream at all (**AirPlay, Chromecast, Sonos, DLNA,
 ESPHome, groups, ...**) run entirely on the track map: the precomputed show is
 replayed locked to the player's position. Runtime cost is an array lookup per
-frame, and the beats come from the offline tracker, so these players are fully
-beat-accurate too. A dropped DTLS channel reconnects with backoff.
+frame, and the beats come from the offline tracker (with a harmonic-comb
+octave-error guard so it locks to the musically-felt pulse, not double-time).
+The melbank is precomputed into the map too, so these players get the same
+always-alive LedFx reactive layer as a live tap - not just the scheduled beats.
+A dropped DTLS channel reconnects with backoff.
 
 | Player | Audio path | Beats |
 | --- | --- | --- |

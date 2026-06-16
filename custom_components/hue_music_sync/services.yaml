@@ -38,6 +38,7 @@ activate:
         select:
           options:
             - album_art
+            - song
             - sunset
             - ocean
             - forest
@@ -115,6 +116,7 @@ set_options:
         select:
           options:
             - album_art
+            - song
             - sunset
             - ocean
             - forest

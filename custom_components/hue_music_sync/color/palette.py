@@ -131,7 +131,12 @@ ALBUM_ART_FALLBACK = ColorScheme.SUNSET
 
 
 def get_palette(scheme: ColorScheme) -> Palette:
-    """Return the static palette for a scheme (ALBUM_ART falls back)."""
-    if scheme == ColorScheme.ALBUM_ART:
+    """Return the static palette for a scheme.
+
+    ALBUM_ART and SONG are dynamic (filled in at runtime from the cover art /
+    the song's harmony), so they fall back to a pleasant static palette until
+    their real colours are ready.
+    """
+    if scheme in (ColorScheme.ALBUM_ART, ColorScheme.SONG):
         return _SCHEMES[ALBUM_ART_FALLBACK]
-    return _SCHEMES[scheme]
+    return _SCHEMES.get(scheme, _SCHEMES[ALBUM_ART_FALLBACK])

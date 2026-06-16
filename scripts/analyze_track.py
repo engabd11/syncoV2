@@ -45,10 +45,19 @@ def main() -> int:
         print(f"  interval : median {ivals.mean():.3f} s, spread "
               f"{ivals.std() * 1000:.0f} ms")
         print(f"  first 8  : {[round(float(b), 2) for b in tm.beats[:8]]}")
+    feats = tm.features
+    if feats is not None and feats.melbank.size:
+        print(f"melbank    : {feats.melbank.shape[1]} bins x {feats.melbank.shape[0]} frames "
+              f"(max {float(feats.melbank.max()):.2f}) -> scheduled players get the LedFx layer")
     print(f"sections   : {len(tm.sections)}")
     for s in tm.sections:
         bar = "#" * int(round(s.energy * 30))
+        swatch = " ".join(
+            "#%02x%02x%02x" % tuple(int(max(0.0, min(1.0, v)) * 255) for v in c)
+            for c in s.palette
+        ) or "(no harmonic colour)"
         print(f"  {s.start:7.1f} - {s.end:7.1f} s  energy {s.energy:.2f} {bar}")
+        print(f"            song colours: {swatch}")
     return 0
 
 

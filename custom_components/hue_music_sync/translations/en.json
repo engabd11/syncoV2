@@ -66,6 +66,7 @@
         "name": "Colour",
         "state": {
           "album_art": "Album colours",
+          "song": "Song colours",
           "sunset": "Sunset",
           "ocean": "Ocean",
           "forest": "Forest",

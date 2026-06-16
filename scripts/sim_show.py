@@ -55,6 +55,7 @@ from hue_music_sync.const import (  # noqa: E402
     ANALYSIS_SAMPLE_RATE,
     SyncMode,
 )
+from hue_music_sync.audio.trackmap import analyze_pcm  # noqa: E402
 from hue_music_sync.effects.engine import EffectEngine  # noqa: E402
 
 
@@ -200,7 +201,49 @@ def main() -> int:
                 ok = False
         print(f"{'':8} {'-> ' + verdict}")
     print("\nINVARIANT:", "PASS" if ok else "FAIL (a mode goes dead when unlocked)")
+
+    # --- scheduled (track-map) path: the "metadata from music" show -----------
+    tm = analyze_pcm(pcm)
+    if tm is not None and tm.features is not None:
+        mel = tm.features.melbank
+        print(f"\ntrack map: bpm {tm.bpm:.1f}  conf {tm.confidence:.2f}  "
+              f"{'USABLE' if tm.usable else 'live-fallback'}  "
+              f"melbank {('%dx%d' % mel.shape) if mel.size else 'MISSING'}")
+        for s in tm.sections:
+            swatch = " ".join(
+                "#%02x%02x%02x" % tuple(int(max(0.0, min(1.0, v)) * 255) for v in c)
+                for c in s.palette
+            ) or "(none)"
+            print(f"  section {s.start:6.1f}-{s.end:6.1f}s  e{s.energy:.2f}  song colours: {swatch}")
+        # Scheduled playback should be as alive as the live path.
+        ok_sched = _run_scheduled(tm, SyncMode.INTENSE)
+        print("SCHEDULED-PLAYBACK LIVELINESS:", "PASS" if ok_sched else "FAIL")
+        ok = ok and ok_sched
     return 0 if ok else 1
+
+
+def _run_scheduled(tm, mode: SyncMode) -> bool:
+    """Render the track map's own frames through the engine (no live audio)."""
+    eng = EffectEngine(_channels())
+    eng.set_mode(mode)
+    period = ANALYSIS_HOP / ANALYSIS_SAMPLE_RATE
+    room = []
+    pos, prev = float(tm.beats[0]) if tm.beats.size else 1.0, None
+    for _ in range(int(min(60.0, tm.duration) / period)):
+        frame = tm.frame_at(pos, prev)
+        if frame is None:
+            break
+        out = eng.render(frame, period, beatgrid=None)  # worst case: no grid
+        room.append(max(max(c) for c in out.values()))
+        prev = pos
+        pos += period
+    if not room:
+        return False
+    room = np.array(room)
+    move = float(np.mean(np.abs(np.diff(room)))) if room.size > 1 else 0.0
+    print(f"  scheduled INTENSE: dark {float((room < 0.12).mean())*100:.1f}%  "
+          f"bri {room.mean():.2f}  move {move:.3f}")
+    return room.mean() > 0.30 and move > 0.004
 
 
 if __name__ == "__main__":

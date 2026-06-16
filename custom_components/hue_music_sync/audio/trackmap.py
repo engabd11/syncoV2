@@ -37,14 +37,24 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from ..const import ANALYSIS_HOP, ANALYSIS_SAMPLE_RATE, ANALYSIS_WINDOW, BANDS
+from ..color.palette import RGB
+from ..color.song_palette import palette_from_chroma
+from ..const import (
+    ANALYSIS_HOP,
+    ANALYSIS_SAMPLE_RATE,
+    ANALYSIS_WINDOW,
+    BANDS,
+    MELBANK_BINS,
+)
 from .analyzer import (
     AnalysisFrame,
     band_means,
     log_spectrum,
+    make_melbank,
     make_onset_filterbank,
     max_filter_freq,
 )
+from .filters import ExpFilter
 from .tempo import BeatGrid
 
 _LOGGER = logging.getLogger(__name__)
@@ -78,6 +88,9 @@ class Section:
     start: float
     end: float
     energy: float  # 0..1 loudness of this section relative to the track's peak
+    # Colours derived from this section's harmony (chroma -> hue), used by the
+    # SONG colour scheme. Empty when the section had no usable pitch content.
+    palette: list[RGB] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -97,6 +110,10 @@ class TrackFeatures:
     bass_flux: np.ndarray  # (n_frames,) float32, 0..~1
     mid_flux: np.ndarray  # (n_frames,) float32, 0..~1 (guitar/snare)
     centroid: np.ndarray  # (n_frames,) float32, 0..1 (structure brightness)
+    # Precomputed LedFx-style melbank (n_frames, MELBANK_BINS), gain-normalised
+    # and smoothed offline so scheduled playback drives the same continuous
+    # reactive layer as the live tap. Empty array on older/failed analyses.
+    melbank: np.ndarray = field(default_factory=lambda: np.zeros((0, 0), dtype=np.float32))
 
 
 @dataclass(slots=True)
@@ -147,6 +164,7 @@ class TrackMap:
         mid = m1 > m0
         mid_strength = 1.0 + 2.0 * float(self.mid_accents[m1 - 1]) if mid else 0.0
         bands = {name: float(v) for name, v in zip(BANDS, f.bands[i])}
+        melbank = f.melbank[i].tolist() if f.melbank.shape[0] > i else []
         return AnalysisFrame(
             bands=bands,
             energy=float(f.energy[i]),
@@ -162,6 +180,7 @@ class TrackMap:
             mid_flux=float(f.mid_flux[i]),
             mid_beat=mid,
             mid_strength=mid_strength,
+            melbank=melbank,
         )
 
     def grid_at(self, pos: float, prev_pos: float | None = None) -> BeatGrid | None:
@@ -235,6 +254,23 @@ class TrackMap:
         return None
 
 
+# Chroma (pitch-class) range: fundamentals from ~A1 to ~D8. Below/above this,
+# bins are mostly hum, percussion noise or harmonics that muddy the key.
+_CHROMA_FMIN = 55.0
+_CHROMA_FMAX = 5000.0
+
+
+def _chroma_projection(freqs: np.ndarray) -> np.ndarray:
+    """``(n_bins, 12)`` matrix folding FFT bins into pitch classes (0=C..11=B)."""
+    proj = np.zeros((freqs.size, 12), dtype=np.float32)
+    for b in range(freqs.size):
+        f = float(freqs[b])
+        if _CHROMA_FMIN <= f <= _CHROMA_FMAX:
+            midi = 69.0 + 12.0 * np.log2(f / 440.0)
+            proj[b, int(round(midi)) % 12] = 1.0
+    return proj
+
+
 class EnvelopeExtractor:
     """Streamed STFT feature extraction (constant memory, vectorised per chunk).
 
@@ -255,6 +291,12 @@ class EnvelopeExtractor:
         self._fb_starts, self._fb_counts, self.n_bass, self.n_mid = (
             make_onset_filterbank(freqs.astype(np.float32))
         )
+        # Continuous melbank (same filterbank as the live analyzer) + chroma
+        # projection, both precomputed once per analysis.
+        self._mel_starts, self._mel_counts = make_melbank(freqs.astype(np.float32))
+        self._chroma_proj = _chroma_projection(freqs)
+        self.melbank: list[np.ndarray] = []  # per-frame melbank means
+        self.chroma: list[np.ndarray] = []  # per-frame 12-bin chromagram
         self._freqs = freqs.astype(np.float32)
         # Bin ranges of the named output bands (same edges as the live analyzer).
         self._named_bins = []
@@ -327,6 +369,10 @@ class EnvelopeExtractor:
         total = np.maximum(mags.sum(axis=1), 1e-9)
         cent = np.minimum(1.0, (mags @ self._freqs) / total / 5000.0)
         self.centroid.extend(cent.tolist())
+        # Continuous melbank (drives the LedFx reactive layer on playback) and
+        # the chromagram (drives the SONG colour scheme), per frame.
+        self.melbank.extend(band_means(mags, self._mel_starts, self._mel_counts))
+        self.chroma.extend(mags @ self._chroma_proj)
         self._prev_log = logb[-1]
         consumed = n_frames * self._hop
         self._tail = buf[consumed:].copy()
@@ -349,6 +395,27 @@ def _estimate_tempo(env: np.ndarray) -> tuple[float, float]:
     prior = np.exp(-0.5 * (np.log(cand_bpm / _PRIOR_CENTER_BPM) / _PRIOR_WIDTH) ** 2)
     seg = ac[min_lag : max_lag + 1]
     best = int(np.argmax(seg * prior))
+    # Octave-error guard: a true fundamental has autocorrelation energy at all
+    # its multiples (a "harmonic comb"), while a double-tempo false peak
+    # (eighth-notes mistaken for the beat) lacks the sub-multiple support. Only
+    # consider switching the chosen period to its half/double relative, and only
+    # when that relative's comb*prior actually wins — so clear cases are left
+    # untouched and only genuine 2x/0.5x errors ("every other beat") are fixed.
+    def _comb(idx: int) -> float:
+        lag = int(lags[idx])
+        s = float(seg[idx])
+        for harm, weight in ((2, 0.5), (3, 0.34)):
+            hl = lag * harm
+            if hl <= n - 1:
+                s += weight * float(ac[hl])
+        return s * float(prior[idx])
+
+    candidates = [best]
+    for rel in (0.5, 2.0):
+        ridx = int(round(int(lags[best]) * rel)) - min_lag
+        if 0 <= ridx < seg.size:
+            candidates.append(ridx)
+    best = max(candidates, key=_comb)
     bpm = float(cand_bpm[best])
     confidence = float(max(0.0, min(1.0, seg[best] / zero)))
     return bpm, confidence
@@ -620,6 +687,7 @@ def _finish_analysis(ex: EnvelopeExtractor) -> TrackMap | None:
     if intervals.size:
         bpm = float(60.0 / np.median(intervals))
     sections = _segment_sections(bands, rms, duration)
+    _fill_section_palettes(sections, ex)
     mid_env = np.asarray(ex.mid_env, dtype=np.float64)
     mid_dom = np.asarray(ex.mid_dom, dtype=bool)
     mid_beats, mid_accents = _pick_onsets(mid_env, allowed=mid_dom)
@@ -638,6 +706,47 @@ def _finish_analysis(ex: EnvelopeExtractor) -> TrackMap | None:
         mid_beats=mid_beats,
         mid_accents=mid_accents,
     )
+
+
+def _fill_section_palettes(sections: list[Section], ex: EnvelopeExtractor) -> None:
+    """Derive each section's harmonic palette from its mean chroma + centroid."""
+    chroma = np.asarray(ex.chroma, dtype=np.float64)
+    centroid = np.asarray(ex.centroid, dtype=np.float64)
+    n = chroma.shape[0]
+    if n == 0:
+        return
+    for s in sections:
+        i0 = max(0, int(s.start / _FRAME_PERIOD))
+        i1 = min(n, max(i0 + 1, int(s.end / _FRAME_PERIOD)))
+        seg = chroma[i0:i1]
+        if seg.size == 0:
+            continue
+        cval = float(centroid[i0:i1].mean()) if centroid.size else 0.5
+        pal = palette_from_chroma(seg.mean(axis=0), cval)
+        if pal is not None:
+            s.palette = pal.colors
+
+
+def _build_melbank(mel: np.ndarray) -> np.ndarray:
+    """Per-bin gain-normalise + asymmetric-smooth the offline melbank.
+
+    Mirrors the live analyzer's per-bin AGC (here a global p95 reference, since
+    the whole track is known) and its :class:`ExpFilter` smoothing, so scheduled
+    playback feeds the engine the same continuous reactive texture as the tap.
+    """
+    if mel.ndim != 2 or mel.shape[0] == 0:
+        return np.zeros((0, 0), dtype=np.float32)
+    out = np.empty_like(mel, dtype=np.float32)
+    floor = 0.02 * max(float(np.percentile(mel, 95)), 1e-6)
+    for c in range(mel.shape[1]):
+        ref = max(float(np.percentile(mel[:, c], 95)), floor)
+        out[:, c] = np.clip(mel[:, c] / ref, 0.0, 1.0)
+    filt = ExpFilter(
+        np.zeros(mel.shape[1], dtype=np.float32), alpha_rise=0.85, alpha_decay=0.20
+    )
+    for i in range(out.shape[0]):
+        out[i] = filt.update(out[i])
+    return out
 
 
 def _norm_p(a: np.ndarray, pct: float, floor: float) -> np.ndarray:
@@ -672,6 +781,7 @@ def _build_features(
         bass_flux=_norm_p(bass_env, 99.0, floor=2.5),
         mid_flux=_norm_p(mid_env, 99.0, floor=2.5),
         centroid=np.asarray(ex.centroid, dtype=np.float32),
+        melbank=_build_melbank(np.asarray(ex.melbank, dtype=np.float32)),
     )
 
 

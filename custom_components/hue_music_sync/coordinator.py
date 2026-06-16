@@ -31,6 +31,7 @@ from .audio.structure import StructureTracker
 from .audio.tempo import BeatGrid, TempoTracker
 from .audio.trackmap import Section, TrackMapper
 from .color.album_art import extract_palette
+from .color.palette import Palette
 from .const import (
     ANALYSIS_HOP,
     ANALYSIS_SAMPLE_RATE,
@@ -252,14 +253,16 @@ class SyncSession:
         if settings.colour != prev.colour:
             self._apply_colour()
             self._last_track = None  # re-extract album art if switching to Album
+            self._map_section = None  # re-apply Song section palette on next poll
         if self._source is not None and settings.media_player != prev.media_player:
             # Player changed: drop current source so the loop re-opens it.
             self._hass.async_create_task(self._reset_source())
 
     def _apply_colour(self) -> None:
-        # Preset themes are static palettes; Album uses the engine fallback until
-        # album art is extracted for the current track.
-        if self._settings.colour != ColorScheme.ALBUM_ART:
+        # Preset themes are static palettes. Album art and Song are dynamic
+        # (extracted per track / per section), and keep the engine fallback
+        # palette until their colours are ready.
+        if self._settings.colour not in (ColorScheme.ALBUM_ART, ColorScheme.SONG):
             self._engine.set_scheme(self._settings.colour)
 
     async def _reset_source(self) -> None:
@@ -711,6 +714,18 @@ class SyncSession:
                 and section.energy > prev.energy + 0.15
             ):
                 structure.drop_now = True
+            # Song colour scheme: recolour the room to this section's harmony
+            # (chroma -> hue) as each section arrives, via the same palette
+            # setter album art uses. Publish it so the dashboard card themes too.
+            if (
+                self._settings.colour == ColorScheme.SONG
+                and section is not prev
+                and section.palette
+            ):
+                palette = Palette(list(section.palette))
+                self._engine.set_palette(palette)
+                self._album_hex = self._palette_to_hex(palette)
+                self._maybe_publish()
         self._map_section = section
         return grid
 
