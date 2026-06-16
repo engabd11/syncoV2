@@ -30,7 +30,11 @@ from ..const import (
     ANALYSIS_SAMPLE_RATE,
     ANALYSIS_WINDOW,
     BANDS,
+    MELBANK_BINS,
+    MELBANK_FMAX,
+    MELBANK_FMIN,
 )
+from .filters import ExpFilter
 
 
 @dataclass(slots=True)
@@ -51,6 +55,11 @@ class AnalysisFrame:
     mid_flux: float = 0.0  # mid-band (guitar/snare) onset strength
     mid_beat: bool = False  # a guitar/snare onset (drives mid-role lights)
     mid_strength: float = 0.0
+    # LedFx-style melbank: per-bin gain-normalised, exp-smoothed power across a
+    # log-spaced spectrum (low->high). Drives the engine's continuous reactive
+    # brightness so the room is alive whether or not a beat fires. Empty list
+    # means "not computed" (callers fall back to the coarse ``bands``).
+    melbank: list[float] = field(default_factory=list)
 
 
 # SuperFlux parameters, shared with the offline track-map analysis.
@@ -131,6 +140,29 @@ def make_onset_filterbank(
     return starts, counts, n_bass, n_mid
 
 
+def make_melbank(
+    freqs: np.ndarray,
+    n_bins: int = MELBANK_BINS,
+    fmin: float = MELBANK_FMIN,
+    fmax: float = MELBANK_FMAX,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Log-spaced ``(start_indices, counts)`` for the continuous melbank.
+
+    Same construction as :func:`make_onset_filterbank` but without the
+    bass/mid split — a plain perceptually-spaced power spectrum the engine maps
+    across the room.
+    """
+    fmax = min(fmax, float(freqs[-1]))
+    edges = np.geomspace(fmin, fmax, n_bins + 1)
+    idx = np.searchsorted(freqs, edges).astype(np.int64)
+    for i in range(1, len(idx)):
+        idx[i] = max(idx[i], idx[i - 1] + 1)
+    idx = np.minimum(idx, len(freqs) - 1)
+    starts = idx[:-1]
+    counts = np.maximum(1, idx[1:] - idx[:-1])
+    return starts, counts
+
+
 def band_means(mag: np.ndarray, starts: np.ndarray, counts: np.ndarray) -> np.ndarray:
     """Aggregate a magnitude spectrum into linear filterbank band means."""
     sums = np.add.reduceat(mag, starts, axis=-1)
@@ -197,6 +229,19 @@ class Analyzer:
         self._bass_flux_agc = _AGC()
         self._mid_flux_agc = _AGC()
 
+        # Continuous melbank (LedFx-style): log-spaced power spectrum, each bin
+        # gain-normalised by its own slow-decay peak (frozen gain) then smoothed
+        # with an asymmetric exp filter (fast attack, gentle release). This is
+        # what the engine rides for always-alive reactive brightness.
+        self._mel_starts, self._mel_counts = make_melbank(freqs)
+        self._n_mel = len(self._mel_starts)
+        self._mel_agc = [_AGC(decay=0.9998) for _ in range(self._n_mel)]
+        self._mel_filter = ExpFilter(
+            np.zeros(self._n_mel, dtype=np.float32),
+            alpha_rise=0.85,
+            alpha_decay=0.20,
+        )
+
         # Onset / beat state (broadband for tempo; bass = kicks and mid =
         # guitar/snare for the visible accent streams).
         self._fb_starts, self._fb_counts, self._n_bass, self._n_mid = (
@@ -256,8 +301,16 @@ class Analyzer:
             )
             t_audio = self._frame_index * self.frame_period
             self._frame_index += 1
+            # Let the melbank decay smoothly toward rest (don't disturb the
+            # per-bin peaks, which fall on their own).
+            melbank = [
+                float(x)
+                for x in self._mel_filter.update(np.zeros(self._n_mel, dtype=np.float32))
+            ]
             return AnalysisFrame(
-                bands={name: 0.0 for name in self._band_bins}, t_audio=t_audio
+                bands={name: 0.0 for name in self._band_bins},
+                t_audio=t_audio,
+                melbank=melbank,
             )
 
         spectrum = np.fft.rfft(self._buf * self._hann)
@@ -276,12 +329,14 @@ class Analyzer:
         bass_flux = self._bass_flux_agc.normalise(onsets["bass_flux"])
         centroid = self._spectral_centroid(mag)
         tempo = self._estimate_tempo()
+        melbank = self._melbank(mag)
         t_audio = self._frame_index * self.frame_period
         self._frame_index += 1
 
         return AnalysisFrame(
             bands=bands,
             energy=energy,
+            melbank=melbank,
             beat=onsets["beat"],
             beat_strength=onsets["strength"],
             tempo_bpm=tempo,
@@ -295,6 +350,16 @@ class Analyzer:
             mid_beat=onsets["mid_beat"],
             mid_strength=onsets["mid_strength"],
         )
+
+    def _melbank(self, mag: np.ndarray) -> list[float]:
+        """Per-bin gain-normalised, exp-smoothed melbank for this frame."""
+        means = band_means(mag, self._mel_starts, self._mel_counts)
+        normed = np.fromiter(
+            (self._mel_agc[i].normalise(float(means[i])) for i in range(self._n_mel)),
+            dtype=np.float32,
+            count=self._n_mel,
+        )
+        return [float(x) for x in self._mel_filter.update(normed)]
 
     def _spectral_centroid(self, mag: np.ndarray) -> float:
         """Centre-of-mass frequency, normalised 0..1 (soft-capped at ~5 kHz).
@@ -449,6 +514,9 @@ class Analyzer:
         for agc in self._agc.values():
             agc.reset()
         self._energy_agc.reset()
+        for agc in self._mel_agc:
+            agc.reset()
+        self._mel_filter.reset(np.zeros(self._n_mel, dtype=np.float32))
         self._prev_log = None
         self._prev_lin = None
         self._mid_e_prev = 0.0

@@ -24,8 +24,15 @@ to the bridge over the Hue Entertainment API (~40 Hz over DTLS), and a bundled
   exact beat times from a full-track beat tracker, real downbeats, and the
   song's sections. Beats are *scheduled*, not guessed, and the choreography
   holds back in the verse so the chorus visibly arrives.
-- **The schedule conducts**: once the tempo is locked, *every* beat fires a
-  pulse - sized by its accent (relative to the passage, not the whole track)
+- **Always alive (LedFx-style continuous layer)**: underneath everything, each
+  lamp continuously rides the exponentially-smoothed power of its slice of a
+  16-band melbank spread across the room (low frequencies to one side, highs to
+  the other - the LedFx "wavelength" idea, in 3D). The show moves with the music
+  whether or not a beat is detected, so a missed or mistimed beat only removes
+  *punch* - it can never leave the room dark while music is playing. Colour also
+  flows continuously, not only on beats.
+- **The schedule conducts on top**: once the tempo is locked, *every* beat adds
+  a pulse - sized by its accent (relative to the passage, not the whole track)
   and its place in the bar (downbeats hit hardest) - the same never-miss
   metronome feel as Samsung Music Sync and Hue+Spotify. Live detection only
   enlarges a pulse; it is never required, so dense, loud choruses cannot
@@ -222,11 +229,21 @@ album cover --ffmpeg--> theme palette --> Effect engine (3D per-lamp colour)
 
 Two analysis paths feed the show. **Live**: audio is tapped from your Snapcast
 server (auto-aligned to its playout buffer) or decoded from the Music Assistant
-stream position-locked to playback (squeezelite / slimproto flow streams and
-non-FLAC output codecs are detected automatically). **Offline**: each track is
-also analysed once in the background into a *track map* - a full-track
-dynamic-programming beat tracker, downbeats, sections and per-frame energies -
-which then schedules the beats exactly and drives the section choreography.
+stream position-locked to playback (squeezelite / slimproto / Sendspin flow
+streams and non-FLAC output codecs are detected automatically). **Offline**:
+each track is also analysed once in the background into a *track map* - a
+full-track dynamic-programming beat tracker, downbeats, sections and per-frame
+energies - which then schedules the beats exactly and drives the section
+choreography.
+
+The engine is built on a **continuous, always-alive reactive layer** (the LedFx
+approach): the live analyzer produces a gain-normalised, exponentially-smoothed
+16-band melbank every ~20 ms, and every lamp rides the power of its slice of it.
+That layer is what carries the show - it depends on neither a locked tempo grid
+nor an exact playback position, so when those are uncertain (a coarse reported
+position, an unlocked grid) the room stays lit and moving instead of going dark.
+The scheduled beats, colour jumps and 3D wavefronts are layered *on top* as
+punch.
 
 Players with no tappable stream at all (**AirPlay, Chromecast, Sonos, DLNA,
 ESPHome, groups, ...**) run entirely on the track map: the precomputed show is
@@ -260,10 +277,13 @@ Tests cover the HueStream encoder, theme-palette extraction, SuperFlux onset
 detection (vibrato immunity, kick-vs-hihat discrimination), the offline track
 map (beat tracking, sections, scheduled playback), the predictive beat grid and
 structure detection, the effect engine, the instrument-role assignment, the 3D
-spatial renderer, and the eye-safety invariants (the flash limiter holding the
-3 flashes/sec ceiling whenever it is engaged; Intense/Extreme bypass it by
+spatial renderer, the LedFx-style continuous layer (the melbank stays alive with
+no beat grid at all), and the eye-safety invariants (the flash limiter holding
+the 3 flashes/sec ceiling whenever it is engaged; Intense/Extreme bypass it by
 design). `python scripts/analyze_track.py <file>` dumps the track map for a
-local song.
+local song; `python scripts/sim_show.py <file>` runs the full live pipeline per
+mode and reports liveliness (how dark, how reactive, colour motion) with the
+beat grid both locked and forced unlocked.
 
 ## Limitations
 

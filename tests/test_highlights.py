@@ -99,18 +99,30 @@ def test_extreme_fires_only_the_standout_beats():
     assert any(max(tick[c]) > max(pre[c]) + 0.3 for c in pre)
 
 
-def test_extreme_has_dark_valleys_between_flashes():
-    # The reference sits fully dark ~37% of the time. After a flash decays, the
-    # room must return to near-black (base/floor are 0), not a lit plateau.
+def test_extreme_alive_while_playing_dark_only_in_silence():
+    # LedFx-style continuous foundation: while music plays the room stays ALIVE
+    # between flashes (the continuous melbank layer keeps it lit) — it must NOT
+    # collapse to black just because no beat fired. Only genuine silence rests
+    # dark. This is the fix for "intense/extreme feel dead": the old design left
+    # base/floor at 0, so a missed beat meant darkness.
     eng = EffectEngine(_channels(5))
     eng.set_mode(SyncMode.EXTREME)
     _fill_window(eng)
     _play_beat(eng, 1.0, 0)  # a big flash
-    # Let it decay well past the flash (no new beat).
     out = None
-    for _ in range(18):
+    for _ in range(18):  # flash decays, no new beat, but music keeps playing
         out = eng.render(_quiet(), _DT, beatgrid=_grid(False, phase=0.6))
-    assert max(max(c) for c in out.values()) < 0.15  # back to dark
+    assert max(max(c) for c in out.values()) > 0.12  # still alive, not dead
+
+    # Genuine silence (paused / between tracks): the continuous layer fades out
+    # with the loudness gate and the room rests dark.
+    silent = AnalysisFrame(
+        bands={n: 0.0 for n in ("sub_bass", "bass", "low_mid", "mid", "high")},
+        energy=0.0,
+    )
+    for _ in range(30):
+        out = eng.render(silent, _DT, beatgrid=_grid(False, phase=0.6))
+    assert max(max(c) for c in out.values()) < 0.08  # dark in silence
 
 
 # --- unified room colour that jumps every beat -----------------------------

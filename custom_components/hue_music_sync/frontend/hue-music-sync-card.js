@@ -12,7 +12,7 @@
 
 // Keep in lockstep with the integration's manifest.json version (the
 // integration also cache-busts this file's URL with that version).
-const VERSION = "1.9.0";
+const VERSION = "1.10.0";
 
 /* â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ Palette data â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 // Colour schemes from the integration, each a small gradient swatch.

@@ -105,6 +105,17 @@ class ModeParams:
     # colour together — what the reference does at high intensity).
     colour_spread: float = 1.0
     full_room_accent: float = 2.0  # accent at/above which ALL roles slam (2 = never)
+    # --- LedFx-style continuous reactive layer --------------------------------
+    # The "always alive" foundation: each lamp rides the exp-smoothed power of
+    # its slice of the melbank (mapped across the room, LedFx "Wavelength"),
+    # independent of any beat detection. Beat flashes/waves/colour-jumps ride ON
+    # TOP of this, so a missed or mistimed beat only removes punch — it can never
+    # make the room go dark while music is playing.
+    melbank_gain: float = 0.0   # continuous brightness from the lamp's melbank slice
+    melbank_floor: float = 0.0  # small ambient lift while music plays (keeps slow
+    #                             ramps off the bridge's coarse low-value range)
+    colour_flow: float = 0.0    # continuous palette advance per second (loudness-scaled),
+    #                             so colour keeps moving between beats too
 
 
 MODE_PARAMS: dict[SyncMode, ModeParams] = {
@@ -129,6 +140,7 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         role_mix=(1.0, 0.0, 0.0),
         highlight_quantile=0.30, weak_pulse=0.25, downbeat_pulse=0.40,
         colour_jump=0.045, colour_spread=0.70,
+        melbank_gain=0.45, melbank_floor=0.06, colour_flow=0.05,
     ),
     # The band on your lights: bass lights snap on kicks, guitar lights pop on
     # mid onsets, and vocal lights shimmer dimly with the singing — assignments
@@ -144,6 +156,7 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         vocal_dim=0.06, role_rotate_beats=16, hard_snap=True,
         highlight_quantile=0.40, weak_pulse=0.16, downbeat_pulse=0.45,
         colour_jump=0.07, colour_spread=0.55, full_room_accent=0.94,
+        melbank_gain=0.50, melbank_floor=0.05, colour_flow=0.05,
     ),
     # UNRESTRAINED (the eye-safety limiter is bypassed — explicit user choice,
     # see effects/safety.py): the apartment-sync look at medium force — a
@@ -153,13 +166,14 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
     SyncMode.INTENSE: ModeParams(
         base=0.0, floor=0.0, bass_gain=0.12, beat_gain=1.3, beat_threshold=1.1,
         spread=0.0, colour_speed=0.05, shimmer=0.0, colour_sat=0.92,
-        colour_beat_step=0.0, colour_lerp=0.55, energy_gain=0.18,
+        colour_beat_step=0.0, colour_lerp=0.55, energy_gain=0.12,
         bri_attack=1.0, bri_decay=0.45,
         wave_gain=0.85, wave_speed=2.8, wave_width=0.28,
         anticipation_ms=90, drop_boost=0.80, build_desat=0.55,
         role_mix=(1.0, 0.0, 0.0), hard_snap=True,
         highlight_quantile=0.50, weak_pulse=0.10, downbeat_pulse=0.50,
         colour_jump=0.11, colour_spread=0.10,
+        melbank_gain=0.65, melbank_floor=0.07, colour_flow=0.04,
     ),
     # UNRESTRAINED maximum — the apartment-sync reference at full force (matched
     # to the recording: ~37% fully dark, one unified hue jumping across the
@@ -169,13 +183,14 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
     SyncMode.EXTREME: ModeParams(
         base=0.0, floor=0.0, bass_gain=0.05, beat_gain=1.6, beat_threshold=1.5,
         spread=0.0, colour_speed=0.06, shimmer=0.0, colour_sat=0.98,
-        colour_beat_step=0.0, colour_lerp=0.70, energy_gain=0.13,
+        colour_beat_step=0.0, colour_lerp=0.70, energy_gain=0.08,
         bri_attack=1.0, bri_decay=0.55,
         wave_gain=0.70, wave_speed=3.4, wave_width=0.24,
         anticipation_ms=90, drop_boost=1.0, build_desat=0.60,
         role_mix=(1.0, 0.0, 0.0), hard_snap=True,
         accent_floor=0.45, weak_pulse=0.0, downbeat_pulse=0.60,
         highlight_quantile=0.62, colour_jump=0.17, colour_spread=0.0,
+        melbank_gain=0.75, melbank_floor=0.06, colour_flow=0.05,
     ),
 }
 
@@ -245,6 +260,30 @@ def band_for_rank(rank: int, count: int) -> str:
 def _shimmer(t: float, cid: int) -> float:
     """Fast, per-channel pseudo-random sparkle in 0..1."""
     return 0.5 + 0.5 * math.sin(t * 23.0 + cid * 2.7) * math.sin(t * 8.0 + cid * 1.3)
+
+
+# Below this normalised broadband energy the room is treated as effectively
+# silent: the continuous melbank lift fades out so a paused/quiet track rests
+# in darkness instead of glowing at the ambient floor.
+_MUSIC_GATE = 0.12
+
+
+def _melbank_drive(frame, env: dict[str, float], info: dict) -> float:
+    """This lamp's continuous reactive level (0..~1) from its melbank slice.
+
+    Falls back to the lamp's coarse band envelope when the analyzer did not
+    populate a melbank (e.g. unit-test frames), so the continuous layer is
+    always defined and the room never goes dark purely for lack of a melbank.
+    """
+    mel = getattr(frame, "melbank", None)
+    if mel:
+        lo, hi = info["mel_lo"], info["mel_hi"]
+        if hi > lo:
+            seg = mel[lo:hi]
+            return sum(seg) / len(seg)
+    return env.get(
+        info["band"], max(env.get("bass", 0.0), env.get("sub_bass", 0.0))
+    )
 
 
 def beat_colour_advance(params: ModeParams, strength: float, bass: float) -> float:
@@ -382,6 +421,9 @@ def render(engine, frame) -> dict[int, tuple[RGB, float]]:
     wave_mul = 0.5 + 0.5 * lvl
     span = 0.4 + 0.6 * lvl
     base_term = p.floor + (p.base - p.floor) * base_mul
+    # The LedFx continuous layer fades in with loudness so silence rests dark.
+    music = frame.energy / _MUSIC_GATE
+    music = 0.0 if music < 0.0 else 1.0 if music > 1.0 else music
     # Rotating modes also reseed the colour layout on each rotation (an
     # irrational-ish step so the arrangement never repeats), so the room's
     # colour geography moves with the band.
@@ -400,6 +442,13 @@ def render(engine, frame) -> dict[int, tuple[RGB, float]]:
         else:
             drive = mids if (has_roles and role == ROLE_MID) else bass
             bri = base_term + p.bass_gain * drive * env_mul
+            # The always-alive LedFx layer: this lamp rides the exp-smoothed
+            # power of its melbank slice (mapped across the room), so it keeps
+            # moving with the music between beats. Beat flashes/waves are added
+            # later on top of this — never gating it.
+            if p.melbank_gain:
+                mel_drive = _melbank_drive(frame, env, info)
+                bri += (p.melbank_floor + p.melbank_gain * mel_drive) * music * env_mul
         if p.energy_gain:
             bri += p.energy_gain * frame.energy  # follow overall loudness (movie)
         if p.spread:

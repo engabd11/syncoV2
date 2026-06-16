@@ -15,7 +15,14 @@ from ..audio.analyzer import AnalysisFrame
 from ..audio.structure import StructureState
 from ..audio.tempo import BeatGrid
 from ..color.palette import RGB, Palette, get_palette
-from ..const import DEFAULT_EFFECT, DEFAULT_MODE, ColorScheme, SyncEffect, SyncMode
+from ..const import (
+    DEFAULT_EFFECT,
+    DEFAULT_MODE,
+    MELBANK_BINS,
+    ColorScheme,
+    SyncEffect,
+    SyncMode,
+)
 from ..hue.bridge import EntertainmentChannel
 from .fireworks import FireworksEffect
 from .modes import (
@@ -34,7 +41,14 @@ from .modes import (
     pulse_weight,
     render,
 )
-from .spatial import Wave, distance, floor_origin, height_band, normalize_positions
+from .spatial import (
+    Wave,
+    distance,
+    floor_origin,
+    height_band,
+    melbank_window,
+    normalize_positions,
+)
 
 _FLASH_DECAY = 0.80  # per-frame fade of the beat flash overlay (~5 frames)
 
@@ -98,15 +112,22 @@ class EffectEngine:
         self.cmap: dict[int, dict] = {}
         for rank, ch in enumerate(order):
             nx, ny, nz = positions[ch.channel_id]
+            xrank = rank / max(1, n - 1)
+            # Spread the melbank across the room: leftmost lamp rides the lowest
+            # frequencies, rightmost the highest (LedFx "Wavelength"). Each lamp
+            # averages an overlapping window so the field stays smooth.
+            mel_lo, mel_hi = melbank_window(xrank, MELBANK_BINS)
             self.cmap[ch.channel_id] = {
                 "norm_x": (ch.x + 1.0) / 2.0,
-                "xrank": rank / max(1, n - 1),
+                "xrank": xrank,
                 "band": band_for_rank(rank, n),
                 "nx": nx,
                 "ny": ny,
                 "nz": nz,
                 "hband": height_band(nz),  # frequency band by lamp height
                 "dist_origin": distance((nx, ny, nz), self._origin),
+                "mel_lo": mel_lo,
+                "mel_hi": mel_hi,
             }
         self._waves = []
         self._wave_armed = True
@@ -397,6 +418,11 @@ class EffectEngine:
         # beat. Between beats it holds (only a slow drift). Legacy modes keep
         # the fluid continuous roll (the Hue+Spotify look).
         self.colour_phase += p.colour_speed * dt
+        # Continuous, loudness-scaled colour drift (LedFx-style): colour keeps
+        # moving with the music between beats, so the show never freezes when no
+        # beat is detected or the grid is unlocked. Beat colour-jumps add on top.
+        if p.colour_flow > 0.0:
+            self.colour_phase += p.colour_flow * (0.25 + 0.75 * frame.energy) * dt
         sect = 0.6 + 0.4 * self.section_level
         rolling = (
             beatgrid is not None

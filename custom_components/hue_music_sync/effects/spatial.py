@@ -86,6 +86,27 @@ class Wave:
         return self.strength < 0.02 or self.radius > max_distance + 3.0 * self.width
 
 
+def melbank_window(spectral_pos: float, n_bins: int, span: float = 0.20) -> tuple[int, int]:
+    """Half-open bin range ``[lo, hi)`` a lamp should average from the melbank.
+
+    Maps the room's spatial axis to the spectrum the way LedFx's "Wavelength"
+    spreads a melbank along a strip: a lamp at ``spectral_pos`` 0 rides the
+    lowest frequencies, one at 1 the highest. Each lamp averages a window
+    (``span`` of the bins, min one bin) so neighbours overlap into a smooth
+    field instead of hard-edged bands. Empty range only if there are no bins.
+    """
+    if n_bins <= 0:
+        return 0, 0
+    pos = 0.0 if spectral_pos < 0.0 else 1.0 if spectral_pos > 1.0 else spectral_pos
+    center = pos * (n_bins - 1)
+    half = max(0.5, span * n_bins)
+    lo = int(math.floor(center - half))
+    hi = int(math.ceil(center + half)) + 1
+    lo = max(0, lo)
+    hi = min(n_bins, hi)
+    return lo, max(lo + 1, hi)
+
+
 def height_band(nz: float) -> str:
     """Map a lamp's height to the frequency band it should favour.
 

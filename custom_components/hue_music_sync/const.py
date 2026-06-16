@@ -64,6 +64,15 @@ BANDS: Final[dict[str, tuple[float, float]]] = {
     "high": (2500.0, 11000.0),
 }
 
+# LedFx-style melbank: a finer, perceptually-spaced power spectrum (per-bin gain
+# normalised + exponentially smoothed) that drives the engine's *continuous*,
+# always-alive reactive brightness — the room moves with the music whether or
+# not a beat is detected. 16 log-spaced bins from ~40 Hz to 11 kHz is plenty for
+# a handful of lamps and stays cheap (reuses the FFT already taken per hop).
+MELBANK_BINS: Final = 16
+MELBANK_FMIN: Final = 40.0
+MELBANK_FMAX: Final = 11000.0
+
 
 DEFAULT_RESTORE_LIGHTS: Final = False  # opt-in: restore exact pre-sync light state
 DEFAULT_BRIGHTNESS: Final = 1.0  # master brightness ceiling (0..1)
