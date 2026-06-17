@@ -50,7 +50,7 @@ from .spatial import (
     normalize_positions,
 )
 
-_FLASH_DECAY = 0.80  # per-frame fade of the beat flash overlay (~5 frames)
+_FLASH_DECAY = 0.80  # default per-frame fade of the beat flash (modes override)
 
 # Asymmetric band envelope followers (LedFx-style): rise fast on new energy,
 # fall gently, so continuous brightness rides the music instead of jittering.
@@ -143,6 +143,9 @@ class EffectEngine:
             ch.channel_id: ((0.0, 0.0, 0.0), 0.0) for ch in channels
         }
         self._env: dict[str, float] = {}
+        # Smoothed room loudness (asymmetric follower): the whole room brightens
+        # and dims with the song's energy contour. Drives the unified modes.
+        self._energy_env: float = 0.0
         # Per-bin melbank baseline + transient: the slow EMA tracks each band's
         # sustained level, and the transient is how far the band has jumped above
         # it right now. Every lamp pops on transients in *its* slice of the
@@ -164,6 +167,15 @@ class EffectEngine:
             prev = self._env.get(name, 0.0)
             alpha = _ENV_RISE if value > prev else _ENV_FALL
             self._env[name] = prev + (value - prev) * alpha
+        # Room loudness contour: snap up on a swell, ease down through quieter
+        # passages, so the whole room follows the rhythm of the song.
+        a = _ENV_RISE if frame.energy > self._energy_env else _ENV_FALL
+        self._energy_env += (frame.energy - self._energy_env) * a
+
+    @property
+    def energy_env(self) -> float:
+        """Smoothed room loudness 0..1 (read by :func:`.modes.render`)."""
+        return self._energy_env
 
     @property
     def mel_transient(self) -> list[float]:
@@ -526,8 +538,9 @@ class EffectEngine:
         # shows punctuate a chorus. Ordinary highlights stay role-separated.
         full_room = kick > 0.0 and highlight and acc_now >= p.full_room_accent
         lf = self._light_flash
+        decay = p.flash_decay  # per-mode: lower = snappier firework fall
         for cid in lf:
-            lf[cid] *= _FLASH_DECAY
+            lf[cid] *= decay
         if kick > 0.0 or midf > 0.0:
             for cid, role in self.roles.items():
                 if full_room:

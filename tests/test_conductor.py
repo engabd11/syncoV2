@@ -165,9 +165,12 @@ def test_schedule_weight_ramps_with_confidence():
 
 
 def test_marginal_lock_pulses_smaller_than_solid_lock():
+    # The confidence ramp (schedule_strength) scales the pulse. Use MEDIUM here:
+    # the club modes' flashes are big enough to clamp near full, which would mask
+    # the scaling - this is a tempo-confidence property, not a mode one.
     def pulse_at(weight: float) -> float:
         eng = EffectEngine(_channels(3))
-        eng.set_mode(SyncMode.INTENSE)
+        eng.set_mode(SyncMode.HIGH)
         for _ in range(10):
             eng.render(_quiet(), _DT, beatgrid=_grid(False, phase=0.4))
         g = _grid(True)

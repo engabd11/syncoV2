@@ -63,13 +63,17 @@ to the bridge over the Hue Entertainment API (~40 Hz over DTLS), and a bundled
   breakdowns breathe - predictively when the track map knows what is coming.
 - **Effects**: Music (beat/frequency choreography), Movies (calm soundtrack
   backlight with a warm cinematic drift) and Fireworks (bursts on big beats).
-- **Reacts to every instrument**: beyond the three named roles (a light *is* the
-  bass and snaps on kicks, another pops with the guitar, a third shimmers with
-  the vocal - rotating every few bars and on drops), **every** lamp also reacts
-  to its own slice of the full melbank spectrum, popping on a fresh attack in
-  its frequency range. A kick lights the low lamps, a snare the low-mids, a
-  guitar/lead the mids, a cymbal the highs - so the room adapts to all kinds of
-  music, not just kick and guitar. Intense and Extreme drive this hardest.
+- **Reacts to every instrument**: in the spatial modes (Medium/High) each lamp
+  reacts to its own slice of the full melbank spectrum on top of the three named
+  roles (bass snaps on kicks, guitar pops on mid onsets, vocal shimmers) - a kick
+  lights the low lamps, a snare the low-mids, a guitar the mids, a cymbal the
+  highs, so the room adapts to all kinds of music.
+- **Club modes light the whole room**: Intense and Extreme drop the instrument
+  split - every lamp reacts together, the whole room brightening and dimming with
+  the song's energy and bursting bright on every beat like a firework, colours
+  jumping with the beat. The dark-to-bright range and the reaction speed step up
+  Subtle -> Medium -> High -> Intense -> Extreme, with Extreme the hardest,
+  fastest, widest-range strobe (eye-safety limiter bypassed by choice).
 - **Eye safety where you want it**: Subtle, Medium, High and Movies pass
   through a flash limiter (3 flashes/sec, WCAG), a red guard and gamut
   clamping. Intense and Extreme are explicitly **unrestrained club modes** that

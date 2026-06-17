@@ -46,7 +46,7 @@ def _halves(out, n: int = 8) -> tuple[float, float]:
 def test_high_frequency_attack_favours_the_high_lamps():
     base = [0.1] * _N
     eng = EffectEngine(_channels(8))
-    eng.set_mode(SyncMode.EXTREME)
+    eng.set_mode(SyncMode.HIGH)
     _warm(eng, base)
     spike = list(base)
     for i in range(3 * _N // 4, _N):  # top quarter of the spectrum attacks
@@ -58,7 +58,7 @@ def test_high_frequency_attack_favours_the_high_lamps():
 def test_low_frequency_attack_favours_the_low_lamps():
     base = [0.1] * _N
     eng = EffectEngine(_channels(8))
-    eng.set_mode(SyncMode.EXTREME)
+    eng.set_mode(SyncMode.HIGH)
     _warm(eng, base)
     spike = list(base)
     for i in range(0, _N // 4):  # bottom quarter of the spectrum attacks

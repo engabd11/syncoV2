@@ -32,13 +32,14 @@ The ladder — same pattern throughout, each rung harder, darker and more unifie
 * **High** — the one mode that keeps the per-instrument SPATIAL split: bass
   lights snap on kicks, guitar lights pop on mid onsets, vocal lights shimmer
   with the singing; roles rotate every few bars.
-* **Intense** — *unrestrained* club: bass AND guitar/snare lights react across
-  the spectrum, every beat punches the room bright and it falls back toward
-  dark, the colour jumping hard each beat. The eye-safety limiter is bypassed
-  (explicit user choice, see safety docs).
-* **Extreme** — *unrestrained* maximum club: the hardest bright<->dark strobe —
-  full-spectrum roles (kick + guitar/snare + vocal shimmer), every beat slams to
-  full brightness and snaps back to near-black, the colour jumping across the
+* **Intense** — *unrestrained* club: the WHOLE room reacts together (no
+  instrument split). Brightness follows the song's energy and every beat bursts
+  all the lamps bright then falls back, colour jumping each beat. A big step up
+  from High in pulse and range. Eye-safety limiter bypassed (see safety docs).
+* **Extreme** — *unrestrained* maximum club: the whole room rides the energy
+  from near-black in the quiet parts to full brightness in the loud ones, every
+  beat detonates all the lamps like a firework and snaps back fastest (widest
+  dark<->bright range, quickest reaction of the ladder), the colour jumping the
   spectrum each hit. Goes truly dark in the gaps and on breakdowns.
 """
 
@@ -67,6 +68,8 @@ class ModeParams:
     energy_gain: float = 0.0  # brightness from broadband loudness (ambient/movie)
     bri_attack: float = 0.92  # per-frame brightness rise rate (1 = instant)
     bri_decay: float = 0.24  # per-frame brightness fall rate (lower = gentler)
+    flash_decay: float = 0.80  # per-frame fade of the beat-flash burst (lower =
+    #                            snappier, more strobe-like firework fall)
     # --- 3D spatial choreography (0 = off, keeps the flat/legacy look) -------
     wave_gain: float = 0.0     # brightness from beat wavefronts sweeping the room
     wave_speed: float = 1.8    # wavefront speed (normalised room-units / second)
@@ -165,42 +168,41 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         colour_jump=0.07, colour_spread=0.55, full_room_accent=0.94,
         melbank_gain=0.50, melbank_floor=0.05, colour_flow=0.05, spectral_pop=0.45,
     ),
-    # UNRESTRAINED (the eye-safety limiter is bypassed — explicit user choice,
-    # see effects/safety.py): the apartment-sync look at medium force — a
-    # UNIFIED room (every lamp one hue) that jumps colour on every beat and
-    # snaps bright on the stronger ones, dark between, energy lifting the base
-    # through the chorus. Selective flashes, big colour motion.
+    # UNRESTRAINED (eye-safety limiter bypassed - explicit user choice, see
+    # effects/safety.py). A UNIFIED room: every lamp reacts together, the whole
+    # room brightening and dimming with the song's energy (energy_gain) and all
+    # lamps bursting bright on each beat like fireworks (big beat_gain, no
+    # instrument split). Colour jumps with the beat. A big step up from High.
     SyncMode.INTENSE: ModeParams(
-        base=0.0, floor=0.0, bass_gain=0.10, beat_gain=1.7, beat_threshold=1.0,
-        spread=0.0, colour_speed=0.05, shimmer=0.30, colour_sat=0.95,
-        colour_beat_step=0.0, colour_lerp=0.60, energy_gain=0.10,
-        bri_attack=1.0, bri_decay=0.62,
-        wave_gain=0.90, wave_speed=3.0, wave_width=0.26,
+        base=0.0, floor=0.0, bass_gain=0.12, beat_gain=1.9, beat_threshold=1.0,
+        spread=0.0, colour_speed=0.05, shimmer=0.0, colour_sat=0.95,
+        colour_beat_step=0.0, colour_lerp=0.60, energy_gain=0.25,
+        bri_attack=1.0, bri_decay=0.34,
+        wave_gain=0.60, wave_speed=3.0, wave_width=0.26,
         anticipation_ms=90, drop_boost=0.90, build_desat=0.55,
-        role_mix=(0.45, 0.35, 0.2), mid_gain=1.1, mid_threshold=1.05,
-        vocal_dim=0.06, role_rotate_beats=16, hard_snap=True,
-        highlight_quantile=0.25, weak_pulse=0.35, downbeat_pulse=0.55,
-        colour_jump=0.15, colour_spread=0.12, full_room_accent=0.90,
-        melbank_gain=0.40, melbank_floor=0.0, colour_flow=0.06, spectral_pop=0.80,
+        role_mix=(1.0, 0.0, 0.0), hard_snap=True, flash_decay=0.74,
+        highlight_quantile=0.20, weak_pulse=0.40, downbeat_pulse=0.60,
+        colour_jump=0.13, colour_spread=0.12, full_room_accent=0.0,
+        melbank_gain=0.15, melbank_floor=0.0, colour_flow=0.05, spectral_pop=0.0,
     ),
-    # UNRESTRAINED maximum — the apartment-sync reference at full force (matched
-    # to the recording: ~37% fully dark, one unified hue jumping across the
-    # spectrum on every beat, hard flashes only on the standout beats). Pure
-    # dark room: base 0, the colour IS the show, brightness slams on highlights
-    # and falls back to black, energy keeps the chorus alive.
+    # UNRESTRAINED maximum club. The whole room rides the song's energy from
+    # near-black in the quiet parts to FULL brightness in the loud ones (big
+    # energy_gain), and every beat detonates all the lamps at once like a
+    # firework (huge beat_gain, fastest fall). Fastest, widest dark<->bright
+    # range of the ladder; colour jumps hardest. One unified room, no instrument
+    # split - every light reacts.
     SyncMode.EXTREME: ModeParams(
-        base=0.0, floor=0.0, bass_gain=0.06, beat_gain=2.2, beat_threshold=1.05,
-        spread=0.0, colour_speed=0.06, shimmer=0.38, colour_sat=1.0,
-        colour_beat_step=0.0, colour_lerp=0.72, energy_gain=0.06,
-        bri_attack=1.0, bri_decay=0.78,
-        wave_gain=0.85, wave_speed=3.6, wave_width=0.22,
+        base=0.0, floor=0.0, bass_gain=0.08, beat_gain=2.8, beat_threshold=1.0,
+        spread=0.0, colour_speed=0.06, shimmer=0.0, colour_sat=1.0,
+        colour_beat_step=0.0, colour_lerp=0.72, energy_gain=0.32,
+        bri_attack=1.0, bri_decay=0.30,
+        wave_gain=0.60, wave_speed=3.6, wave_width=0.24,
         anticipation_ms=90, drop_boost=1.0, build_desat=0.60,
-        role_mix=(0.5, 0.3, 0.2), mid_gain=1.3, mid_threshold=1.0,
-        vocal_dim=0.05, role_rotate_beats=8, hard_snap=True,
-        accent_floor=0.25, weak_pulse=0.30, downbeat_pulse=0.70,
-        highlight_quantile=0.30, colour_jump=0.22, colour_spread=0.0,
-        full_room_accent=0.80,
-        melbank_gain=0.40, melbank_floor=0.0, colour_flow=0.07, spectral_pop=1.0,
+        role_mix=(1.0, 0.0, 0.0), hard_snap=True, flash_decay=0.64,
+        accent_floor=0.15, weak_pulse=0.50, downbeat_pulse=0.70,
+        highlight_quantile=0.12, colour_jump=0.20, colour_spread=0.0,
+        full_room_accent=0.0,
+        melbank_gain=0.0, melbank_floor=0.0, colour_flow=0.07, spectral_pop=0.0,
     ),
 }
 
@@ -461,7 +463,9 @@ def render(engine, frame) -> dict[int, tuple[RGB, float]]:
                 mel_drive = _melbank_drive(frame, env, info)
                 bri += (p.melbank_floor + p.melbank_gain * mel_drive) * music * env_mul
         if p.energy_gain:
-            bri += p.energy_gain * frame.energy  # follow overall loudness (movie)
+            # The whole room follows the song's loudness contour together (the
+            # unified "brighten on the build, dim in the breakdown" motion).
+            bri += p.energy_gain * engine.energy_env
         if p.spectral_pop and tr:
             # All-instrument reactivity: pop on a fresh attack anywhere in this
             # lamp's slice of the spectrum (kick -> low lamps, snare -> low-mids,

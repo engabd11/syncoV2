@@ -123,7 +123,7 @@ def _run(pcm: np.ndarray, mode: SyncMode, force_unlocked: bool):
     period = ANALYSIS_HOP / ANALYSIS_SAMPLE_RATE
 
     room = []           # room brightness (max lamp) per music frame
-    energies = []
+    roommean = []       # average lamp brightness per music frame
     colour0 = eng.colour_phase
     music_frames = 0
     nbeats = 0
@@ -141,17 +141,24 @@ def _run(pcm: np.ndarray, mode: SyncMode, force_unlocked: bool):
         if rms < ANALYSIS_NOISE_FLOOR:
             continue  # genuine silence: not counted (room is allowed to be dark)
         music_frames += 1
-        room.append(max(max(c) for c in out.values()))
+        vals = [max(c) for c in out.values()]
+        room.append(max(vals))
+        roommean.append(sum(vals) / len(vals))
     if not room:
         return None
     room = np.array(room)
+    rmean = np.array(roommean)
     move = float(np.mean(np.abs(np.diff(room)))) if room.size > 1 else 0.0
+    # Whole-room pulse: how much the AVERAGE lamp swings (so a single flashing
+    # lamp can't fake it - this is the "does the room pulse together" measure).
+    mmove = float(np.mean(np.abs(np.diff(rmean)))) if rmean.size > 1 else 0.0
     colour_rate = (eng.colour_phase - colour0) / (music_frames * period)
     return {
         "dark": float(np.mean(room < 0.12)),
         "mean": float(room.mean()),
-        "p10": float(np.percentile(room, 10)),
+        "rmean": float(rmean.mean()),
         "move": move,
+        "mmove": mmove,
         "colour": colour_rate,
         "beats": nbeats,
         "frames": music_frames,
@@ -169,7 +176,8 @@ def main() -> int:
         pcm, label = _synthetic(), "synthetic"
     print(f"signal: {label}  ({pcm.size / ANALYSIS_SAMPLE_RATE:.1f}s)\n")
 
-    hdr = f"{'mode':8} {'grid':9} {'dark%':>6} {'bri':>6} {'p10':>6} {'move':>6} {'col/s':>6} {'beats':>6}"
+    hdr = (f"{'mode':8} {'grid':9} {'dark%':>6} {'maxbri':>6} {'roombr':>6} "
+           f"{'move':>6} {'roommv':>6} {'col/s':>6} {'beats':>6}")
     print(hdr)
     print("-" * len(hdr))
     ok = True
@@ -181,7 +189,8 @@ def main() -> int:
         for tag, m in (("locked", locked), ("unlocked", unlocked)):
             print(
                 f"{mode.value:8} {tag:9} {m['dark']*100:6.1f} {m['mean']:6.2f} "
-                f"{m['p10']:6.2f} {m['move']:6.3f} {m['colour']:6.2f} {m['beats']:6d}"
+                f"{m['rmean']:6.2f} {m['move']:6.3f} {m['mmove']:6.3f} "
+                f"{m['colour']:6.2f} {m['beats']:6d}"
             )
         # Core invariant: with the grid forced unlocked the room must stay alive
         # — reactive (brightness keeps moving) and no darker overall than the
