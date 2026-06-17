@@ -87,6 +87,25 @@ def test_every_locked_beat_pulses_no_misses():
     assert fired == 16
 
 
+def test_locked_grid_still_reacts_to_off_grid_detected_onsets():
+    # Regression: Music mode must react to the real detected beats even when a
+    # locked (e.g. replayed track-map) grid is misaligned. Previously the locked
+    # path required the onset to sit within a tight phase window of the grid, so
+    # a slightly-off grid swallowed every real beat and the show went dead while
+    # the audio was clearly pumping (Fireworks reacted, Music did not).
+    eng = EffectEngine(_channels(3))
+    eng.set_mode(SyncMode.INTENSE)
+    for _ in range(10):
+        eng.render(_quiet(), _DT, beatgrid=_grid(False, phase=0.5))
+    quiet_out = eng.render(_quiet(), _DT, beatgrid=_grid(False, phase=0.5))
+    # Locked grid mid-beat (no scheduled beat) + a genuine detected kick off-grid.
+    onset = eng.render(_quiet(bass_beat=True), _DT, beatgrid=_grid(False, phase=0.5))
+    assert (
+        max(max(c) for c in onset.values())
+        > max(max(c) for c in quiet_out.values()) + 0.2
+    )
+
+
 def test_unlocked_falls_back_to_reactive_kicks():
     eng = EffectEngine(_channels(3))
     eng.set_mode(SyncMode.MEDIUM)

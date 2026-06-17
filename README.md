@@ -31,12 +31,12 @@ to the bridge over the Hue Entertainment API (~40 Hz over DTLS), and a bundled
   whether or not a beat is detected, so a missed or mistimed beat only removes
   *punch* - it can never leave the room dark while music is playing. Colour also
   flows continuously, not only on beats.
-- **The schedule conducts on top**: once the tempo is locked, *every* beat adds
-  a pulse - sized by its accent (relative to the passage, not the whole track)
-  and its place in the bar (downbeats hit hardest) - the same never-miss
-  metronome feel as Samsung Music Sync and Hue+Spotify. Live detection only
-  enlarges a pulse; it is never required, so dense, loud choruses cannot
-  silence the show.
+- **Reacts to the real beats**: every detected onset fires a flash, so the room
+  visibly punches with the song. When the tempo is locked the schedule adds the
+  anticipated beat on top (sized by its accent and place in the bar, downbeats
+  hardest - the never-miss feel of Samsung Music Sync and Hue+Spotify), but the
+  grid is only an enhancement: it never gates the real beats, so a slightly
+  misaligned grid can't leave the show dead while the audio is pumping.
 - **Kick-true triggering**: live analysis uses SuperFlux onset detection with a
   dedicated bass/kick stream, so vocals, hi-hats and vibrato no longer fire the
   lights. Guitar/snare pops are attack-verified (a strum peaks in ~60 ms, a

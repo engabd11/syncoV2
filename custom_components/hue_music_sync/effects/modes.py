@@ -158,17 +158,17 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
     # rotate every 4 bars. The one mode that keeps the per-instrument SPATIAL
     # split (others go unified); colour still steps each beat, dimming visible.
     SyncMode.HIGH: ModeParams(
-        base=0.07, floor=0.02, bass_gain=0.40, beat_gain=1.1, beat_threshold=1.15,
+        base=0.04, floor=0.03, bass_gain=0.28, beat_gain=1.6, beat_threshold=1.1,
         spread=0.0, colour_speed=0.06, shimmer=0.50, colour_sat=0.8,
-        colour_beat_step=0.0, colour_lerp=0.42, bri_attack=1.0, bri_decay=0.40,
-        wave_gain=0.65, wave_speed=2.4, wave_width=0.30,
+        colour_beat_step=0.0, colour_lerp=0.45, bri_attack=1.0, bri_decay=0.46,
+        wave_gain=0.55, wave_speed=2.4, wave_width=0.30,
         anticipation_ms=80, drop_boost=0.60, build_desat=0.45,
-        role_mix=(0.4, 0.3, 0.3), mid_gain=0.9, mid_threshold=1.3,
-        vocal_dim=0.06, role_rotate_beats=16, hard_snap=True,
+        role_mix=(0.4, 0.3, 0.3), mid_gain=1.0, mid_threshold=1.25,
+        vocal_dim=0.05, role_rotate_beats=16, hard_snap=True, flash_decay=0.70,
         highlight_quantile=0.40, weak_pulse=0.16, downbeat_pulse=0.45,
-        colour_jump=0.07, colour_spread=0.55, full_room_accent=0.94,
-        energy_gain=0.20,
-        melbank_gain=0.50, melbank_floor=0.05, colour_flow=0.05, spectral_pop=0.45,
+        colour_jump=0.10, colour_spread=0.55, full_room_accent=0.94,
+        energy_gain=0.12,
+        melbank_gain=0.38, melbank_floor=0.03, colour_flow=0.035, spectral_pop=0.45,
     ),
     # UNRESTRAINED (eye-safety limiter bypassed - explicit user choice, see
     # effects/safety.py). A UNIFIED room: every lamp reacts together, the whole
@@ -176,16 +176,16 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
     # lamps bursting bright on each beat like fireworks (big beat_gain, no
     # instrument split). Colour jumps with the beat. A big step up from High.
     SyncMode.INTENSE: ModeParams(
-        base=0.0, floor=0.0, bass_gain=0.15, beat_gain=1.8, beat_threshold=1.0,
+        base=0.0, floor=0.025, bass_gain=0.10, beat_gain=2.3, beat_threshold=1.0,
         spread=0.0, colour_speed=0.05, shimmer=0.0, colour_sat=0.95,
-        colour_beat_step=0.0, colour_lerp=0.60, energy_gain=0.20,
-        bri_attack=1.0, bri_decay=0.45,
+        colour_beat_step=0.0, colour_lerp=0.62, energy_gain=0.12,
+        bri_attack=1.0, bri_decay=0.50,
         wave_gain=0.55, wave_speed=3.0, wave_width=0.26,
         anticipation_ms=90, drop_boost=0.90, build_desat=0.55,
-        role_mix=(1.0, 0.0, 0.0), hard_snap=True, flash_decay=0.74,
+        role_mix=(1.0, 0.0, 0.0), hard_snap=True, flash_decay=0.62,
         highlight_quantile=0.20, weak_pulse=0.40, downbeat_pulse=0.60,
-        colour_jump=0.13, colour_spread=0.12, full_room_accent=0.0,
-        melbank_gain=0.55, melbank_floor=0.04, colour_flow=0.05, spectral_pop=0.50,
+        colour_jump=0.17, colour_spread=0.12, full_room_accent=0.0,
+        melbank_gain=0.26, melbank_floor=0.02, colour_flow=0.03, spectral_pop=0.45,
     ),
     # UNRESTRAINED maximum club. The whole room rides the song's energy from
     # near-black in the quiet parts to FULL brightness in the loud ones (big
@@ -194,17 +194,17 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
     # range of the ladder; colour jumps hardest. One unified room, no instrument
     # split - every light reacts.
     SyncMode.EXTREME: ModeParams(
-        base=0.0, floor=0.0, bass_gain=0.12, beat_gain=2.6, beat_threshold=1.0,
+        base=0.0, floor=0.01, bass_gain=0.06, beat_gain=3.2, beat_threshold=1.0,
         spread=0.0, colour_speed=0.06, shimmer=0.0, colour_sat=1.0,
-        colour_beat_step=0.0, colour_lerp=0.72, energy_gain=0.25,
-        bri_attack=1.0, bri_decay=0.40,
-        wave_gain=0.55, wave_speed=3.6, wave_width=0.24,
+        colour_beat_step=0.0, colour_lerp=0.75, energy_gain=0.07,
+        bri_attack=1.0, bri_decay=0.55,
+        wave_gain=0.50, wave_speed=3.6, wave_width=0.24,
         anticipation_ms=90, drop_boost=1.0, build_desat=0.60,
-        role_mix=(1.0, 0.0, 0.0), hard_snap=True, flash_decay=0.62,
+        role_mix=(1.0, 0.0, 0.0), hard_snap=True, flash_decay=0.55,
         accent_floor=0.15, weak_pulse=0.50, downbeat_pulse=0.70,
-        highlight_quantile=0.12, colour_jump=0.20, colour_spread=0.0,
+        highlight_quantile=0.12, colour_jump=0.22, colour_spread=0.0,
         full_room_accent=0.0,
-        melbank_gain=0.65, melbank_floor=0.03, colour_flow=0.07, spectral_pop=0.60,
+        melbank_gain=0.12, melbank_floor=0.0, colour_flow=0.03, spectral_pop=0.45,
     ),
 }
 

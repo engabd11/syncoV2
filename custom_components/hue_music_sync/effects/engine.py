@@ -63,13 +63,6 @@ _ENV_FALL = 0.10
 _MEL_SLOW_RISE = 0.25
 _MEL_SLOW_FALL = 0.06
 
-# When the tempo grid is locked the *schedule* drives the show: every grid
-# beat is an event, and the highlight ranking decides which ones visibly fire.
-# A live-detected onset may still enlarge the scheduled pulse, but only within
-# this phase distance of the beat; mid-beat onsets are vocal hits or fills,
-# not the pulse.
-_ONGRID_PHASE = 0.18
-
 # Locked mid (guitar/snare) pops are quantised to the eighth-note grid: hits
 # within this phase distance of an eighth slot (on-beat or off-beat) pass,
 # syllables and ornaments floating between slots do not.
@@ -265,33 +258,26 @@ class EffectEngine:
     ) -> tuple[float, float, bool]:
         """(strength, bass, grid_locked) of the beat driving visible accents.
 
-        **Locked: the schedule conducts.** Every grid beat produces an event
-        (strength from the beat's accent on the live detector's 1..3 scale);
-        how *visibly* it lands is decided downstream by the highlight ranking
-        — selective modes fire only the standout beats and let the rest tick
-        or stay dark. A live-detected bass onset near the beat may *enlarge*
-        the pulse (the causal accent is only a prediction) but detection is
-        never required, so dense mixes can't silence the show.
-
-        **Unlocked: reactive fallback.** Bass onsets only — vocals and hi-hats
-        live above the bass band and are what made the show feel random.
+        **Reactive first.** A detected bass onset (``frame.bass_beat``) ALWAYS
+        fires — this is what makes the room actually move with the song (it is
+        exactly what the Fireworks effect reacts to). When a tempo grid is
+        locked it *also* fires the scheduled/anticipated beat (so beats land
+        even through a dense bar), and the larger of the two wins. The grid is
+        an enhancement, never a gate: previously the locked path required a
+        detected onset to sit within a tight phase window of the grid, so a
+        slightly-misaligned grid (common on a replayed track map) rejected the
+        real beats and the show went dead while the audio was clearly pumping.
         """
         bass = max(frame.bands.get("sub_bass", 0.0), frame.bands.get("bass", 0.0))
+        det = frame.bass_strength if frame.bass_beat else 0.0
         if beatgrid is not None and beatgrid.locked:
             sched = 0.0
             if beatgrid.predicted_beat:
                 acc = max(0.0, min(1.0, beatgrid.accent_now))
                 sched = 1.0 + 2.0 * acc
-            det = 0.0
-            if frame.bass_beat:
-                phase = beatgrid.phase
-                if phase <= _ONGRID_PHASE or phase >= 1.0 - _ONGRID_PHASE:
-                    det = frame.bass_strength
             strength = max(sched, det)
             return (strength, bass, True) if strength > 0.0 else (0.0, 0.0, True)
-        if not frame.bass_beat:
-            return 0.0, 0.0, False
-        return frame.bass_strength, bass, False
+        return (det, bass, False) if det > 0.0 else (0.0, 0.0, False)
 
     def set_palette(self, palette: Palette) -> None:
         self.palette = palette
@@ -450,8 +436,13 @@ class EffectEngine:
         beat_now = False
         if vis_strength > 0.0:
             acc_now = max(0.0, min(1.0, (vis_strength - 1.0) / 2.0))
-            beat_now = (not grid_locked) or (
-                beatgrid is not None and beatgrid.predicted_beat
+            # A real beat this frame: a detected onset, or (when locked) the
+            # scheduled beat. Either advances the colour and the highlight
+            # window - so colour jumps WITH the song's beats, not on a timer.
+            beat_now = (
+                frame.bass_beat
+                or (not grid_locked)
+                or (beatgrid is not None and beatgrid.predicted_beat)
             )
             highlight = self._beat_highlight(p, acc_now, append=beat_now)
         # Mid (guitar/snare) onsets from their own dedicated detector stream.
