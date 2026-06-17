@@ -48,7 +48,16 @@ def async_register_ws(hass: HomeAssistant) -> None:
 def ws_subscribe(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
 ) -> None:
-    """Subscribe a card to an area's live feed (keyed by its sync switch)."""
+    """Subscribe a card to an area's live feed (keyed by its sync switch).
+
+    Access scope (by design): any authenticated HA user may subscribe — the feed
+    is intentionally available to non-admin dashboard users, since dashboards run
+    under regular user sessions. The payload is low-sensitivity (per-lamp colours,
+    lamp positions, tempo, and the now-playing title that the switch already
+    exposes as state attributes), carries no credentials, and is read-only — it
+    triggers no state writes and never touches the recorder. We therefore do not
+    gate this with ``require_admin``; HA still requires a valid auth token.
+    """
     from . import DATA_AREA_INDEX  # local import to avoid a setup cycle
 
     index = hass.data.get(DOMAIN, {}).get(DATA_AREA_INDEX, {})

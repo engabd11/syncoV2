@@ -65,6 +65,26 @@ def _ffmpeg_binary(hass: HomeAssistant) -> str:
         return "ffmpeg"
 
 
+def _card_cache_token(card_file: "Path") -> str:
+    """A cache-bust token that changes whenever the card file's bytes change.
+
+    Using a content hash (not the integration's manifest version) means an edited
+    card always invalidates the browser / HA service-worker cache, so users never
+    have to hard-refresh or restart to pick up a new card build.
+    """
+    import hashlib
+
+    try:
+        digest = hashlib.sha256(card_file.read_bytes()).hexdigest()
+        return digest[:12]
+    except OSError:
+        # Fall back to mtime if the file can't be read for some reason.
+        try:
+            return str(int(card_file.stat().st_mtime))
+        except OSError:
+            return "0"
+
+
 async def _register_frontend_card(hass: HomeAssistant) -> None:
     """Serve and register the bundled dashboard card once.
 
@@ -74,10 +94,12 @@ async def _register_frontend_card(hass: HomeAssistant) -> None:
     """
     from pathlib import Path
 
+    hass.data.setdefault(DOMAIN, {})
     if hass.data[DOMAIN].get(DATA_CARD_REGISTERED):
         return
     frontend_dir = Path(__file__).parent / "frontend"
-    if not (frontend_dir / "hue-music-sync-card.js").is_file():
+    card_file = frontend_dir / "hue-music-sync-card.js"
+    if not card_file.is_file():
         _LOGGER.error(
             "Hue Synco card file is missing under %s; reinstall/update the "
             "integration so the bundled card ships with it", frontend_dir
@@ -86,7 +108,6 @@ async def _register_frontend_card(hass: HomeAssistant) -> None:
     hass.data[DOMAIN][DATA_CARD_REGISTERED] = True
     try:
         from homeassistant.components.frontend import add_extra_js_url
-        from homeassistant.loader import async_get_integration
 
         # Serve the whole frontend/ directory (directory static serving is the
         # most robust form), with a legacy fallback for older HA cores.
@@ -99,11 +120,10 @@ async def _register_frontend_card(hass: HomeAssistant) -> None:
         except (ImportError, AttributeError):
             hass.http.register_static_path(CARD_BASE_URL, str(frontend_dir), False)
 
-        try:
-            version = (await async_get_integration(hass, DOMAIN)).version
-        except Exception:  # noqa: BLE001
-            version = None
-        url = f"{CARD_URL}?v={version}" if version else CARD_URL
+        # Cache-bust on the card file's content hash (computed off the event loop),
+        # so an updated card is always re-fetched without a manual hard refresh.
+        token = await hass.async_add_executor_job(_card_cache_token, card_file)
+        url = f"{CARD_URL}?v={token}"
 
         # Two ways to load the card, so it works regardless of dashboard mode and
         # browser/app-shell caching:
@@ -159,10 +179,32 @@ async def _register_lovelace_resource(hass: HomeAssistant, url: str) -> bool:
         return False
 
 
+async def async_setup(hass: HomeAssistant, config: dict) -> bool:
+    """Component setup: register the bundled card + live feed as early as possible.
+
+    Runs on HA start before any config entry is set up (and regardless of whether
+    the Hue bridge is reachable), so the dashboard resource is in place before the
+    frontend loads. This is the key fix for the card needing several refreshes /
+    a restart to appear: previously registration only happened in
+    ``async_setup_entry``, which runs late and can be delayed by bridge retries.
+    """
+    hass.data.setdefault(DOMAIN, {})
+    hass.data[DOMAIN].setdefault(DATA_AREA_INDEX, {})
+    await _register_frontend_card(hass)
+
+    # Live feed for the bundled card (real visualizer / room mirror / timeline).
+    from .ws import async_register_ws
+
+    async_register_ws(hass)
+    return True
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Hue Synco from a config entry."""
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN].setdefault(DATA_AREA_INDEX, {})
+    # Idempotent fallback: async_setup already did these on HA start, but a config
+    # entry added at runtime (fresh install) gets the card/feed registered here too.
     await _register_frontend_card(hass)
 
     # Live feed for the bundled card (real visualizer / room mirror / timeline).

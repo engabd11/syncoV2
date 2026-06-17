@@ -10,8 +10,9 @@
  * self-contained custom element â€” no build step. See README.md for config.
  */
 
-// Keep in lockstep with the integration's manifest.json version (the
-// integration also cache-busts this file's URL with that version).
+// Cosmetic version (shown in the console banner). The browser cache-bust no
+// longer depends on this: the integration appends ?v=<content-hash> derived from
+// this file's bytes, so any edit is picked up without a manual hard refresh.
 const VERSION = "1.11.1";
 
 /* â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ Palette data â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
@@ -660,6 +661,9 @@ class HueMusicSyncCard extends HTMLElement {
 
   connectedCallback() {
     this._loop = this._loop.bind(this);
+    // Cancel any loop left scheduled from a previous attach, so a detach/re-attach
+    // (HA moves cards around the DOM) can never leave two rAF loops running.
+    cancelAnimationFrame(this._raf);
     this._raf = requestAnimationFrame(this._loop);
     // Don't animate when the card is scrolled out of view (wall tablets often
     // keep dashboards open 24/7; the browser pauses rAF only for hidden tabs).
