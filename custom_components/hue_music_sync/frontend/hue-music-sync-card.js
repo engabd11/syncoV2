@@ -13,7 +13,7 @@
 // Cosmetic version (shown in the console banner). The browser cache-bust no
 // longer depends on this: the integration appends ?v=<content-hash> derived from
 // this file's bytes, so any edit is picked up without a manual hard refresh.
-const VERSION = "1.13.0";
+const VERSION = "1.13.1";
 
 /* ------------------------- Palette data ------------------------- */
 // Colour schemes from the integration, each a small gradient swatch.

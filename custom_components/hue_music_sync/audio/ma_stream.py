@@ -7,6 +7,50 @@ URL-variant and provider logic can be unit-tested on their own.
 from __future__ import annotations
 
 
+def iter_http_urls(obj):
+    """Yield http(s) URL strings found on an MA object's public attributes.
+
+    Music Assistant exposes the resolved provider stream URL in different fields
+    across providers/versions (for OpenSubsonic, for instance, it is not on
+    ``streamdetails.path``). Rather than guess the field name, scan the object's
+    attributes (and one level of nested dicts) and let the decode-probe in
+    ``MusicAssistantSource.open()`` validate which URL is real, decodable audio.
+    Pure (operates on any object via ``vars``), so it is unit-tested here.
+    """
+    if obj is None:
+        return
+    try:
+        attrs = vars(obj)
+    except TypeError:
+        return
+    for key, val in attrs.items():
+        if key.startswith("_"):
+            continue
+        if isinstance(val, str) and val.startswith(("http://", "https://")):
+            yield val
+        elif isinstance(val, dict):
+            for vv in val.values():
+                if isinstance(vv, str) and vv.startswith(("http://", "https://")):
+                    yield vv
+
+
+def attr_summary(obj) -> dict:
+    """Compact ``{attr: short-repr}`` of an object's public attributes (for logs)."""
+    if obj is None:
+        return {}
+    try:
+        attrs = vars(obj)
+    except TypeError:
+        return {}
+    out: dict[str, str] = {}
+    for k, v in attrs.items():
+        if k.startswith("_"):
+            continue
+        r = repr(v)
+        out[k] = r if len(r) <= 160 else r[:160] + "..."
+    return out
+
+
 def is_snapcast_backed(provider: str | None) -> bool:
     """Whether the snapcast tap may be used for a player of this MA provider.
 

@@ -26,7 +26,7 @@ from homeassistant.util import dt as dt_util
 
 from ..const import ANALYSIS_HOP, ANALYSIS_SAMPLE_RATE
 from .analyzer import AnalysisFrame, Analyzer
-from .ma_stream import ma_stream_variants
+from .ma_stream import attr_summary, iter_http_urls, ma_stream_variants
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -95,6 +95,8 @@ def resolve_map_url(hass: HomeAssistant, entity_id: str) -> str | None:
         if mass is None or player_id is None:
             return None
         player = mass.players.get(player_id)
+        media = getattr(player, "current_media", None) if player else None
+        item = sd = None
         if player is not None:
             src = getattr(player, "active_source", None)
             queue = mass.player_queues.get(src) if src else None
@@ -103,10 +105,16 @@ def resolve_map_url(hass: HomeAssistant, entity_id: str) -> str | None:
             path = getattr(sd, "path", None)
             if isinstance(path, str) and path.startswith(("http://", "https://")):
                 return path
-        media = getattr(player, "current_media", None) if player else None
         uri = getattr(media, "uri", None) if media else None
         if isinstance(uri, str) and uri.startswith(("http://", "https://")):
             return uri
+        # Auto-discover a decodable URL MA exposes elsewhere (provider stream
+        # URL not on .path, e.g. OpenSubsonic). Skip the album-art image url.
+        art = getattr(media, "image_url", None) if media else None
+        for obj in (sd, item, media):
+            for u in iter_http_urls(obj):
+                if u != art:
+                    return u
     except Exception as err:  # noqa: BLE001 - defensive across MA versions
         _LOGGER.debug("[%s] map URL lookup failed: %s", entity_id, err)
     return None
@@ -359,6 +367,21 @@ class MusicAssistantSource:
                     _LOGGER.debug("[%s] queue streamdetails.path=%r", self._entity_id, path)
                     if isinstance(path, str) and path.startswith(("http://", "https://")):
                         candidates.append(path)
+                    # Auto-discover any decodable HTTP URL MA exposes elsewhere
+                    # (the resolved provider stream URL isn't always on .path,
+                    # e.g. OpenSubsonic). open() validates each by decoding, so a
+                    # non-audio URL is simply skipped. Album art is excluded.
+                    for obj in (sd, item, media):
+                        for u in iter_http_urls(obj):
+                            if u != album_art and u not in candidates:
+                                candidates.append(u)
+                    if not candidates:
+                        # Nothing usable: capture the full object shapes so the
+                        # failure WARNING reveals where a URL/session id lives.
+                        diag["sd_attrs"] = attr_summary(sd)
+                        diag["item_attrs"] = attr_summary(item)
+                        diag["media_attrs"] = attr_summary(media)
+                        diag["queue_attrs"] = attr_summary(queue)
                 if candidates:
                     seen: set[str] = set()
                     candidates = [u for u in candidates if not (u in seen or seen.add(u))]

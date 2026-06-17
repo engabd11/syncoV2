@@ -2,7 +2,18 @@
 
 from __future__ import annotations
 
-from hue_music_sync.audio.ma_stream import ma_stream_variants
+from hue_music_sync.audio.ma_stream import (
+    attr_summary,
+    iter_http_urls,
+    ma_stream_variants,
+)
+
+
+class _Obj:
+    """Minimal stand-in for an MA object exposing public attributes."""
+
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
 
 _BASE = "http://ma:8095"
 _IDS = ("sess1", "queue1", "item1", "player1")
@@ -58,3 +69,30 @@ def test_missing_ids_yield_no_variants():
 def test_variants_are_unique():
     urls = _urls(ma_stream_variants(_BASE, *_IDS, flow_mode=True, codec="flac"))
     assert len(urls) == len(set(urls))
+
+
+# --- HTTP-URL auto-discovery (the Sendspin / OpenSubsonic resolution path) ----
+
+def test_iter_http_urls_finds_a_stream_url_field():
+    # OpenSubsonic-style: .path is None, but the resolved stream URL lives in
+    # another attribute - we must find it without knowing the field name.
+    sd = _Obj(path=None, provider="opensubsonic--x", item_id="abc",
+              url="http://nas:4533/rest/stream?id=abc&u=u&t=t")
+    assert "http://nas:4533/rest/stream?id=abc&u=u&t=t" in list(iter_http_urls(sd))
+
+
+def test_iter_http_urls_scans_nested_dicts():
+    sd = _Obj(path=None, data={"stream_url": "https://host/track.mp3"})
+    assert "https://host/track.mp3" in list(iter_http_urls(sd))
+
+
+def test_iter_http_urls_empty_when_no_url():
+    assert list(iter_http_urls(None)) == []
+    assert list(iter_http_urls(_Obj(path=None, provider="opensubsonic"))) == []
+    assert list(iter_http_urls(_Obj(uri="library://track/1097"))) == []  # not http
+
+
+def test_attr_summary_is_compact_repr():
+    s = attr_summary(_Obj(path=None, provider="opensubsonic--2tqKHCzo"))
+    assert s == {"path": "None", "provider": "'opensubsonic--2tqKHCzo'"}
+    assert attr_summary(None) == {}
