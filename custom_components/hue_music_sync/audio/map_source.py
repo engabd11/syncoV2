@@ -59,10 +59,13 @@ _POS_POLL_S = 0.5
 class TrackMapSource:
     """Analysis-frame playback for players with no tappable audio stream."""
 
-    def __init__(self, hass: HomeAssistant, entity_id: str, mapper: TrackMapper) -> None:
+    def __init__(
+        self, hass: HomeAssistant, entity_id: str, mapper: TrackMapper, subsonic=None
+    ) -> None:
         self._hass = hass
         self._entity_id = entity_id
         self._mapper = mapper
+        self._subsonic = subsonic  # (url, user, password) for OpenSubsonic, or None
         self._track_id: str | None = None
         self._album_art_url: str | None = None
         self._pos = 0.0  # smoothed audible position (PLL clock)
@@ -144,7 +147,7 @@ class TrackMapSource:
         """Kick background analysis for the current track (cheap if cached)."""
         if not self._track_id:
             return
-        url = resolve_map_url(self._hass, self._entity_id)
+        url = resolve_map_url(self._hass, self._entity_id, self._subsonic)
         if url:
             self._mapper.ensure(self._track_id, url)
 
@@ -169,7 +172,7 @@ class TrackMapSource:
         if self._mapper.failed(self._track_id):
             return False  # analysis already tried and failed for this track
         if self._mapper.get(self._track_id) is None:
-            url = resolve_map_url(self._hass, self._entity_id)
+            url = resolve_map_url(self._hass, self._entity_id, self._subsonic)
             if url is None:
                 return False  # radio/flow stream: nothing analysable per-track
             self._mapper.ensure(self._track_id, url)

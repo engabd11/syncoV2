@@ -26,6 +26,9 @@ from .const import (
     CONF_HOST,
     CONF_RESTORE_LIGHTS,
     CONF_SNAPSERVER_HOST,
+    CONF_SUBSONIC_PASSWORD,
+    CONF_SUBSONIC_URL,
+    CONF_SUBSONIC_USER,
     DEFAULT_RESTORE_LIGHTS,
     DOMAIN,
 )
@@ -168,6 +171,9 @@ class HueMusicSyncOptionsFlow(OptionsFlow):
             new_options[CONF_RESTORE_LIGHTS] = user_input.get(
                 CONF_RESTORE_LIGHTS, DEFAULT_RESTORE_LIGHTS
             )
+            new_options[CONF_SUBSONIC_URL] = user_input.get(CONF_SUBSONIC_URL, "").strip()
+            new_options[CONF_SUBSONIC_USER] = user_input.get(CONF_SUBSONIC_USER, "").strip()
+            new_options[CONF_SUBSONIC_PASSWORD] = user_input.get(CONF_SUBSONIC_PASSWORD, "")
             self.hass.config_entries.async_update_entry(entry, options=new_options)
             self.hass.async_create_task(
                 self.hass.config_entries.async_reload(entry.entry_id)
@@ -191,6 +197,21 @@ class HueMusicSyncOptionsFlow(OptionsFlow):
                             CONF_RESTORE_LIGHTS, DEFAULT_RESTORE_LIGHTS
                         ),
                     ): bool,
+                    # OpenSubsonic / Navidrome library: lets the integration
+                    # fetch & analyse library tracks directly when MA won't
+                    # expose a tappable stream (e.g. Sendspin + OpenSubsonic).
+                    vol.Optional(
+                        CONF_SUBSONIC_URL,
+                        default=entry.options.get(CONF_SUBSONIC_URL, ""),
+                    ): str,
+                    vol.Optional(
+                        CONF_SUBSONIC_USER,
+                        default=entry.options.get(CONF_SUBSONIC_USER, ""),
+                    ): str,
+                    vol.Optional(
+                        CONF_SUBSONIC_PASSWORD,
+                        default=entry.options.get(CONF_SUBSONIC_PASSWORD, ""),
+                    ): str,
                 }
             ),
         )

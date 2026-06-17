@@ -23,6 +23,12 @@ CONF_MEDIA_PLAYER: Final = "media_player"
 CONF_LATENCY_MS: Final = "latency_ms"
 CONF_TIMING_MS: Final = "timing_ms"
 CONF_SNAPSERVER_HOST: Final = "snapserver_host"
+# OpenSubsonic / Navidrome library (optional): lets us fetch & analyse library
+# tracks directly when Music Assistant won't expose a tappable stream URL
+# (e.g. Sendspin playing an OpenSubsonic track).
+CONF_SUBSONIC_URL: Final = "subsonic_url"
+CONF_SUBSONIC_USER: Final = "subsonic_user"
+CONF_SUBSONIC_PASSWORD: Final = "subsonic_password"
 CONF_RESTORE_LIGHTS: Final = "restore_lights"  # snapshot + restore light state on stop
 
 # --- Defaults ------------------------------------------------------------

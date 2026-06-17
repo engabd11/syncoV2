@@ -37,7 +37,10 @@
         "data": {
           "areas": "Enabled entertainment areas",
           "snapserver_host": "Snapcast server host (IP) — optional",
-          "restore_lights": "Restore exact light state when sync stops"
+          "restore_lights": "Restore exact light state when sync stops",
+          "subsonic_url": "Navidrome/OpenSubsonic URL — optional (e.g. http://192.168.0.x:4533)",
+          "subsonic_user": "Navidrome/OpenSubsonic username",
+          "subsonic_password": "Navidrome/OpenSubsonic password"
         }
       }
     }

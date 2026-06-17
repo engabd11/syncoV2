@@ -45,6 +45,9 @@ from .const import (
     CONF_MODE,
     CONF_RESTORE_LIGHTS,
     CONF_SNAPSERVER_HOST,
+    CONF_SUBSONIC_PASSWORD,
+    CONF_SUBSONIC_URL,
+    CONF_SUBSONIC_USER,
     CONF_TIMING_MS,
     DEFAULT_BRIGHTNESS,
     DEFAULT_COLOUR,
@@ -151,6 +154,7 @@ class SyncSession:
         settings: AreaSettings,
         snapserver_host: str = "",
         restore_lights: bool = False,
+        subsonic=None,
         on_finished: Callable[[], None] | None = None,
         ws_broadcast: Callable[[dict], None] | None = None,
         ws_active: Callable[[], bool] | None = None,
@@ -158,6 +162,7 @@ class SyncSession:
         self._hass = hass
         self._bridge = bridge
         self._ffmpeg = ffmpeg_bin
+        self._subsonic = subsonic  # (url, user, password) for OpenSubsonic, or None
         self._config = config
         self._settings = settings
         self._snapserver_host = snapserver_host
@@ -336,7 +341,7 @@ class SyncSession:
         # 3. Offline track-map playback: no live tap needed at all, so this
         # covers every remaining player type (AirPlay, Cast, Sonos, DLNA, ...)
         # that reports a playback position and a resolvable per-track URL.
-        ms = TrackMapSource(self._hass, entity_id, self._mapper)
+        ms = TrackMapSource(self._hass, entity_id, self._mapper, self._subsonic)
         if await ms.open():
             self._source = ms
             return True
@@ -640,7 +645,7 @@ class SyncSession:
         track = src.track_id
         if not track or track == self._map_track:
             return
-        url = resolve_map_url(self._hass, src.entity_id)
+        url = resolve_map_url(self._hass, src.entity_id, self._subsonic)
         if url is None:
             return  # nothing tappable per-track (radio/flow); retried next poll
         self._map_track = track
@@ -940,6 +945,18 @@ class SyncManager:
         self._restore_lights: bool = bool(
             entry.options.get(CONF_RESTORE_LIGHTS, DEFAULT_RESTORE_LIGHTS)
         )
+        # OpenSubsonic/Navidrome library (optional): (url, user, password) or None,
+        # used to fetch & analyse library tracks MA won't expose a stream for.
+        sub_url = (entry.options.get(CONF_SUBSONIC_URL, "") or "").strip()
+        self._subsonic = (
+            (
+                sub_url,
+                (entry.options.get(CONF_SUBSONIC_USER, "") or "").strip(),
+                entry.options.get(CONF_SUBSONIC_PASSWORD, "") or "",
+            )
+            if sub_url
+            else None
+        )
         self._sessions: dict[str, SyncSession] = {}
         self._settings: dict[str, AreaSettings] = self._load_settings()
         # Live-feed subscribers per area (dashboard cards over the WS API).
@@ -1049,6 +1066,7 @@ class SyncManager:
             self._ffmpeg, config, self.get_settings(area_id),
             snapserver_host=self._snapserver_host,
             restore_lights=self._restore_lights,
+            subsonic=self._subsonic,
             on_finished=lambda: self._on_session_finished(area_id),
             ws_broadcast=lambda payload: self.ws_broadcast(area_id, payload),
             ws_active=lambda: self.ws_has_subs(area_id),

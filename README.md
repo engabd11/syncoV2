@@ -280,6 +280,17 @@ The snapcast tap is only offered to players whose MA provider is actually
 snapcast, so a Sendspin or squeezelite session can never latch onto another
 room's snapcast stream.
 
+**OpenSubsonic / Navidrome library:** some players (e.g. Sendspin) play library
+tracks that Music Assistant won't expose a tappable stream URL for. If your
+library is an OpenSubsonic server (Navidrome, Gonic, ...), set its URL +
+username + password in the integration's options; the integration then fetches
+and analyses those tracks directly from the server (Subsonic `stream` API, token
+auth) and drives the lights from the precomputed track map - beat-accurate,
+without needing a live tap. The active audio source is shown on the switch
+(`audio_source` attribute) and the dashboard card header, so you can confirm it
+is using real audio (`track-map` / `live-tap`) rather than the generic fallback
+(`metadata`).
+
 ## Development
 
 The DSP, colour and encoder logic has no Home Assistant dependency and runs

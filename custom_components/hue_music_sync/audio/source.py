@@ -27,6 +27,10 @@ from homeassistant.util import dt as dt_util
 from ..const import ANALYSIS_HOP, ANALYSIS_SAMPLE_RATE
 from .analyzer import AnalysisFrame, Analyzer
 from .ma_stream import attr_summary, iter_http_urls, ma_stream_variants
+from .subsonic import is_subsonic_provider, subsonic_stream_url
+
+# (url, username, password) for an OpenSubsonic/Navidrome library, or None.
+SubsonicCfg = tuple[str, str, str] | None
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -80,13 +84,33 @@ def ma_player_provider(hass: HomeAssistant, entity_id: str) -> str | None:
         return None
 
 
-def resolve_map_url(hass: HomeAssistant, entity_id: str) -> str | None:
+def _subsonic_candidate(sd, subsonic: SubsonicCfg) -> str | None:
+    """Build a Subsonic stream URL for the current item, if applicable.
+
+    When the queue item's provider is (Open)Subsonic and the user configured a
+    library URL + login, build the ``/rest/stream`` URL from the provider track
+    id (``streamdetails.item_id``) — the reliable way to get library audio that
+    Music Assistant won't expose a tappable URL for (e.g. Sendspin playback).
+    """
+    if not subsonic or sd is None:
+        return None
+    url, user, password = subsonic
+    if not url:
+        return None
+    if is_subsonic_provider(getattr(sd, "provider", None)):
+        return subsonic_stream_url(url, user, password, getattr(sd, "item_id", None))
+    return None
+
+
+def resolve_map_url(
+    hass: HomeAssistant, entity_id: str, subsonic: SubsonicCfg = None
+) -> str | None:
     """A per-track URL suitable for *offline* analysis of the current track.
 
     Prefers the queue item's provider stream path (a plain file/HTTP stream that
-    decodes faster than realtime), falling back to an http ``current_media.uri``.
-    Returns None when the player exposes nothing tappable per-track (radio,
-    flow streams) — callers then stay on live-only analysis.
+    decodes faster than realtime), then a configured OpenSubsonic library URL,
+    then an http ``current_media.uri`` / any discoverable URL. Returns None when
+    the player exposes nothing analysable per-track (radio, flow streams).
     """
     try:
         mass = _find_mass_client(hass)
@@ -105,6 +129,10 @@ def resolve_map_url(hass: HomeAssistant, entity_id: str) -> str | None:
             path = getattr(sd, "path", None)
             if isinstance(path, str) and path.startswith(("http://", "https://")):
                 return path
+            # OpenSubsonic/Navidrome library track: build the stream URL ourselves.
+            sub = _subsonic_candidate(sd, subsonic)
+            if sub:
+                return sub
         uri = getattr(media, "uri", None) if media else None
         if isinstance(uri, str) and uri.startswith(("http://", "https://")):
             return uri
@@ -400,9 +428,10 @@ class MusicAssistantSource:
 
         if not stream_url:
             _LOGGER.warning(
-                "[%s] could not resolve a decodable HTTP stream URL "
-                "(media_content_id=%r). Music Assistant exposed: %s. The light "
-                "show will fall back to a generic animation until this resolves.",
+                "[%s] no live audio tap (media_content_id=%r). Music Assistant "
+                "exposed: %s. Will use the offline track-map if the track is "
+                "analysable (incl. a configured OpenSubsonic library), else a "
+                "generic animation.",
                 self._entity_id, attrs.get("media_content_id"), diag,
             )
             return None
