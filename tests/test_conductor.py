@@ -116,10 +116,12 @@ def test_pulse_weight_non_highlights_still_tick_in_intense():
     assert pulse_weight(p, 0.0, 1, highlight=True) > 0.4
 
 
-def test_extreme_is_selective_but_downbeat_always_lands():
+def test_extreme_fires_every_beat_downbeat_hardest():
+    # Club style: Extreme now punches on EVERY beat (ordinary beats included),
+    # with the downbeat hardest and the top accents slamming anywhere in the bar.
     p = MODE_PARAMS[SyncMode.EXTREME]
-    assert pulse_weight(p, 0.3, 1, highlight=False) == 0.0  # ordinary beat: dark
-    assert pulse_weight(p, 0.3, 0, highlight=False) >= 0.55  # the "one" still lands
+    assert 0.0 < pulse_weight(p, 0.3, 1, highlight=False) < 0.4  # ordinary beat ticks
+    assert pulse_weight(p, 0.3, 0, highlight=False) >= 0.55  # the "one" lands hard
     assert pulse_weight(p, 0.95, 2, highlight=True) > 0.5  # top accents slam anywhere
 
 

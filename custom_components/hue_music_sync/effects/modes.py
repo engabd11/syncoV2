@@ -30,12 +30,14 @@ The ladder — same pattern throughout, each rung harder, darker and more unifie
 * **High** — the one mode that keeps the per-instrument SPATIAL split: bass
   lights snap on kicks, guitar lights pop on mid onsets, vocal lights shimmer
   with the singing; roles rotate every few bars.
-* **Intense** — *unrestrained*: the reference look at medium force — a nearly
-  unified room jumping colour every beat, selective flashes, dark between.
-  The eye-safety limiter is bypassed (explicit user choice, see safety docs).
-* **Extreme** — *unrestrained* maximum: the reference at full force — a pure
-  dark room, one unified hue jumping across the spectrum every beat, hard
-  flashes only on the standout beats, black between.
+* **Intense** — *unrestrained* club: bass AND guitar/snare lights react across
+  the spectrum, every beat punches the room bright and it falls back toward
+  dark, the colour jumping hard each beat. The eye-safety limiter is bypassed
+  (explicit user choice, see safety docs).
+* **Extreme** — *unrestrained* maximum club: the hardest bright<->dark strobe —
+  full-spectrum roles (kick + guitar/snare + vocal shimmer), every beat slams to
+  full brightness and snaps back to near-black, the colour jumping across the
+  spectrum each hit. Goes truly dark in the gaps and on breakdowns.
 """
 
 from __future__ import annotations
@@ -164,16 +166,17 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
     # snaps bright on the stronger ones, dark between, energy lifting the base
     # through the chorus. Selective flashes, big colour motion.
     SyncMode.INTENSE: ModeParams(
-        base=0.0, floor=0.0, bass_gain=0.12, beat_gain=1.3, beat_threshold=1.1,
-        spread=0.0, colour_speed=0.05, shimmer=0.0, colour_sat=0.92,
-        colour_beat_step=0.0, colour_lerp=0.55, energy_gain=0.12,
-        bri_attack=1.0, bri_decay=0.45,
-        wave_gain=0.85, wave_speed=2.8, wave_width=0.28,
-        anticipation_ms=90, drop_boost=0.80, build_desat=0.55,
-        role_mix=(1.0, 0.0, 0.0), hard_snap=True,
-        highlight_quantile=0.50, weak_pulse=0.10, downbeat_pulse=0.50,
-        colour_jump=0.11, colour_spread=0.10,
-        melbank_gain=0.65, melbank_floor=0.07, colour_flow=0.04,
+        base=0.0, floor=0.0, bass_gain=0.10, beat_gain=1.7, beat_threshold=1.0,
+        spread=0.0, colour_speed=0.05, shimmer=0.30, colour_sat=0.95,
+        colour_beat_step=0.0, colour_lerp=0.60, energy_gain=0.10,
+        bri_attack=1.0, bri_decay=0.62,
+        wave_gain=0.90, wave_speed=3.0, wave_width=0.26,
+        anticipation_ms=90, drop_boost=0.90, build_desat=0.55,
+        role_mix=(0.6, 0.4, 0.0), mid_gain=1.1, mid_threshold=1.05,
+        vocal_dim=0.06, role_rotate_beats=16, hard_snap=True,
+        highlight_quantile=0.25, weak_pulse=0.35, downbeat_pulse=0.55,
+        colour_jump=0.15, colour_spread=0.12, full_room_accent=0.90,
+        melbank_gain=0.40, melbank_floor=0.0, colour_flow=0.06,
     ),
     # UNRESTRAINED maximum — the apartment-sync reference at full force (matched
     # to the recording: ~37% fully dark, one unified hue jumping across the
@@ -181,16 +184,18 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
     # dark room: base 0, the colour IS the show, brightness slams on highlights
     # and falls back to black, energy keeps the chorus alive.
     SyncMode.EXTREME: ModeParams(
-        base=0.0, floor=0.0, bass_gain=0.05, beat_gain=1.6, beat_threshold=1.5,
-        spread=0.0, colour_speed=0.06, shimmer=0.0, colour_sat=0.98,
-        colour_beat_step=0.0, colour_lerp=0.70, energy_gain=0.08,
-        bri_attack=1.0, bri_decay=0.55,
-        wave_gain=0.70, wave_speed=3.4, wave_width=0.24,
+        base=0.0, floor=0.0, bass_gain=0.06, beat_gain=2.2, beat_threshold=1.05,
+        spread=0.0, colour_speed=0.06, shimmer=0.38, colour_sat=1.0,
+        colour_beat_step=0.0, colour_lerp=0.72, energy_gain=0.06,
+        bri_attack=1.0, bri_decay=0.78,
+        wave_gain=0.85, wave_speed=3.6, wave_width=0.22,
         anticipation_ms=90, drop_boost=1.0, build_desat=0.60,
-        role_mix=(1.0, 0.0, 0.0), hard_snap=True,
-        accent_floor=0.45, weak_pulse=0.0, downbeat_pulse=0.60,
-        highlight_quantile=0.62, colour_jump=0.17, colour_spread=0.0,
-        melbank_gain=0.75, melbank_floor=0.06, colour_flow=0.05,
+        role_mix=(0.5, 0.3, 0.2), mid_gain=1.3, mid_threshold=1.0,
+        vocal_dim=0.05, role_rotate_beats=8, hard_snap=True,
+        accent_floor=0.25, weak_pulse=0.30, downbeat_pulse=0.70,
+        highlight_quantile=0.30, colour_jump=0.22, colour_spread=0.0,
+        full_room_accent=0.80,
+        melbank_gain=0.40, melbank_floor=0.0, colour_flow=0.07,
     ),
 }
 

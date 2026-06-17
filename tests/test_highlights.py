@@ -84,38 +84,38 @@ def _room_hue_spread(out) -> float:
 
 # --- selectivity: only standout beats flash --------------------------------
 
-def test_extreme_fires_only_the_standout_beats():
+def test_extreme_fires_on_ordinary_and_standout_beats():
+    # Club style: every beat punches (ordinary beats too), the standouts hardest.
     eng = EffectEngine(_channels(5))
     eng.set_mode(SyncMode.EXTREME)
     _fill_window(eng)
 
-    # Ordinary off-downbeat (accent 0.3): the room stays dark.
+    # Ordinary off-downbeat (accent 0.3): still gives a visible punch now.
     pre, tick = _play_beat(eng, 0.3, 1)
-    for cid in pre:
-        assert max(tick[cid]) < max(pre[cid]) + 0.05
+    assert any(max(tick[c]) > max(pre[c]) + 0.10 for c in pre)
 
-    # Standout beat (accent 1.0, the bar's "one"): the room slams.
+    # Standout beat (accent 1.0, the bar's "one"): the room slams much harder.
     pre, tick = _play_beat(eng, 1.0, 0)
     assert any(max(tick[c]) > max(pre[c]) + 0.3 for c in pre)
 
 
-def test_extreme_alive_while_playing_dark_only_in_silence():
-    # LedFx-style continuous foundation: while music plays the room stays ALIVE
-    # between flashes (the continuous melbank layer keeps it lit) — it must NOT
-    # collapse to black just because no beat fired. Only genuine silence rests
-    # dark. This is the fix for "intense/extreme feel dead": the old design left
-    # base/floor at 0, so a missed beat meant darkness.
+def test_extreme_slams_bright_on_beats_and_falls_back_dark():
+    # The club bright<->dark swing the user asked for: a beat slams the room
+    # bright, and between beats it falls back toward dark (a low continuous
+    # flicker, not a lit plateau), going fully dark in real silence.
     eng = EffectEngine(_channels(5))
     eng.set_mode(SyncMode.EXTREME)
     _fill_window(eng)
-    _play_beat(eng, 1.0, 0)  # a big flash
+    _, tick = _play_beat(eng, 1.0, 0)  # a big beat
+    assert max(max(c) for c in tick.values()) > 0.6  # slams bright
+
     out = None
-    for _ in range(18):  # flash decays, no new beat, but music keeps playing
+    for _ in range(18):  # flash decays, no new beat, music still playing
         out = eng.render(_quiet(), _DT, beatgrid=_grid(False, phase=0.6))
-    assert max(max(c) for c in out.values()) > 0.12  # still alive, not dead
+    assert max(max(c) for c in out.values()) < 0.45  # fell back toward dark
 
     # Genuine silence (paused / between tracks): the continuous layer fades out
-    # with the loudness gate and the room rests dark.
+    # with the loudness gate and the room rests fully dark.
     silent = AnalysisFrame(
         bands={n: 0.0 for n in ("sub_bass", "bass", "low_mid", "mid", "high")},
         energy=0.0,

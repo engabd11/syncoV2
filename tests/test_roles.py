@@ -138,11 +138,13 @@ def test_roles_rotate_after_the_scheduled_beats():
     assert sorted(after.values()) == sorted(before.values())
 
 
-def test_extreme_only_big_kicks_count():
+def test_extreme_sub_threshold_onset_stays_dimmer_than_a_big_kick():
+    # Club Extreme reacts to far more now, but a genuinely sub-threshold onset
+    # still must not flash like a real kick - the big kick slams much brighter.
     eng = EffectEngine(_channels(4))
     eng.set_mode(SyncMode.EXTREME)
     eng.render(_quiet(), _DT)
-    small = eng.render(_kick(strength=1.2), _DT)  # below Extreme's threshold
+    small = eng.render(_kick(strength=0.6), _DT)  # below the fire floor
     for _ in range(30):
         eng.render(_quiet(), _DT)  # let any response decay
     big = eng.render(_kick(strength=2.8), _DT)
