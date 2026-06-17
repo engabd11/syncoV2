@@ -150,6 +150,7 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         role_mix=(1.0, 0.0, 0.0),
         highlight_quantile=0.30, weak_pulse=0.25, downbeat_pulse=0.40,
         colour_jump=0.045, colour_spread=0.70,
+        energy_gain=0.15,
         melbank_gain=0.45, melbank_floor=0.06, colour_flow=0.05, spectral_pop=0.35,
     ),
     # The band on your lights: bass lights snap on kicks, guitar lights pop on
@@ -166,6 +167,7 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         vocal_dim=0.06, role_rotate_beats=16, hard_snap=True,
         highlight_quantile=0.40, weak_pulse=0.16, downbeat_pulse=0.45,
         colour_jump=0.07, colour_spread=0.55, full_room_accent=0.94,
+        energy_gain=0.20,
         melbank_gain=0.50, melbank_floor=0.05, colour_flow=0.05, spectral_pop=0.45,
     ),
     # UNRESTRAINED (eye-safety limiter bypassed - explicit user choice, see
@@ -174,16 +176,16 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
     # lamps bursting bright on each beat like fireworks (big beat_gain, no
     # instrument split). Colour jumps with the beat. A big step up from High.
     SyncMode.INTENSE: ModeParams(
-        base=0.0, floor=0.0, bass_gain=0.12, beat_gain=1.9, beat_threshold=1.0,
+        base=0.0, floor=0.0, bass_gain=0.15, beat_gain=1.8, beat_threshold=1.0,
         spread=0.0, colour_speed=0.05, shimmer=0.0, colour_sat=0.95,
-        colour_beat_step=0.0, colour_lerp=0.60, energy_gain=0.25,
-        bri_attack=1.0, bri_decay=0.34,
-        wave_gain=0.60, wave_speed=3.0, wave_width=0.26,
+        colour_beat_step=0.0, colour_lerp=0.60, energy_gain=0.20,
+        bri_attack=1.0, bri_decay=0.45,
+        wave_gain=0.55, wave_speed=3.0, wave_width=0.26,
         anticipation_ms=90, drop_boost=0.90, build_desat=0.55,
         role_mix=(1.0, 0.0, 0.0), hard_snap=True, flash_decay=0.74,
         highlight_quantile=0.20, weak_pulse=0.40, downbeat_pulse=0.60,
         colour_jump=0.13, colour_spread=0.12, full_room_accent=0.0,
-        melbank_gain=0.15, melbank_floor=0.0, colour_flow=0.05, spectral_pop=0.0,
+        melbank_gain=0.55, melbank_floor=0.04, colour_flow=0.05, spectral_pop=0.50,
     ),
     # UNRESTRAINED maximum club. The whole room rides the song's energy from
     # near-black in the quiet parts to FULL brightness in the loud ones (big
@@ -192,17 +194,17 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
     # range of the ladder; colour jumps hardest. One unified room, no instrument
     # split - every light reacts.
     SyncMode.EXTREME: ModeParams(
-        base=0.0, floor=0.0, bass_gain=0.08, beat_gain=2.8, beat_threshold=1.0,
+        base=0.0, floor=0.0, bass_gain=0.12, beat_gain=2.6, beat_threshold=1.0,
         spread=0.0, colour_speed=0.06, shimmer=0.0, colour_sat=1.0,
-        colour_beat_step=0.0, colour_lerp=0.72, energy_gain=0.32,
-        bri_attack=1.0, bri_decay=0.30,
-        wave_gain=0.60, wave_speed=3.6, wave_width=0.24,
+        colour_beat_step=0.0, colour_lerp=0.72, energy_gain=0.25,
+        bri_attack=1.0, bri_decay=0.40,
+        wave_gain=0.55, wave_speed=3.6, wave_width=0.24,
         anticipation_ms=90, drop_boost=1.0, build_desat=0.60,
-        role_mix=(1.0, 0.0, 0.0), hard_snap=True, flash_decay=0.64,
+        role_mix=(1.0, 0.0, 0.0), hard_snap=True, flash_decay=0.62,
         accent_floor=0.15, weak_pulse=0.50, downbeat_pulse=0.70,
         highlight_quantile=0.12, colour_jump=0.20, colour_spread=0.0,
         full_room_accent=0.0,
-        melbank_gain=0.0, melbank_floor=0.0, colour_flow=0.07, spectral_pop=0.0,
+        melbank_gain=0.65, melbank_floor=0.03, colour_flow=0.07, spectral_pop=0.60,
     ),
 }
 
@@ -447,33 +449,31 @@ def render(engine, frame) -> dict[int, tuple[RGB, float]]:
     for ch in engine.channels:
         info = engine.cmap[ch.channel_id]
         role = roles.get(ch.channel_id, ROLE_BASS)
-        if has_roles and role == ROLE_VOCAL:
-            # The quiet, human layer: a very dim light shimmering with the
-            # singing / high content, deliberately capped well below the rest.
-            bri = p.vocal_dim + p.shimmer * vocal_drive * _shimmer(t, ch.channel_id)
-            bri = min(bri, 0.5)
-        else:
-            drive = mids if (has_roles and role == ROLE_MID) else bass
-            bri = base_term + p.bass_gain * drive * env_mul
-            # The always-alive LedFx layer: this lamp rides the exp-smoothed
-            # power of its melbank slice (mapped across the room), so it keeps
-            # moving with the music between beats. Beat flashes/waves are added
-            # later on top of this — never gating it.
-            if p.melbank_gain:
-                mel_drive = _melbank_drive(frame, env, info)
-                bri += (p.melbank_floor + p.melbank_gain * mel_drive) * music * env_mul
+        # EVERY lamp gets a strong continuous reaction: the low-end weight of its
+        # role drive PLUS its own slice of the melbank spectrum PLUS the room
+        # loudness. No lamp is ever starved - the whole room reacts to the music.
+        # Roles only add *flavour* on top (kick/guitar punch, vocal shimmer);
+        # they no longer decide whether a lamp reacts at all.
+        drive = mids if (has_roles and role == ROLE_MID) else bass
+        bri = base_term + p.bass_gain * drive * env_mul
+        if p.melbank_gain:
+            mel_drive = _melbank_drive(frame, env, info)
+            bri += (p.melbank_floor + p.melbank_gain * mel_drive) * music * env_mul
         if p.energy_gain:
             # The whole room follows the song's loudness contour together (the
-            # unified "brighten on the build, dim in the breakdown" motion).
+            # "brighten on the build, dim in the breakdown" motion).
             bri += p.energy_gain * engine.energy_env
         if p.spectral_pop and tr:
-            # All-instrument reactivity: pop on a fresh attack anywhere in this
-            # lamp's slice of the spectrum (kick -> low lamps, snare -> low-mids,
-            # guitar/lead -> mids, cymbal/air -> highs). Transient-based, so it
-            # snaps bright on the hit and falls back - the club spectrum strobe.
+            # Pop on a fresh attack anywhere in this lamp's slice of the spectrum
+            # (kick -> low lamps, snare -> low-mids, guitar -> mids, cymbal -> highs).
             lo, hi = info["mel_lo"], info["mel_hi"]
             if hi > lo:
                 bri += p.spectral_pop * (sum(tr[lo:hi]) / (hi - lo)) * music
+        if has_roles and role == ROLE_VOCAL:
+            # The human flavour: a vocal lamp still reacts to the music (above),
+            # then shimmers with the singing on top - softened a touch, but never
+            # the dim, starved layer it used to be.
+            bri = 0.75 * bri + p.shimmer * vocal_drive * _shimmer(t, ch.channel_id)
         if p.spread:
             bri += p.spread * env.get(info["band"], 0.0)
         if p.height_freq:

@@ -16,7 +16,7 @@ import time
 
 from homeassistant.core import HomeAssistant
 
-from ..const import BANDS
+from ..const import BANDS, MELBANK_BINS
 from .analyzer import AnalysisFrame
 
 _FPS = 40
@@ -100,17 +100,30 @@ class MetadataSource:
         for i, name in enumerate(BANDS):
             v = 0.35 + 0.3 * math.sin(2 * math.pi * (0.08 + i * 0.05) * t + i * 1.3)
             bands[name] = max(0.0, min(1.0, v))
+        # A gentle per-bin melbank LFO so the continuous reactive layer (which
+        # the engine now leans on) has something to ride even on the fallback.
+        melbank = [
+            max(0.0, min(1.0, 0.4 + 0.3 * math.sin(2 * math.pi * (0.07 + i * 0.012) * t + i * 0.7)))
+            for i in range(MELBANK_BINS)
+        ]
 
-        # Soft, even pulses so beat-reactive modes still move.
+        # Soft, even pulses. These MUST set bass_beat/bass_strength on the live
+        # detector's ~1..3 scale: the engine's visible flashes and colour jumps
+        # all key off bass_beat, so setting only `beat` (the old bug) left the
+        # fallback looking dead.
         beat = False
         strength = 0.0
         pulse_idx = int(t * _PULSE_HZ)
         if pulse_idx != self._last_pulse:
             self._last_pulse = pulse_idx
             beat = True
-            strength = 0.6
+            strength = 2.0
 
-        return AnalysisFrame(bands=bands, energy=energy, beat=beat, beat_strength=strength)
+        return AnalysisFrame(
+            bands=bands, energy=energy, melbank=melbank,
+            beat=beat, beat_strength=strength,
+            bass_beat=beat, bass_strength=strength,
+        )
 
     async def close(self) -> None:
         return

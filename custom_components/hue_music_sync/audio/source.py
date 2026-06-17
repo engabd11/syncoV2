@@ -302,6 +302,9 @@ class MusicAssistantSource:
 
         mass = self._mass_client()
         player_id = self._mass_player_id()
+        # Captured for the failure WARNING so a single log line shows exactly
+        # what Music Assistant exposed (no need to enable debug logging).
+        diag: dict[str, object] = {"mass": mass is not None, "player_id": player_id}
         _LOGGER.debug(
             "[%s] resolve: mass_client=%s player_id=%s",
             self._entity_id, "found" if mass else "MISSING", player_id,
@@ -312,6 +315,15 @@ class MusicAssistantSource:
                 media = getattr(player, "current_media", None)
                 uri = getattr(media, "uri", None) if media else None
                 base_url = getattr(getattr(mass, "server_info", None), "base_url", None)
+                custom = getattr(media, "custom_data", None) if media else None
+                diag.update(
+                    base_url=bool(base_url),
+                    uri=uri,
+                    source_id=getattr(media, "source_id", None) if media else None,
+                    queue_item_id=getattr(media, "queue_item_id", None) if media else None,
+                    custom_keys=sorted((custom or {}).keys()) if custom else None,
+                    active_source=getattr(player, "active_source", None) if player else None,
+                )
                 _LOGGER.debug(
                     "[%s] player=%s server=%s current_media: uri=%r media_type=%r "
                     "source_id=%r queue_item_id=%r custom_data=%r",
@@ -338,6 +350,12 @@ class MusicAssistantSource:
                     item = getattr(queue, "current_item", None)
                     sd = getattr(item, "streamdetails", None)
                     path = getattr(sd, "path", None)
+                    diag.update(
+                        sd_path=path,
+                        sd_provider=getattr(sd, "provider", None) if sd else None,
+                        sd_item_id=getattr(sd, "item_id", None) if sd else None,
+                        candidates=len(candidates),
+                    )
                     _LOGGER.debug("[%s] queue streamdetails.path=%r", self._entity_id, path)
                     if isinstance(path, str) and path.startswith(("http://", "https://")):
                         candidates.append(path)
@@ -360,9 +378,9 @@ class MusicAssistantSource:
         if not stream_url:
             _LOGGER.warning(
                 "[%s] could not resolve a decodable HTTP stream URL "
-                "(media_content_id=%r). Enable debug logging for "
-                "custom_components.hue_music_sync to see what Music Assistant exposed.",
-                self._entity_id, attrs.get("media_content_id"),
+                "(media_content_id=%r). Music Assistant exposed: %s. The light "
+                "show will fall back to a generic animation until this resolves.",
+                self._entity_id, attrs.get("media_content_id"), diag,
             )
             return None
 

@@ -121,3 +121,34 @@ def test_higher_modes_are_more_reactive_than_subtle():
     subtle_move = float(np.mean(np.abs(np.diff(subtle))))
     extreme_move = float(np.mean(np.abs(np.diff(extreme))))
     assert extreme_move > subtle_move + 0.01  # extreme swings, subtle is steady
+
+
+# --- every lamp reacts (no starved lights) -----------------------------------
+
+def _per_lamp_series(frames, mode: SyncMode, channels):
+    eng = EffectEngine(channels)
+    eng.set_mode(mode)
+    series = {ch.channel_id: [] for ch in channels}
+    for f in frames:
+        out = eng.render(f, _DT, beatgrid=None)
+        for cid, rgb in out.items():
+            series[cid].append(max(rgb))
+    return {cid: np.array(v) for cid, v in series.items()}
+
+
+def test_all_lamps_react_in_intense():
+    # The fix for "only one light reacting": with real audio every lamp must
+    # move with the music, not just one. Check the QUIETEST-moving lamp.
+    chans = _channels(6)
+    series = _per_lamp_series(_frames(_music())[30:], SyncMode.INTENSE, chans)
+    moves = [float(np.std(v)) for v in series.values()]
+    assert min(moves) > 0.03  # even the least-active lamp clearly reacts
+
+
+def test_all_lamps_react_in_high_including_vocal():
+    # High keeps instrument roles, but the vocal lamp must no longer be a dim
+    # starved layer - every lamp reacts to the music.
+    chans = _channels(6)
+    series = _per_lamp_series(_frames(_music())[30:], SyncMode.HIGH, chans)
+    moves = [float(np.std(v)) for v in series.values()]
+    assert min(moves) > 0.02

@@ -770,13 +770,34 @@ class SyncSession:
             out.append(f"#{r:02x}{g:02x}{b:02x}")
         return out
 
+    def _source_label(self) -> str:
+        """Which audio path is currently driving the show (for diagnostics).
+
+        ``live-tap`` = real audio decoded from the player; ``snapcast`` =
+        snapserver tap; ``track-map`` = precomputed offline analysis replayed;
+        ``metadata`` = the generic fallback animation (no real audio);
+        ``idle`` = no source open yet.
+        """
+        src = self._source
+        if src is None:
+            return "idle"
+        if isinstance(src, SnapcastSource):
+            return "snapcast"
+        if isinstance(src, MusicAssistantSource):
+            return "live-tap"
+        if isinstance(src, TrackMapSource):
+            return "track-map"
+        if isinstance(src, MetadataSource):
+            return "metadata"
+        return "unknown"
+
     def _compute_public_state(self) -> dict:
         """Now-playing / album-colour / tempo data exposed on the switch entity.
 
         Lets a dashboard card recolour itself to the extracted album palette and
         lock a visualizer to the song (position from the player, tempo here).
         """
-        state: dict = {}
+        state: dict = {"audio_source": self._source_label()}
         if self._album_hex:
             state["album_colors"] = self._album_hex
         bg = self._last_beatgrid

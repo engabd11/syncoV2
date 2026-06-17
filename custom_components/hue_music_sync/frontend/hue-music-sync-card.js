@@ -13,7 +13,7 @@
 // Cosmetic version (shown in the console banner). The browser cache-bust no
 // longer depends on this: the integration appends ?v=<content-hash> derived from
 // this file's bytes, so any edit is picked up without a manual hard refresh.
-const VERSION = "1.12.0";
+const VERSION = "1.13.0";
 
 /* ------------------------- Palette data ------------------------- */
 // Colour schemes from the integration, each a small gradient swatch.
@@ -888,6 +888,7 @@ class HueMusicSyncCard extends HTMLElement {
       brightness: { entity: area.brightness, value: brightVal, min: brightMin, max: brightMax },
       timing: { entity: area.timing, value: timingVal, min: timingMin, max: timingMax, step: timingStep },
       now,
+      audioSource: swAttr.audio_source || null,
     };
   }
 
@@ -1018,10 +1019,19 @@ class HueMusicSyncCard extends HTMLElement {
     pill.style.boxShadow = m.on ? `inset 0 0 0 1px ${accent}66` : "";
     const pillDot = document.createElement("span");
     pillDot.className = "hue-pill-dot";
-    pillDot.style.background = m.on ? accent : "#6b7088";
-    pillDot.style.boxShadow = m.on ? `0 0 8px ${accent}` : "none";
+    // Surface the audio source: amber-warn when on the generic metadata
+    // fallback (no real audio), so a dead tap is obvious at a glance.
+    const SRC_LABEL = {
+      "live-tap": "Live audio", snapcast: "Live (snapcast)",
+      "track-map": "Track map", metadata: "Metadata only", idle: "Starting",
+    };
+    const onFallback = m.on && m.audioSource === "metadata";
+    const pillColor = !m.on ? "#6b7088" : onFallback ? "#ffb24d" : accent;
+    pillDot.style.background = pillColor;
+    pillDot.style.boxShadow = m.on ? `0 0 8px ${pillColor}` : "none";
     pill.appendChild(pillDot);
-    pill.appendChild(document.createTextNode(m.on ? "Streaming" : "Idle"));
+    const label = m.on ? (SRC_LABEL[m.audioSource] || "Streaming") : "Idle";
+    pill.appendChild(document.createTextNode(label));
     heroTop.appendChild(pill);
 
     heroTop.appendChild(this._power(m, accent));
