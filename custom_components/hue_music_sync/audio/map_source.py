@@ -203,7 +203,10 @@ class TrackMapSource:
             await asyncio.sleep(delay)
 
         now = time.monotonic()
-        if now - self._last_meta >= 1.0:
+        # Refresh on the same cadence as the position poll: on a gapless boundary
+        # the track id changes here and re-anchors the clock, so the smaller this
+        # is the shorter the window where the *previous* track's map is queried.
+        if now - self._last_meta >= _POS_POLL_S:
             self._last_meta = now
             self._refresh_meta()
 

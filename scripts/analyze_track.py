@@ -31,9 +31,11 @@ def main() -> int:
         print(__doc__)
         return 2
     url = sys.argv[1]
-    tm = _decode_and_analyze("ffmpeg", url, max_seconds=720)
+    result = _decode_and_analyze("ffmpeg", url, max_seconds=720)
+    tm = result.track_map
     if tm is None:
-        print("analysis failed (couldn't decode, or track too short/quiet)")
+        reason = result.error or "track too short/quiet"
+        print(f"analysis failed ({'decoded but unanalysable' if result.decoded else reason})")
         return 1
     print(f"duration   : {tm.duration:8.1f} s")
     print(f"tempo      : {tm.bpm:8.1f} BPM  (confidence {tm.confidence:.2f}, "

@@ -98,7 +98,18 @@ def _subsonic_candidate(sd, subsonic: SubsonicCfg) -> str | None:
     if not url:
         return None
     if is_subsonic_provider(getattr(sd, "provider", None)):
-        return subsonic_stream_url(url, user, password, getattr(sd, "item_id", None))
+        item_id = getattr(sd, "item_id", None)
+        built = subsonic_stream_url(url, user, password, item_id)
+        if built is None:
+            # A Subsonic track we *should* be able to stream, but a required
+            # field is missing — surface it so a misconfigured library/login or
+            # an item with no id doesn't just silently fall through to metadata.
+            _LOGGER.warning(
+                "Subsonic track has no streamable URL (item_id=%r, user set=%s, "
+                "password set=%s); check the OpenSubsonic library URL/login option",
+                item_id, bool(user), bool(password),
+            )
+        return built
     return None
 
 

@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import subprocess
+import time
 from collections import OrderedDict
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
@@ -81,6 +82,32 @@ MIN_MAP_CONFIDENCE = 0.30
 
 _MAX_TRACK_S = 720.0  # analysis cap (12 min); beyond this fall back to live
 _DECODE_TIMEOUT_S = 90.0  # ffmpeg must finish well before the track does
+
+# Audio we must decode before treating a result as "the analysis genuinely ran"
+# rather than "the fetch failed" — below this, a None result is a transient
+# decode/network failure (e.g. Navidrome busy) and is worth retrying.
+_MIN_DECODE_S = 5.0
+# Retry policy for *transient* analysis failures (decode/timeout): a busy
+# library shouldn't strand a track for the whole session. Exhausting these (or a
+# decoded-but-unusable result, which won't improve) marks the track failed.
+_MAX_ANALYSIS_ATTEMPTS = 4
+_RETRY_BASE_S = 15.0
+_RETRY_MAX_S = 120.0
+
+
+@dataclass(slots=True)
+class MapResult:
+    """Outcome of one analysis attempt.
+
+    ``decoded`` distinguishes "we got the audio but couldn't build a usable map"
+    (permanent — re-running won't help) from "we couldn't get the audio"
+    (transient — retry), so a slow/busy Navidrome doesn't permanently disable a
+    track. ``error`` carries the ffmpeg diagnostic for the log.
+    """
+
+    track_map: "TrackMap | None"
+    decoded: bool
+    error: str = ""
 
 
 @dataclass(slots=True)
@@ -785,8 +812,13 @@ def _build_features(
     )
 
 
-def _decode_and_analyze(ffmpeg_bin: str, url: str, max_seconds: float) -> TrackMap | None:
-    """Blocking: stream-decode ``url`` with ffmpeg and analyse it on the fly."""
+def _decode_and_analyze(ffmpeg_bin: str, url: str, max_seconds: float) -> MapResult:
+    """Blocking: stream-decode ``url`` with ffmpeg and analyse it on the fly.
+
+    Captures ffmpeg's stderr so a server error (auth, 404, transcode failure) is
+    surfaced instead of vanishing, and reports how much audio actually decoded so
+    the caller can tell a transient fetch failure from an unanalysable track.
+    """
     args = [
         ffmpeg_bin, "-nostdin", "-loglevel", "error",
         "-i", url,
@@ -796,32 +828,48 @@ def _decode_and_analyze(ffmpeg_bin: str, url: str, max_seconds: float) -> TrackM
     ]
     try:
         proc = subprocess.Popen(
-            args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+            args, stdout=subprocess.PIPE, stderr=subprocess.PIPE
         )
     except OSError as err:
         _LOGGER.debug("Track-map decode failed to start: %s", err)
-        return None
+        return MapResult(None, decoded=False, error=str(err))
     ex = EnvelopeExtractor()
+    n_bytes = 0
     try:
         assert proc.stdout is not None
         while True:
             raw = proc.stdout.read(1 << 18)  # 256 KiB ~ 3 s of audio
             if not raw:
                 break
+            n_bytes += len(raw)
             ex.push(np.frombuffer(raw, dtype="<f4"))
     finally:
         try:
             proc.stdout.close()  # type: ignore[union-attr]
         except OSError:
             pass
+        # ffmpeg with -loglevel error emits only a few lines of stderr, so reading
+        # it after stdout drains can't deadlock; it tells us why a fetch failed.
+        err_txt = ""
+        if proc.stderr is not None:
+            try:
+                err_txt = proc.stderr.read().decode(errors="replace").strip()
+                proc.stderr.close()
+            except OSError:
+                pass
         proc.kill()
         proc.wait()
-    return _finish_analysis(ex)
+    decoded = (n_bytes / 4 / ANALYSIS_SAMPLE_RATE) >= _MIN_DECODE_S  # 4 bytes/f32
+    tm = _finish_analysis(ex)
+    error = "" if (tm is not None or decoded) else (
+        err_txt.splitlines()[-1] if err_txt else "no audio decoded"
+    )
+    return MapResult(track_map=tm, decoded=decoded, error=error)
 
 
 async def build_track_map(
     ffmpeg_bin: str, url: str, max_seconds: float = _MAX_TRACK_S
-) -> TrackMap | None:
+) -> MapResult:
     """Decode + analyse a track in an executor, bounded by a timeout."""
     loop = asyncio.get_running_loop()
     try:
@@ -831,7 +879,16 @@ async def build_track_map(
         )
     except asyncio.TimeoutError:
         _LOGGER.info("Track-map analysis timed out for %s", url)
-        return None
+        return MapResult(None, decoded=False, error="analysis timed out")
+
+
+@dataclass(slots=True)
+class _Failure:
+    """Failure bookkeeping for one track, driving the retry/give-up decision."""
+
+    attempts: int = 0
+    retry_at: float = 0.0
+    permanent: bool = False
 
 
 class TrackMapper:
@@ -839,6 +896,11 @@ class TrackMapper:
 
     HA-free; the caller supplies a task spawner (e.g. Home Assistant's
     ``async_create_background_task``) so analysis never blocks the render loop.
+
+    A *transient* failure (decode/network/timeout — e.g. a busy Navidrome) is
+    retried with backoff rather than permanently disabling the track; only a
+    decoded-but-unusable result (which won't improve on re-analysis) or an
+    exhausted retry budget marks a track failed for the session.
     """
 
     def __init__(
@@ -849,7 +911,8 @@ class TrackMapper:
     ) -> None:
         self._ffmpeg = ffmpeg_bin
         self._spawn = spawner or (lambda coro, name: asyncio.create_task(coro, name=name))
-        self._cache: OrderedDict[str, TrackMap | None] = OrderedDict()
+        self._cache: OrderedDict[str, TrackMap] = OrderedDict()  # usable maps only
+        self._failures: OrderedDict[str, _Failure] = OrderedDict()
         self._max_cache = max_cache
         self._task: asyncio.Task | None = None
         self._inflight: str | None = None
@@ -861,16 +924,22 @@ class TrackMapper:
         return tm if tm is not None and tm.usable else None
 
     def failed(self, track_id: str | None) -> bool:
-        """True when analysis for ``track_id`` completed but yielded no usable map."""
-        if not track_id or track_id not in self._cache:
-            return False
-        tm = self._cache[track_id]
-        return tm is None or not tm.usable
+        """True only when ``track_id`` has *permanently* failed analysis.
+
+        While a transient failure is still within its retry budget this returns
+        False, so the caller keeps the track-map source (placeholder frames)
+        instead of dropping to the metadata animation.
+        """
+        f = self._failures.get(track_id) if track_id else None
+        return bool(f and f.permanent)
 
     def ensure(self, track_id: str | None, url: str | None) -> None:
-        """Kick off analysis for ``track_id`` if it isn't cached or running."""
+        """Kick off (or retry) analysis for ``track_id`` if due and not running."""
         if not track_id or not url or track_id in self._cache:
             return
+        f = self._failures.get(track_id)
+        if f and (f.permanent or time.monotonic() < f.retry_at):
+            return  # permanently failed, or waiting out the retry backoff
         if self._task is not None and not self._task.done():
             return  # one analysis at a time; retried on the next track poll
         self._inflight = track_id
@@ -880,22 +949,55 @@ class TrackMapper:
 
     async def _analyze(self, track_id: str, url: str) -> None:
         try:
-            tm = await build_track_map(self._ffmpeg, url)
+            result = await build_track_map(self._ffmpeg, url)
         except Exception:  # noqa: BLE001 - analysis must never break sync
             _LOGGER.debug("Track-map analysis crashed for %s", url, exc_info=True)
-            tm = None
+            result = MapResult(None, decoded=False, error="analysis crashed")
         finally:
             self._inflight = None
-        # Cache failures too (as None) so a bad URL isn't re-fetched every poll.
-        self._cache[track_id] = tm
-        while len(self._cache) > self._max_cache:
-            self._cache.popitem(last=False)
-        if tm is not None:
+        self._record_result(track_id, url, result)
+
+    def _record_result(self, track_id: str, url: str, result: MapResult) -> None:
+        tm = result.track_map
+        if tm is not None and tm.usable:
+            self._failures.pop(track_id, None)
+            self._cache[track_id] = tm
+            while len(self._cache) > self._max_cache:
+                self._cache.popitem(last=False)
             _LOGGER.info(
                 "Track map ready: %.0f s, %.1f BPM (confidence %.2f), "
                 "%d beats, %d sections",
                 tm.duration, tm.bpm, tm.confidence, tm.beats.size, len(tm.sections),
             )
+            return
+
+        f = self._failures.get(track_id) or _Failure()
+        f.attempts += 1
+        if result.decoded:
+            # Audio decoded but no usable beat map — re-analysing won't help.
+            f.permanent = True
+            _LOGGER.info(
+                "Track-map analysis produced no usable map for %s "
+                "(decoded but unanalysable); using live/fallback sync", url
+            )
+        elif f.attempts >= _MAX_ANALYSIS_ATTEMPTS:
+            f.permanent = True
+            _LOGGER.warning(
+                "Track-map analysis failed %d times for %s (%s); giving up for "
+                "this track", f.attempts, url, result.error or "unknown error"
+            )
+        else:
+            delay = min(_RETRY_MAX_S, _RETRY_BASE_S * (2 ** (f.attempts - 1)))
+            f.retry_at = time.monotonic() + delay
+            _LOGGER.info(
+                "Track-map analysis failed for %s (%s); retry %d/%d in %.0fs",
+                url, result.error or "unknown error",
+                f.attempts, _MAX_ANALYSIS_ATTEMPTS, delay,
+            )
+        self._failures[track_id] = f
+        self._failures.move_to_end(track_id)
+        while len(self._failures) > self._max_cache * 2:
+            self._failures.popitem(last=False)
 
     async def close(self) -> None:
         if self._task is not None and not self._task.done():
