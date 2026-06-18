@@ -256,6 +256,16 @@ class SyncSession:
         self._engine.set_mode(settings.mode)
         self._engine.set_effect(settings.effect)
         self._engine.set_brightness(settings.brightness)
+        if settings.mode != prev.mode or settings.effect != prev.effect:
+            # The flash limiter holds a slow brightness anchor and freezes it
+            # while it's limiting, so a mode/effect change carries the *previous*
+            # mode's field level forward: switching e.g. Subtle (steady ~0.8) to a
+            # dark club mode would pin the room near the old bright anchor and
+            # suppress the new mode's flashing until the session was restarted.
+            # Clear it so the new mode anchors to its own field from this frame.
+            self._safety.reset()
+            self._was_unrestrained = self._unrestrained()
+            self._last_safe_t = None
         if settings.colour != prev.colour:
             self._apply_colour()
             self._last_track = None  # re-extract album art if switching to Album
@@ -465,6 +475,23 @@ class SyncSession:
                             self._config.name, _RECONNECT_ATTEMPTS,
                         )
                         self._running = False
+                    last_t = time.monotonic()
+                except Exception:  # noqa: BLE001
+                    # A transient fault in the frame path — most often a hiccup at
+                    # a track boundary (the stream/decoder/MA lookup raising as one
+                    # song ends and the next begins) — must NOT tear the session
+                    # down and force a manual switch toggle. Drop the source so the
+                    # loop cleanly re-acquires the next track, and pace the retry so
+                    # a persistent fault can't spin the loop hot.
+                    _LOGGER.exception(
+                        "Recovering sync loop for %s after an unexpected error",
+                        self._config.name,
+                    )
+                    try:
+                        await self._reset_source()
+                    except Exception:  # noqa: BLE001 - never fail the recovery
+                        self._source = None
+                    await asyncio.sleep(0.5)
                     last_t = time.monotonic()
         except asyncio.CancelledError:
             pass
