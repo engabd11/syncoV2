@@ -159,6 +159,86 @@ def resolve_map_url(
     return None
 
 
+def track_signature(content_id, artist, title) -> str | None:
+    """The per-track key used to cache a track map.
+
+    ``media_content_id`` alone can stay constant on flow streams, so the artist
+    and title are folded in. Must be computed identically everywhere a track is
+    identified (live attributes here, the upcoming queue item in
+    :func:`resolve_next_map`) or a prefetched map won't be found.
+    """
+    sig = "|".join(str(v) for v in (content_id, artist, title) if v)
+    return sig or None
+
+
+def _media_item_artist(media_item) -> str | None:
+    """Best-effort artist string for an MA media item (matches HA media_artist)."""
+    if media_item is None:
+        return None
+    for attr in ("artist_str", "artists"):
+        val = getattr(media_item, attr, None)
+        if not val:
+            continue
+        if isinstance(val, str):
+            return val
+        try:
+            names = [getattr(a, "name", None) or str(a) for a in val]
+            names = [n for n in names if n]
+            if names:
+                return ", ".join(names)
+        except TypeError:
+            return str(val)
+    return None
+
+
+def resolve_next_map(
+    hass: HomeAssistant, entity_id: str, subsonic: SubsonicCfg = None
+) -> tuple[str, str, str] | None:
+    """``(next_uri, next_signature, url)`` for the upcoming queue item, or None.
+
+    Lets the coordinator pre-analyse the next track so a gapless transition lands
+    on an already-ready map instead of a placeholder gap. Mirrors
+    :func:`resolve_map_url` but reads ``queue.next_item``, and returns both key
+    schemes so the caller can match whichever the active source uses (the live
+    tap keys its map by the track uri, the offline track-map by the signature).
+    Returns None when there is no next item or nothing analysable per-track.
+    """
+    try:
+        mass = _find_mass_client(hass)
+        entry = er.async_get(hass).async_get(entity_id)
+        player_id = entry.unique_id if entry else None
+        if mass is None or player_id is None:
+            return None
+        player = mass.players.get(player_id)
+        src = getattr(player, "active_source", None) if player else None
+        queue = mass.player_queues.get(src) if src else None
+        nxt = getattr(queue, "next_item", None)
+        if nxt is None:
+            return None
+        sd = getattr(nxt, "streamdetails", None)
+        media_item = getattr(nxt, "media_item", None)
+        uri = getattr(media_item, "uri", None) or getattr(nxt, "uri", None)
+        if not uri:
+            return None
+        url = None
+        path = getattr(sd, "path", None)
+        if isinstance(path, str) and path.startswith(("http://", "https://")):
+            url = path
+        if url is None:
+            url = _subsonic_candidate(sd, subsonic)
+        if url is None and isinstance(uri, str) and uri.startswith(("http://", "https://")):
+            url = uri
+        if url is None:
+            return None
+        signature = track_signature(
+            uri, _media_item_artist(media_item), getattr(media_item, "name", None)
+        ) or str(uri)
+        return str(uri), signature, url
+    except Exception as err:  # noqa: BLE001 - defensive across MA versions
+        _LOGGER.debug("[%s] next-track lookup failed: %s", entity_id, err)
+        return None
+
+
 def _ma_player_codec(player) -> str:
     """The output codec a Music Assistant player is configured to stream.
 
@@ -438,13 +518,16 @@ class MusicAssistantSource:
                 stream_url, source_desc = content, "media_content_id"
 
         if not stream_url:
-            _LOGGER.warning(
-                "[%s] no live audio tap (media_content_id=%r). Music Assistant "
-                "exposed: %s. Will use the offline track-map if the track is "
-                "analysable (incl. a configured OpenSubsonic library), else a "
-                "generic animation.",
-                self._entity_id, attrs.get("media_content_id"), diag,
+            # Expected for providers that don't expose a tappable stream (e.g.
+            # OpenSubsonic/Navidrome via flow mode): the offline track-map takes
+            # over. INFO, not WARNING, so it doesn't read as an error every track;
+            # the full Music-Assistant object dump stays at DEBUG for diagnosis.
+            _LOGGER.info(
+                "[%s] no live audio tap for %r; using the offline track-map "
+                "(or a generic animation if the track isn't analysable)",
+                self._entity_id, attrs.get("media_content_id"),
             )
+            _LOGGER.debug("[%s] Music Assistant exposed: %s", self._entity_id, diag)
             return None
 
         _LOGGER.debug(

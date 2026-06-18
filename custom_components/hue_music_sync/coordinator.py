@@ -26,7 +26,12 @@ from .audio.map_source import TrackMapSource
 from .audio.metadata import MetadataSource
 from .audio.ma_stream import is_snapcast_backed
 from .audio.snapcast import SnapcastSource
-from .audio.source import MusicAssistantSource, ma_player_provider, resolve_map_url
+from .audio.source import (
+    MusicAssistantSource,
+    ma_player_provider,
+    resolve_map_url,
+    resolve_next_map,
+)
 from .audio.structure import StructureTracker
 from .audio.tempo import BeatGrid, TempoTracker
 from .audio.trackmap import Section, TrackMapper
@@ -227,6 +232,7 @@ class SyncSession:
         self._upgrade_task: asyncio.Task | None = None
         self._upgrade_at = 0.0
         self._upgrade_interval = _META_UPGRADE_START_S
+        self._prefetch_key: str | None = None  # next-track map already requested
 
     @property
     def settings(self) -> AreaSettings:
@@ -306,6 +312,7 @@ class SyncSession:
         self._map_track = None
         self._map_prev_pos = None
         self._map_section = None
+        self._prefetch_key = None  # re-evaluate the next track after a jump
 
     async def _reset_source(self) -> None:
         await self._cancel_meta_upgrade()
@@ -541,6 +548,7 @@ class SyncSession:
                     if now - self._map_check >= 1.0:
                         self._map_check = now
                         self._maybe_track_map()
+                        self._maybe_prefetch_next()
                         # A metadata fallback shouldn't be a life sentence: on a
                         # track change, drop it and re-evaluate the better
                         # sources (the next track may be tappable/analysable).
@@ -816,6 +824,33 @@ class SyncSession:
         self._map_prev_pos = None
         self._map_section = None
         self._mapper.ensure(track, url)
+
+    def _maybe_prefetch_next(self) -> None:
+        """Pre-analyse the *next* queue item so a gapless change is instant.
+
+        Only once the current track's own map is ready (so prefetch never delays
+        the track that's actually playing — the mapper analyses one at a time),
+        and keyed to match whichever scheme the active source will use when that
+        item becomes current (the live tap keys by uri, the track-map by the full
+        signature), so the warmed map is found on the change instead of a gap.
+        """
+        src = self._source
+        if src is None or isinstance(src, MetadataSource):
+            return
+        if self._mapper.get(src.track_id) is None:
+            return  # current track not analysed yet; don't compete for the slot
+        nxt = resolve_next_map(self._hass, src.entity_id, self._subsonic)
+        if nxt is None:
+            return
+        next_uri, next_sig, next_url = nxt
+        key = next_sig if isinstance(src, TrackMapSource) else next_uri
+        if key == self._prefetch_key:
+            return  # already requested this next track
+        self._prefetch_key = key
+        _LOGGER.debug(
+            "Prefetching next-track map for %s (%s)", self._config.name, key
+        )
+        self._mapper.ensure(key, next_url)
 
     def _analysis_position(self) -> float | None:
         """The track position our *analysis frames* currently correspond to.

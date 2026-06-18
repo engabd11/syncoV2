@@ -32,7 +32,7 @@ from homeassistant.util import dt as dt_util
 
 from ..const import ANALYSIS_HOP, ANALYSIS_SAMPLE_RATE, BANDS, LIGHT_PIPELINE_MS, TIMING_BUFFER_MS
 from .analyzer import AnalysisFrame
-from .source import resolve_map_url
+from .source import resolve_map_url, track_signature
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -124,13 +124,12 @@ class TrackMapSource:
             return
         attrs = st.attributes
         # Per-song signature (media_content_id alone can stay constant on flow
-        # streams) — must match what the coordinator keys the mapper with.
-        signature = "|".join(
-            str(attrs[k])
-            for k in ("media_content_id", "media_artist", "media_title")
-            if attrs.get(k)
+        # streams) — shared with resolve_next_map so a prefetched map keys match.
+        track = track_signature(
+            attrs.get("media_content_id"),
+            attrs.get("media_artist"),
+            attrs.get("media_title"),
         )
-        track = signature or None
         if track != self._track_id:
             self._track_id = track
             self._prev_query = None
