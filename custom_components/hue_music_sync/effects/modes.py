@@ -237,28 +237,81 @@ ROLE_MID = 1   # rides the mids, pops on guitar/snare onsets
 ROLE_VOCAL = 2  # very dim, shimmers with singing / high content
 
 
-def assign_roles(count: int, mix: tuple[float, float, float], offset: int) -> list[int]:
-    """Role per light rank (left-to-right), rotated by ``offset``.
+def _role_counts(count: int, mix: tuple[float, float, float]) -> tuple[int, int, int]:
+    """How many (bass, mid, vocal) lights for ``count`` lamps and a role ``mix``.
 
-    ``mix`` gives the (bass, mid, vocal) fractions; every non-zero role gets at
-    least one light when there are lights to spare, and rotation cycles the
-    assignment around the room so the "band members" trade places.
+    Largest-remainder (Hamilton) allocation: floor each share, then hand the
+    leftover lamps to the biggest fractional remainders (bass wins ties), so the
+    counts track the proportion cleanly as the light count changes instead of
+    each role rounding on its own. Every role with a non-zero share is then
+    guaranteed at least one lamp once there are enough to go round, and a mix
+    that wants no vocal hands its spares back to bass.
+
+    A Hue entertainment area holds at most 10 lamps, so the High split
+    ``(0.4, 0.3, 0.3)`` resolves to this per-count ladder (bass keeps the
+    plurality, so the kick is always well represented):
+
+        N : bass mid vocal        N : bass mid vocal
+        1 :  1    0    0           6 :  2    2    2
+        2 :  1    1    0           7 :  3    2    2
+        3 :  1    1    1           8 :  3    3    2
+        4 :  2    1    1           9 :  3    3    3
+        5 :  2    2    1          10 :  4    3    3
     """
-    if count <= 0:
-        return []
-    nb = int(round(mix[0] * count))
-    nm = int(round(mix[1] * count))
-    if mix[0] > 0.0:
-        nb = max(1, nb)
-    if mix[1] > 0.0 and count >= 2:
-        nm = max(1, nm)
-    nb = min(nb, count)
-    nm = min(nm, count - nb)
-    nv = count - nb - nm
+    raw = [mix[0] * count, mix[1] * count, mix[2] * count]
+    counts = [int(math.floor(r)) for r in raw]
+    remaining = count - sum(counts)
+    # Give the spare lamps to the largest fractional parts; on a tie prefer the
+    # earlier role (bass, then mid), so bass keeps its edge.
+    order = sorted(range(3), key=lambda i: (raw[i] - counts[i], -i), reverse=True)
+    for i in order[:max(0, remaining)]:
+        counts[i] += 1
+    # Guarantee a lamp for each wanted role once the room is big enough, pulling
+    # the extra from the most over-allocated role (always bass for these mixes).
+    for idx, want in ((1, mix[1] > 0.0 and count >= 2), (2, mix[2] > 0.0 and count >= 3)):
+        if want and counts[idx] == 0:
+            donor = max(range(3), key=lambda i: counts[i])
+            if counts[donor] > 1:
+                counts[donor] -= 1
+                counts[idx] += 1
+    nb, nm, nv = counts
     if mix[2] <= 0.0 and nv > 0:  # no vocal role wanted: hand spares to bass
         nb += nv
         nv = 0
-    roles = [ROLE_BASS] * nb + [ROLE_MID] * nm + [ROLE_VOCAL] * nv
+    if mix[1] <= 0.0 and nm > 0:  # no mid role wanted: hand spares to bass
+        nb += nm
+        nm = 0
+    return nb, nm, nv
+
+
+def _interleave(counts: tuple[int, int, int]) -> list[int]:
+    """Spread the role lamps evenly across the ranks instead of in blocks.
+
+    Each role's lamps are placed at fractional positions ``(j + 0.5) / count``
+    along the room and all positions are merged in order (bass winning ties), so
+    e.g. (3, 3, 2) -> [B, M, V, B, M, V, B, M] with the bass lamps at ranks
+    0/3/6 rather than clustered together. That way the lamps that snap on the
+    kick are distributed around the room, not bunched on one side.
+    """
+    slots: list[tuple[float, int, int]] = []
+    for role, c in ((ROLE_BASS, counts[0]), (ROLE_MID, counts[1]), (ROLE_VOCAL, counts[2])):
+        for j in range(c):
+            slots.append(((j + 0.5) / c, role, role))
+    slots.sort(key=lambda s: (s[0], s[1]))
+    return [role for _pos, _prio, role in slots]
+
+
+def assign_roles(count: int, mix: tuple[float, float, float], offset: int) -> list[int]:
+    """Role per light rank (left-to-right), rotated by ``offset``.
+
+    ``mix`` gives the (bass, mid, vocal) fractions; counts scale cleanly with the
+    light count (see :func:`_role_counts`), the roles are spread evenly around the
+    room rather than clustered (see :func:`_interleave`), and rotation cycles the
+    assignment so the "band members" trade places.
+    """
+    if count <= 0:
+        return []
+    roles = _interleave(_role_counts(count, mix))
     off = offset % count
     return roles[-off:] + roles[:-off] if off else roles
 

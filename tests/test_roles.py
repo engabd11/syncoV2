@@ -51,6 +51,44 @@ def test_assign_roles_rotation_moves_the_band():
     assert assign_roles(3, (0.4, 0.3, 0.3), 3) == base  # full circle
 
 
+# The High split scaled cleanly for every light count a Hue entertainment area
+# can hold (max 10). Bass keeps the plurality so the kick is always represented.
+_HIGH_LADDER = {
+    1: (1, 0, 0), 2: (1, 1, 0), 3: (1, 1, 1), 4: (2, 1, 1), 5: (2, 2, 1),
+    6: (2, 2, 2), 7: (3, 2, 2), 8: (3, 3, 2), 9: (3, 3, 3), 10: (4, 3, 3),
+}
+
+
+def test_high_split_counts_scale_one_to_ten():
+    for n, (nb, nm, nv) in _HIGH_LADDER.items():
+        roles = assign_roles(n, (0.4, 0.3, 0.3), 0)
+        assert len(roles) == n
+        assert roles.count(ROLE_BASS) == nb, n
+        assert roles.count(ROLE_MID) == nm, n
+        assert roles.count(ROLE_VOCAL) == nv, n
+
+
+def test_roles_are_spread_not_clustered():
+    # Beating (bass) lights must be distributed around the room, never bunched.
+    for n in (8, 10):
+        roles = assign_roles(n, (0.4, 0.3, 0.3), 0)
+        # No two adjacent lamps share a role at these counts (even interleave).
+        assert all(roles[i] != roles[i + 1] for i in range(n - 1)), roles
+    assert assign_roles(8, (0.4, 0.3, 0.3), 0) == [
+        ROLE_BASS, ROLE_MID, ROLE_VOCAL, ROLE_BASS, ROLE_MID, ROLE_VOCAL,
+        ROLE_BASS, ROLE_MID,
+    ]
+    assert assign_roles(10, (0.4, 0.3, 0.3), 0) == [
+        ROLE_BASS, ROLE_MID, ROLE_VOCAL, ROLE_BASS, ROLE_MID, ROLE_VOCAL,
+        ROLE_BASS, ROLE_MID, ROLE_VOCAL, ROLE_BASS,
+    ]
+
+
+def test_all_bass_mix_stays_all_bass_for_every_count():
+    for n in range(1, 11):
+        assert assign_roles(n, (1.0, 0.0, 0.0), 0) == [ROLE_BASS] * n
+
+
 # --- rendering ------------------------------------------------------------
 
 def _kick(strength: float = 2.5) -> AnalysisFrame:
