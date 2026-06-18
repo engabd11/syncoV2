@@ -82,6 +82,12 @@ _RECONNECT_ATTEMPTS = 5
 _RECONNECT_BASE_S = 1.0
 _RECONNECT_MAX_S = 8.0
 
+# Background upgrade of the metadata fallback to a real tap: probe soon after
+# falling back (the MA stream is usually ready within a couple of seconds), then
+# back off so a genuinely tap-less player settles to an occasional check.
+_META_UPGRADE_START_S = 3.0
+_META_UPGRADE_MAX_S = 60.0
+
 
 def _circular_distance(a: float, b: float, period: float) -> float:
     """Smallest distance between two phases on a cyclic timeline of ``period``."""
@@ -217,6 +223,10 @@ class SyncSession:
         self._last_beatgrid: BeatGrid | None = None
         self._beat_anchor: float | None = None  # stable downbeat ref for the card
         self._last_publish = 0.0
+        # Background probe that upgrades the metadata fallback to a real tap.
+        self._upgrade_task: asyncio.Task | None = None
+        self._upgrade_at = 0.0
+        self._upgrade_interval = _META_UPGRADE_START_S
 
     @property
     def settings(self) -> AreaSettings:
@@ -281,19 +291,28 @@ class SyncSession:
         if self._settings.colour not in (ColorScheme.ALBUM_ART, ColorScheme.SONG):
             self._engine.set_scheme(self._settings.colour)
 
-    async def _reset_source(self) -> None:
-        if self._source is not None:
-            await self._source.close()
-            self._source = None
+    def _reset_rhythm_models(self) -> None:
+        """Clear the tempo/structure/track state for a clean re-lock.
+
+        Used whenever the audio timeline jumps under us — a track change, a
+        source reset, or swapping the metadata fallback for a real tap — so the
+        previous track's locked grid can't keep firing stale beats on the new one.
+        """
         self._last_track = None
-        # The rhythm/structure models are about to see a discontinuity (new
-        # track or seek); clear them so the grid re-locks cleanly.
+        self._play_track = None
         self._tempo.reset()
         self._structure.reset()
         self._beat_anchor = None  # downbeat ref is stale after a discontinuity
         self._map_track = None
         self._map_prev_pos = None
         self._map_section = None
+
+    async def _reset_source(self) -> None:
+        await self._cancel_meta_upgrade()
+        if self._source is not None:
+            await self._source.close()
+            self._source = None
+        self._reset_rhythm_models()
 
     def _resolve_player(self) -> str | None:
         if self._settings.media_player:
@@ -315,60 +334,158 @@ class SyncSession:
             _LOGGER.debug("No MA player playing; following %s", playing[0])
         return playing[0] if playing else None
 
-    async def _ensure_source(self) -> bool:
-        if self._source is not None:
-            return True
+    async def _try_open(self, src):
+        """Open one candidate source; return it if it works, else close it.
+
+        Cancellation (a background upgrade probe being torn down) closes the
+        half-opened source before propagating, so a probed ffmpeg never leaks.
+        """
+        try:
+            if await src.open():
+                return src
+        except asyncio.CancelledError:
+            await src.close()
+            raise
+        except Exception:  # noqa: BLE001 - a bad candidate must not abort acquisition
+            _LOGGER.debug(
+                "Source %s failed to open", type(src).__name__, exc_info=True
+            )
+        await src.close()
+        return None
+
+    async def _open_real_source(self):
+        """Open the best *real-audio* source, or None if none is tappable yet.
+
+        The real-audio ladder (everything except the generic metadata fallback):
+          1. Snapcast tap — real, beat-accurate audio off the snapserver. Gated
+             on the player's MA provider so a Sendspin/squeezelite/cast session
+             can't latch onto another room's snapcast stream.
+          2. Music Assistant HTTP tap (any player exposing a stream).
+          3. Offline track-map playback (AirPlay/Cast/Sonos/DLNA/... that report
+             a position and a resolvable per-track URL).
+
+        Pulled out of :meth:`_ensure_source` so it can also run as a background
+        probe that upgrades a metadata fallback the moment a real tap appears.
+        """
         entity_id = self._resolve_player()
         if entity_id is None:
-            return False
-
-        # 1. Snapcast tap (primary for snapcast-backed players): real,
-        # beat-accurate audio straight off the snapserver. Gated on the
-        # player's MA provider — a Sendspin/squeezelite/cast session must never
-        # latch onto some other room's snapcast stream via the resolver's
-        # playing-stream fallback.
+            return None
         if self._snapserver_host and is_snapcast_backed(
             ma_player_provider(self._hass, entity_id)
         ):
             entry = er.async_get(self._hass).async_get(entity_id)
             player_uid = entry.unique_id if entry else None
-            snap = SnapcastSource(
+            snap = await self._try_open(SnapcastSource(
                 self._hass, entity_id, self._snapserver_host, self._ffmpeg, player_uid
-            )
-            if await snap.open():
-                self._source = snap
-                return True
-            await snap.close()
-
-        # 2. Music Assistant HTTP tap (works for players that expose a stream).
-        ma = MusicAssistantSource(
+            ))
+            if snap is not None:
+                return snap
+        ma = await self._try_open(MusicAssistantSource(
             self._hass, entity_id, self._ffmpeg, self._settings.latency_ms
+        ))
+        if ma is not None:
+            return ma
+        return await self._try_open(
+            TrackMapSource(self._hass, entity_id, self._mapper, self._subsonic)
         )
-        if await ma.open():
-            self._source = ma
-            return True
-        await ma.close()
 
-        # 3. Offline track-map playback: no live tap needed at all, so this
-        # covers every remaining player type (AirPlay, Cast, Sonos, DLNA, ...)
-        # that reports a playback position and a resolvable per-track URL.
-        ms = TrackMapSource(self._hass, entity_id, self._mapper, self._subsonic)
-        if await ms.open():
-            self._source = ms
+    async def _ensure_source(self) -> bool:
+        if self._source is not None:
             return True
-        await ms.close()
+        real = await self._open_real_source()
+        if real is not None:
+            self._source = real
+            return True
 
-        # 4. Metadata-driven animation (universal fallback). Remember the track
-        # it opened on, so a track change re-evaluates the better sources.
+        # Metadata-driven animation (universal fallback). It has no real audio,
+        # so schedule a background probe to upgrade to a real tap the moment one
+        # becomes available — at the start of a song (or after a long idle) the
+        # MA stream session is often not ready for a second or two, and without
+        # this the show would stay on the generic animation until the next track
+        # change. Remember the track it opened on so a track change also re-evals.
+        entity_id = self._resolve_player()
+        if entity_id is None:
+            return False
         meta = MetadataSource(self._hass, entity_id)
         if await meta.open():
             _LOGGER.info(
-                "No tappable audio for %s; using metadata-driven sync", entity_id
+                "No tappable audio for %s yet; using metadata-driven sync and "
+                "probing for a real tap", entity_id
             )
             self._source = meta
             self._fallback_track = meta.track_id
+            self._schedule_meta_upgrade()
             return True
         return False
+
+    def _schedule_meta_upgrade(self) -> None:
+        """(Re)arm the background probe that upgrades the metadata fallback."""
+        self._upgrade_interval = _META_UPGRADE_START_S
+        self._upgrade_at = time.monotonic() + self._upgrade_interval
+
+    async def _maybe_upgrade_source(self, now: float) -> None:
+        """Swap a metadata fallback for a real tap once a probe finds one.
+
+        Runs at ~1 Hz from the playing path. The probe itself runs as a
+        background task so the render loop never stalls on an ffmpeg open; on
+        success we hand the show over to the real source and reset the rhythm
+        models for a clean lock. Probe cadence backs off so a genuinely
+        tap-less player settles to an occasional check instead of spinning.
+        """
+        task = self._upgrade_task
+        if task is not None and task.done():
+            self._upgrade_task = None
+            better = None
+            try:
+                better = task.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception:  # noqa: BLE001
+                _LOGGER.debug("Source upgrade probe failed", exc_info=True)
+            if better is not None:
+                if isinstance(self._source, MetadataSource):
+                    _LOGGER.info(
+                        "Upgraded %s from metadata to %s",
+                        self._config.name, type(better).__name__,
+                    )
+                    old = self._source
+                    self._source = better
+                    self._reset_rhythm_models()
+                    await old.close()
+                else:
+                    await better.close()  # source already changed; discard probe
+        if (
+            isinstance(self._source, MetadataSource)
+            and self._upgrade_task is None
+            and now >= self._upgrade_at
+        ):
+            self._upgrade_interval = min(_META_UPGRADE_MAX_S, self._upgrade_interval * 2)
+            self._upgrade_at = now + self._upgrade_interval
+            self._upgrade_task = self._hass.async_create_background_task(
+                self._open_real_source(), f"hue_music_sync_upgrade_{self._config.id}"
+            )
+
+    async def _cancel_meta_upgrade(self) -> None:
+        """Tear down any in-flight upgrade probe (on stop / source reset)."""
+        task = self._upgrade_task
+        self._upgrade_task = None
+        if task is None:
+            return
+        task.cancel()
+        try:
+            result = await task
+        except asyncio.CancelledError:
+            return
+        except Exception:  # noqa: BLE001 - probe teardown errors are non-fatal
+            _LOGGER.debug("Upgrade probe teardown error", exc_info=True)
+            return
+        # The probe had already finished before we cancelled it: close any
+        # real source it produced so its decoder doesn't leak.
+        if result is not None:
+            try:
+                await result.close()
+            except Exception:  # noqa: BLE001
+                pass
 
     async def _run(self) -> None:
         idle_color_phase = 0.0
@@ -433,6 +550,12 @@ class SyncSession:
                         ):
                             await self._reset_source()
                             continue
+                        # …and even on the *same* track, keep probing in the
+                        # background for a real tap and swap it in once ready, so
+                        # a transient at the start of a song (or after a long
+                        # idle) doesn't strand the show on the generic animation.
+                        # This frame still renders; the new source reads next loop.
+                        await self._maybe_upgrade_source(now)
                     # Track change: reset the rhythm/structure models so the
                     # previous song's locked tempo can't keep firing stale beats
                     # on the new one (which read as flashes that don't match the
@@ -933,6 +1056,7 @@ class SyncSession:
         if self._task is not None:
             self._task.cancel()
             self._task = None
+        await self._cancel_meta_upgrade()
         await self._mapper.close()
         if self._source is not None:
             await self._source.close()
