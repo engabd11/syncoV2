@@ -158,6 +158,28 @@ def test_movie_effect_is_flash_free_by_construction():
     assert _count_flashes(fields) == 0
 
 
+# --- anchor recovery after a reset on a dark frame (mode-switch bug) ------
+
+def test_limiter_recovers_from_a_dark_seeded_anchor():
+    # Reproduces the "switch to Intense/Extreme darkens, then High stays dark"
+    # bug: after a mode change the coordinator reset()s the limiter, so the next
+    # frame seeds the anchor. If that frame is dark (the club mode had just gone
+    # black between beats) the anchor was frozen there while the new restrained
+    # mode kept flashing, pinning the room black until a Subtle cycle. The anchor
+    # must instead climb toward the real (bright-peaking) field within ~1 s.
+    safety = FieldSafety()
+    safety.reset()
+    fields = []
+    for i in range(120):  # 3 s at 40 fps
+        v = 0.0 if i == 0 else (1.0 if i % 2 == 0 else 0.05)  # seed dark, then strobe
+        out = safety.process({0: (v, v, v)}, _DT)
+        fields.append(_field_brightness(out))
+    last_second = fields[-40:]
+    assert max(last_second) > 0.4  # recovered to a lit room (not pinned dark)
+    # …while still bounding the flashing to the WCAG ceiling.
+    assert _count_flashes(fields) <= MAX_FLASHES_PER_S * 3 + 1  # ~3/s over 3 s
+
+
 # --- saturated-red guard -------------------------------------------------
 
 def test_red_guard_desaturates_rapid_red_flashing():

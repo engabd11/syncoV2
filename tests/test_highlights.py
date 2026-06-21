@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import colorsys
 
+import pytest
+
 from hue_music_sync.audio.analyzer import AnalysisFrame
 from hue_music_sync.audio.tempo import BeatGrid
 from hue_music_sync.color.palette import get_palette
 from hue_music_sync.const import ColorScheme, SyncMode
 from hue_music_sync.effects.engine import EffectEngine
-from hue_music_sync.effects.modes import ROLE_BASS, ROLE_VOCAL
+from hue_music_sync.effects.modes import MODE_PARAMS, ROLE_BASS, ROLE_VOCAL
 from hue_music_sync.hue.bridge import EntertainmentChannel
 
 _DT = 0.02
@@ -50,15 +52,29 @@ _PATTERN = (1.0, 0.3, 0.55, 0.3)
 
 
 def _play_beat(eng: EffectEngine, accent: float, beat_in_bar: int):
-    """One beat: a pre frame, the tick frame, then decay frames."""
+    """One beat: a pre frame, then the beat's PEAK over its swell, then decay.
+
+    The beat is now a fast smoothed swing (bri_slew), so its brightness peaks a
+    few frames AFTER the tick rather than on it. ``peak[cid]`` is the RGB at each
+    light's brightest moment across the beat + swell window — what "the beat did
+    to that light" — so the brightness assertions read the swing, not one frame.
+    """
     pre = eng.render(_quiet(), _DT, beatgrid=_grid(False, accent=accent,
                                                    beat_in_bar=beat_in_bar))
-    tick = eng.render(_quiet(), _DT, beatgrid=_grid(True, accent=accent,
-                                                    beat_in_bar=beat_in_bar))
-    for _ in range(20):
+    peak = dict(pre)
+    frames = [eng.render(_quiet(), _DT, beatgrid=_grid(True, accent=accent,
+                                                       beat_in_bar=beat_in_bar))]
+    for _ in range(7):  # the swell: brightness ramps up over a few frames
+        frames.append(eng.render(_quiet(), _DT, beatgrid=_grid(False, accent=accent,
+                                                               beat_in_bar=beat_in_bar)))
+    for f in frames:
+        for cid, rgb in f.items():
+            if max(rgb) > max(peak[cid]):
+                peak[cid] = rgb
+    for _ in range(13):  # let it fall back before the next beat
         eng.render(_quiet(), _DT, beatgrid=_grid(False, accent=accent,
                                                  beat_in_bar=beat_in_bar))
-    return pre, tick
+    return pre, peak
 
 
 def _fill_window(eng: EffectEngine, bars: int = 6) -> None:
@@ -80,6 +96,71 @@ def _room_hue_spread(out) -> float:
             d = abs(hues[i] - hues[j])
             spread = max(spread, min(d, 1.0 - d))
     return spread
+
+
+# --- item 2: only audio moves the lights -----------------------------------
+
+def test_no_beat_reactions_without_audio():
+    # A locked grid keeps ticking scheduled beats, but with the audio silent
+    # (energy 0 — a finished/paused track, or a silent gap) the room must NOT
+    # strobe: flashes, colour jumps and waves are all gated on real loudness.
+    eng = EffectEngine(_channels(5))
+    eng.set_mode(SyncMode.EXTREME)
+    silent = AnalysisFrame(
+        bands={n: 0.0 for n in ("sub_bass", "bass", "low_mid", "mid", "high")},
+        energy=0.0,
+    )
+    # Let any prior energy decay out first.
+    for _ in range(40):
+        eng.render(silent, _DT, beatgrid=_grid(False, phase=0.5))
+    colour_before = eng.colour_phase
+    peak = 0.0
+    for b in range(16):  # 16 scheduled beats, all on silent audio
+        out = eng.render(silent, _DT, beatgrid=_grid(True, accent=1.0, beat_in_bar=b % 4))
+        peak = max(peak, max(max(c) for c in out.values()))
+        for k in range(1, 12):
+            out = eng.render(silent, _DT, beatgrid=_grid(False, phase=k / 12.0))
+            peak = max(peak, max(max(c) for c in out.values()))
+    assert peak < 0.05  # the room stays dark — no flashing on silent audio
+    assert eng.colour_phase - colour_before < 0.02  # and the colour doesn't jump
+
+
+def test_metadata_source_emits_no_beats():
+    # The metadata fallback must be ambient-only: no fabricated bass_beat (that
+    # was the "lights strobe with no audio" source). Build a frame the way the
+    # source does and assert it carries no beat.
+    from hue_music_sync.audio.analyzer import AnalysisFrame as _AF
+    # MetadataSource.read_frame returns AnalysisFrame(bands, energy, melbank)
+    # with no beat fields set; emulate the contract it now guarantees.
+    f = _AF(bands={"bass": 0.4}, energy=0.45, melbank=[0.4] * 8)
+    assert f.beat is False and f.bass_beat is False and f.mid_beat is False
+
+
+# --- comfort: beats swing smoothly, not as 1-frame strobes -----------------
+
+@pytest.mark.parametrize("mode", [SyncMode.HIGH, SyncMode.INTENSE, SyncMode.EXTREME])
+def test_beats_swing_smoothly_instead_of_strobing(mode):
+    # Item 1: Intense/Extreme used to slam full-bright in a single frame (a
+    # strobe). The slew limiter must cap each light's per-frame brightness RISE
+    # at bri_slew, so a beat reads as a fast dim<->bright swing, while peaks
+    # still reach bright over the swell.
+    eng = EffectEngine(_channels(5))
+    eng.set_mode(mode)
+    slew = MODE_PARAMS[mode].bri_slew
+    prev = {}
+    worst_rise = 0.0
+    peak = 0.0
+    for b in range(48):
+        for k in range(24):  # ~0.5 s/beat at 50 fps
+            out = eng.render(_quiet(), _DT,
+                             beatgrid=_grid(k == 0, phase=k / 24.0, accent=0.9, beat_in_bar=b % 4))
+            for cid, c in out.items():
+                m = max(c)
+                worst_rise = max(worst_rise, m - prev.get(cid, m))
+                prev[cid] = m
+                peak = max(peak, m)
+    assert worst_rise <= slew + 1e-6  # no harsh single-frame jump
+    assert peak > 0.7  # but beats still swing up to bright
 
 
 # --- selectivity: only standout beats flash --------------------------------

@@ -79,8 +79,13 @@ def _peak_after_kick(manual_only: bool) -> float:
     eng.set_mode(SyncMode.HIGH)
     eng.render(_quiet(), _DT)  # settle
     eng.set_manual_only(manual_only)
-    out = eng.render(_kick(), _DT)
-    return max(max(c) for c in out.values())
+    # The beat is a slew-limited swing now, peaking a few frames after the tick;
+    # take the peak over the kick + swell window.
+    peak = max(max(c) for c in eng.render(_kick(), _DT).values())
+    for _ in range(7):
+        out = eng.render(_quiet(), _DT)
+        peak = max(peak, max(max(c) for c in out.values()))
+    return peak
 
 
 def test_manual_only_suppresses_the_automatic_kick_flash():

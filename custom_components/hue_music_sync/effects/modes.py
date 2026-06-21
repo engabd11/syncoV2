@@ -32,17 +32,16 @@ The ladder — same pattern throughout, each rung harder, darker and more unifie
 * **High** — the one mode that keeps the per-instrument SPATIAL split: bass
   lights snap on kicks, guitar lights pop on mid onsets, vocal lights shimmer
   with the singing; roles rotate every few bars.
-* **Intense** — *unrestrained* but **atmospheric**: a unified room that breathes
-  with the song's energy and grooves on the beat with slower, smoother motion
-  than Extreme (longer flash glow, gentler colour drift, a soft spatial
-  gradient, slow fade), so it suits downtempo / ambient-leaning albums while
-  keeping the rhythm. Only the standout beats slam; ordinary beats pulse softly.
+* **Intense** — *unrestrained*: the same fast dim<->bright SWING as Extreme —
+  the room brightens on the beat over a few frames (a slew-limited swell, not a
+  1-frame strobe) and the colour shifts each hit — but with a HIGHER dark FLOOR
+  so it keeps a soft glow in the gaps instead of going black. The floor is the
+  deliberate, only-real difference from Extreme: gentler, more comfortable.
   Eye-safety limiter bypassed (see safety docs).
-* **Extreme** — *unrestrained* maximum club: the whole room rides the energy
-  from near-black in the quiet parts to full brightness in the loud ones, every
-  beat detonates all the lamps like a firework and snaps back fastest (widest
-  dark<->bright range, quickest reaction of the ladder), the colour jumping the
-  spectrum each hit. Goes truly dark in the gaps and on breakdowns.
+* **Extreme** — *unrestrained* maximum club: the same quick swing, but a TRUE
+  dark room (floor 0) — the quiet parts go black and every beat brightens the
+  whole room out of the dark, colour jumping the spectrum each hit. Widest
+  dark<->bright range of the ladder; still a smooth swell, never a strobe.
 """
 
 from __future__ import annotations
@@ -72,6 +71,11 @@ class ModeParams:
     bri_decay: float = 0.24  # per-frame brightness fall rate (lower = gentler)
     flash_decay: float = 0.80  # per-frame fade of the beat-flash burst (lower =
     #                            snappier, more strobe-like firework fall)
+    bri_slew: float = 1.0      # max emitted brightness RISE per frame: 1.0 =
+    #                            instant snap (a strobe); lower turns each beat
+    #                            into a fast dim<->bright SWING (≈full in
+    #                            1/bri_slew frames, e.g. 0.22 ≈ 90 ms at 50 fps).
+    #                            Falls are unlimited, so the room still dims fast.
     # --- 3D spatial choreography (0 = off, keeps the flat/legacy look) -------
     wave_gain: float = 0.0     # brightness from beat wavefronts sweeping the room
     wave_speed: float = 1.8    # wavefront speed (normalised room-units / second)
@@ -169,54 +173,52 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         wave_gain=0.55, wave_speed=2.2, wave_width=0.32,
         anticipation_ms=80, drop_boost=0.60, build_desat=0.45,
         role_mix=(0.4, 0.3, 0.3), mid_gain=1.0, mid_threshold=1.25,
-        vocal_dim=0.05, role_rotate_beats=16, hard_snap=True, flash_decay=0.78,
+        vocal_dim=0.05, role_rotate_beats=16, hard_snap=True,
+        flash_decay=0.80, bri_slew=0.30,
         highlight_quantile=0.40, weak_pulse=0.16, downbeat_pulse=0.45,
         colour_jump=0.09, colour_spread=0.55, full_room_accent=0.94,
         energy_gain=0.15,
         melbank_gain=0.44, melbank_floor=0.035, colour_flow=0.05, spectral_pop=0.45,
     ),
     # UNRESTRAINED (eye-safety limiter bypassed - explicit user choice, see
-    # effects/safety.py). A UNIFIED but ATMOSPHERIC room tuned for downtempo /
-    # ambient-leaning music (Lumin Rain and similar): it breathes with the song's
-    # energy (energy_gain) over a strong continuous spectrum layer (melbank_gain),
-    # and keeps the beat as a smooth, lingering pulse rather than a frantic strobe
-    # — slower colour drift (low colour_jump), longer flash glow (high
-    # flash_decay) and a gentle fade (low bri_decay), with a soft spatial colour
-    # gradient (colour_spread) so it never collapses to Extreme's flat single hue.
-    # Selective: only standout beats slam (higher highlight_quantile), ordinary
-    # beats groove at a softer weak_pulse, so the rhythm reads without strobing.
-    # This is the clear step DOWN in aggression from Extreme (which stays the
-    # frantic, flat-hue, every-beat-detonates maximum).
+    # effects/safety.py). The SAME smooth dim<->bright SWING as Extreme - the
+    # whole room breathes with the energy and brightens on the beat over a few
+    # frames (flash_attack), colour shifting each beat - but with a HIGHER dark
+    # FLOOR so it never drops to full black: a touch gentler and more
+    # comfortable than Extreme while moving the same way. The floor is the
+    # deliberate, only-real difference between the two (per the user): same
+    # quick swing, Intense just keeps a soft glow in the gaps.
     SyncMode.INTENSE: ModeParams(
-        base=0.0, floor=0.04, bass_gain=0.16, beat_gain=1.7, beat_threshold=1.0,
-        spread=0.0, colour_speed=0.045, shimmer=0.0, colour_sat=0.95,
-        colour_beat_step=0.0, colour_lerp=0.40, energy_gain=0.18,
-        bri_attack=1.0, bri_decay=0.30,
-        wave_gain=0.55, wave_speed=2.1, wave_width=0.34,
-        anticipation_ms=90, drop_boost=0.70, build_desat=0.45,
-        role_mix=(1.0, 0.0, 0.0), hard_snap=True, flash_decay=0.80,
-        highlight_quantile=0.32, weak_pulse=0.34, downbeat_pulse=0.60,
-        colour_jump=0.10, colour_spread=0.35, full_room_accent=0.0,
-        melbank_gain=0.42, melbank_floor=0.04, colour_flow=0.05, spectral_pop=0.45,
+        base=0.05, floor=0.10, bass_gain=0.16, beat_gain=1.7, beat_threshold=1.0,
+        spread=0.0, colour_speed=0.05, shimmer=0.0, colour_sat=0.97,
+        colour_beat_step=0.0, colour_lerp=0.55, energy_gain=0.16,
+        bri_attack=1.0, bri_decay=0.40,
+        bri_slew=0.22, flash_decay=0.82,
+        wave_gain=0.55, wave_speed=2.4, wave_width=0.30,
+        anticipation_ms=90, drop_boost=0.80, build_desat=0.50,
+        role_mix=(1.0, 0.0, 0.0), hard_snap=True,
+        highlight_quantile=0.18, weak_pulse=0.42, downbeat_pulse=0.55,
+        colour_jump=0.16, colour_spread=0.22, full_room_accent=0.0,
+        melbank_gain=0.42, melbank_floor=0.06, colour_flow=0.05, spectral_pop=0.45,
     ),
-    # UNRESTRAINED maximum club. The whole room rides the song's energy from
-    # near-black in the quiet parts to FULL brightness in the loud ones (big
-    # energy_gain), and every beat detonates all the lamps at once like a
-    # firework (huge beat_gain, fastest fall). Fastest, widest dark<->bright
-    # range of the ladder; colour jumps hardest. One unified room, no instrument
-    # split - every light reacts.
+    # UNRESTRAINED maximum club. The same quick dim<->bright SWING as Intense,
+    # but a TRUE dark room: floor 0, so the quiet parts go black and every beat
+    # brightens the whole room out of the dark (a fast smoothed swell, no longer
+    # a 1-frame strobe), colour jumping the spectrum each hit. Rides the energy
+    # widest of the ladder; one unified room, no instrument split.
     SyncMode.EXTREME: ModeParams(
-        base=0.0, floor=0.01, bass_gain=0.06, beat_gain=3.2, beat_threshold=1.0,
+        base=0.0, floor=0.0, bass_gain=0.06, beat_gain=1.8, beat_threshold=1.0,
         spread=0.0, colour_speed=0.06, shimmer=0.0, colour_sat=1.0,
-        colour_beat_step=0.0, colour_lerp=0.75, energy_gain=0.07,
-        bri_attack=1.0, bri_decay=0.55,
-        wave_gain=0.50, wave_speed=3.6, wave_width=0.24,
+        colour_beat_step=0.0, colour_lerp=0.65, energy_gain=0.12,
+        bri_attack=1.0, bri_decay=0.42,
+        bri_slew=0.24, flash_decay=0.80,
+        wave_gain=0.50, wave_speed=3.4, wave_width=0.24,
         anticipation_ms=90, drop_boost=1.0, build_desat=0.60,
-        role_mix=(1.0, 0.0, 0.0), hard_snap=True, flash_decay=0.55,
-        accent_floor=0.15, weak_pulse=0.50, downbeat_pulse=0.70,
-        highlight_quantile=0.12, colour_jump=0.22, colour_spread=0.0,
+        role_mix=(1.0, 0.0, 0.0), hard_snap=True,
+        accent_floor=0.15, weak_pulse=0.42, downbeat_pulse=0.65,
+        highlight_quantile=0.16, colour_jump=0.20, colour_spread=0.0,
         full_room_accent=0.0,
-        melbank_gain=0.12, melbank_floor=0.0, colour_flow=0.03, spectral_pop=0.45,
+        melbank_gain=0.14, melbank_floor=0.0, colour_flow=0.03, spectral_pop=0.45,
     ),
 }
 

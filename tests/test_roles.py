@@ -120,6 +120,19 @@ def _bri(out, cid):
     return max(out[cid])
 
 
+def _peak_per_cid(eng, frame, frames: int = 8) -> dict:
+    """Per-channel peak brightness over a beat + its swell.
+
+    Beats are slew-limited swings now (they brighten over a few frames rather
+    than snapping in one), so the per-light effect is the peak across the window.
+    """
+    peak = {cid: max(c) for cid, c in eng.render(frame, _DT).items()}
+    for _ in range(frames - 1):
+        for cid, c in eng.render(_quiet(), _DT).items():
+            peak[cid] = max(peak[cid], max(c))
+    return peak
+
+
 def _role_map(eng):
     return {cid: role for cid, role in eng.roles.items()}
 
@@ -129,11 +142,11 @@ def test_kick_snaps_bass_lights_not_vocal():
     eng.set_mode(SyncMode.HIGH)
     eng.render(_quiet(), _DT)  # establish roles
     roles = _role_map(eng)
-    out = eng.render(_kick(), _DT)
+    peak = _peak_per_cid(eng, _kick())
     bass_cid = next(c for c, r in roles.items() if r == ROLE_BASS)
     vocal_cid = next(c for c, r in roles.items() if r == ROLE_VOCAL)
-    assert _bri(out, bass_cid) > _bri(out, vocal_cid) + 0.25
-    assert _bri(out, bass_cid) > 0.6  # the kick genuinely snaps
+    assert peak[bass_cid] > peak[vocal_cid] + 0.25
+    assert peak[bass_cid] > 0.6  # the kick genuinely snaps
 
 
 def test_guitar_hit_pops_mid_light_only():
@@ -182,8 +195,8 @@ def test_extreme_sub_threshold_onset_stays_dimmer_than_a_big_kick():
     eng = EffectEngine(_channels(4))
     eng.set_mode(SyncMode.EXTREME)
     eng.render(_quiet(), _DT)
-    small = eng.render(_kick(strength=0.6), _DT)  # below the fire floor
+    small = _peak_per_cid(eng, _kick(strength=0.6))  # below the fire floor
     for _ in range(30):
         eng.render(_quiet(), _DT)  # let any response decay
-    big = eng.render(_kick(strength=2.8), _DT)
-    assert max(max(c) for c in big.values()) > max(max(c) for c in small.values()) + 0.3
+    big = _peak_per_cid(eng, _kick(strength=2.8))
+    assert max(big.values()) > max(small.values()) + 0.3

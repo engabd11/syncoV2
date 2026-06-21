@@ -52,6 +52,16 @@ from .spatial import (
 
 _FLASH_DECAY = 0.80  # default per-frame fade of the beat flash (modes override)
 
+# Below this loudness the track is treated as silent: all beat reactions (flash,
+# colour jump, waves) fade out and stop, so only real audio ever moves the
+# lights (a scheduled/stray beat can't strobe a finished or paused track).
+_SILENCE_GATE = 0.12
+# The gate rides a fast-decaying peak-hold of the loudness so it stays high
+# through the gaps between beats (a kick spikes it) but drops within ~0.2 s of
+# the audio actually stopping — much snappier than the slow energy envelope,
+# which is tuned for gentle breathing, not a silence cut-off.
+_GATE_DECAY = 0.85
+
 # Asymmetric band envelope followers (LedFx-style): rise fast on new energy,
 # fall gently, so continuous brightness rides the music instead of jittering.
 _ENV_RISE = 0.55
@@ -143,6 +153,8 @@ class EffectEngine:
         # Smoothed room loudness (asymmetric follower): the whole room brightens
         # and dims with the song's energy contour. Drives the unified modes.
         self._energy_env: float = 0.0
+        # Fast-decaying loudness peak-hold for the silence gate (see _GATE_DECAY).
+        self._loud: float = 0.0
         # Per-bin melbank baseline + transient: the slow EMA tracks each band's
         # sustained level, and the transient is how far the band has jumped above
         # it right now. Every lamp pops on transients in *its* slice of the
@@ -150,6 +162,9 @@ class EffectEngine:
         self._mel_slow: list[float] = []
         self._mel_transient: list[float] = []
         self._light_flash: dict[int, float] = {}
+        # Last emitted per-light brightness, for the rise slew-rate limiter that
+        # turns a beat into a fast SWING instead of a 1-frame strobe (bri_slew).
+        self._emit_b: dict[int, float] = {}
         self.roles = {}
         self._role_offset = 0
         self._beats_seen = 0
@@ -168,6 +183,8 @@ class EffectEngine:
         # passages, so the whole room follows the rhythm of the song.
         a = _ENV_RISE if frame.energy > self._energy_env else _ENV_FALL
         self._energy_env += (frame.energy - self._energy_env) * a
+        # Fast peak-hold for the silence gate.
+        self._loud = max(frame.energy, self._loud * _GATE_DECAY)
 
     @property
     def energy_env(self) -> float:
@@ -396,6 +413,7 @@ class EffectEngine:
         frame: AnalysisFrame,
         beatgrid: BeatGrid | None,
         vis_strength: float,
+        gate: float = 1.0,
     ) -> None:
         """Launch a beat wavefront, anticipating the beat when tempo is locked.
 
@@ -433,6 +451,7 @@ class EffectEngine:
             knee = accent_knee(vis_strength, p.beat_threshold)
             if knee > 0.2:
                 strength = min(1.5, (0.5 + vis_strength) * knee)
+        strength *= gate  # silence gate: no wavefronts without audio (item 2)
         if strength <= 0.0:
             return
         bass = max(frame.bands.get("sub_bass", 0.0), frame.bands.get("bass", 0.0))
@@ -464,6 +483,12 @@ class EffectEngine:
         p = self.active_params
         self._update_env(frame)
         self._update_mel_transient(frame)
+        # Silence gate (item 2 — only audio moves lights): the smoothed room
+        # loudness fades out on a paused / finished / silent track, so every
+        # beat reaction (flash, colour jump, wavefront) fades with it and stops
+        # entirely in silence. A scheduled or stray beat can never strobe a
+        # quiet room. The continuous melbank layer is gated the same way.
+        music_gate = min(1.0, self._loud / _SILENCE_GATE) if _SILENCE_GATE > 0 else 1.0
         # Refresh the instrument-role assignments (rotate on schedule + drops).
         self._update_roles(p, frame, beatgrid, structure)
         # One decision for everything visible: the scheduled beat (locked) or
@@ -488,7 +513,8 @@ class EffectEngine:
                 or (not grid_locked)
                 or (beatgrid is not None and beatgrid.predicted_beat)
             )
-            highlight = self._beat_highlight(p, acc_now, append=beat_now)
+            # Don't let silence-frame "beats" pollute the highlight ranking.
+            highlight = self._beat_highlight(p, acc_now, append=beat_now and music_gate > 0.5)
         # Mid (guitar/snare) onsets from their own dedicated detector stream.
         # They only ever reach the mid-role lights, so they read as "that light
         # is the guitar". When the grid is locked they're quantised to the
@@ -506,12 +532,17 @@ class EffectEngine:
         # with highlights jumping further still, so the colour reads as the
         # beat. Between beats it holds (only a slow drift). Legacy modes keep
         # the fluid continuous roll (the Hue+Spotify look).
-        self.colour_phase += p.colour_speed * dt
+        # All colour motion is gated by the silence gate (item 2): the slow
+        # drift and the loudness-scaled flow both freeze when the audio stops,
+        # so a paused/finished/silent track holds its colour instead of drifting.
+        self.colour_phase += p.colour_speed * dt * music_gate
         # Continuous, loudness-scaled colour drift (LedFx-style): colour keeps
         # moving with the music between beats, so the show never freezes when no
         # beat is detected or the grid is unlocked. Beat colour-jumps add on top.
         if p.colour_flow > 0.0:
-            self.colour_phase += p.colour_flow * (0.25 + 0.75 * frame.energy) * dt
+            self.colour_phase += (
+                p.colour_flow * (0.25 + 0.75 * frame.energy) * dt * music_gate
+            )
         sect = 0.6 + 0.4 * self.section_level
         rolling = (
             beatgrid is not None
@@ -526,8 +557,9 @@ class EffectEngine:
         elif p.colour_jump > 0.0:
             if beat_now:
                 # Every beat jumps; highlights jump ~1.7x so the standout hits
-                # land the biggest hue change.
-                step = p.colour_jump * (0.55 + 0.45 * acc_now)
+                # land the biggest hue change. Scaled by the silence gate so the
+                # colour stops moving when the audio stops.
+                step = p.colour_jump * (0.55 + 0.45 * acc_now) * music_gate
                 if highlight:
                     step *= 1.7
                 self.colour_phase += step * sect
@@ -547,8 +579,9 @@ class EffectEngine:
 
         # Spatial beat wavefronts (predictive when a beat grid is supplied).
         if p.wave_gain > 0.0:
-            if not self.manual_only:  # drum mode: no automatic wavefronts
-                self._spawn_waves(p, frame, beatgrid, vis_strength)
+            # drum mode: no automatic wavefronts; silence: none either.
+            if not self.manual_only and music_gate > 0.0:
+                self._spawn_waves(p, frame, beatgrid, vis_strength, music_gate)
             for w in self._waves:
                 w.advance(dt, decay_tau=0.45)
             self._waves = [w for w in self._waves if not w.dead()]
@@ -572,7 +605,10 @@ class EffectEngine:
                 )
         else:
             kick = kick_flash(p, vis_strength, vis_bass) * flash_scale
-        midf = mid_flash(p, mid_strength)
+        # Silence gate: flashes fade out with the audio and vanish in a gap, so
+        # a finished/paused track never strobes (item 2).
+        kick *= music_gate
+        midf = mid_flash(p, mid_strength) * music_gate
         # The full-room moment: the passage's very biggest hits take EVERY
         # light at once (vocal lights a touch softer), the way the reference
         # shows punctuate a chorus. Ordinary highlights stay role-separated.
@@ -610,6 +646,7 @@ class EffectEngine:
 
         colour_lerp = p.colour_lerp
         attack, decay = p.bri_attack, p.bri_decay
+        slew = p.bri_slew  # max emitted brightness RISE per frame (anti-strobe)
         out: dict[int, RGB] = {}
         for cid, (target_color, target_b) in targets.items():
             overlay = self._light_flash.get(cid, 0.0) + self._swell
@@ -641,7 +678,16 @@ class EffectEngine:
                     )
                     mx = max(nc) or 1.0
                     nc = (nc[0] / mx, nc[1] / mx, nc[2] / mx)
-            # Continuous brightness + sharp flash/swell, then master scaling.
-            b = min(1.0, new_b + overlay) * self.brightness
+            # Continuous brightness + flash/swell, slew-limited so a beat reads
+            # as a fast dim<->bright SWING rather than a 1-frame strobe. The rise
+            # is capped at ``bri_slew`` per frame (≈full in 1/bri_slew frames);
+            # falls pass through freely so the room still dims quickly between
+            # hits. bri_slew == 1.0 keeps the old instant snap (calm modes).
+            b = min(1.0, new_b + overlay)
+            prev_emit = self._emit_b.get(cid, 0.0)
+            if slew < 1.0 and b > prev_emit + slew:
+                b = prev_emit + slew
+            self._emit_b[cid] = b
+            b *= self.brightness
             out[cid] = (nc[0] * b, nc[1] * b, nc[2] * b)
         return out

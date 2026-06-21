@@ -2,10 +2,12 @@
 
 When no real audio is tappable (e.g. playing through a Snapcast/group player MA
 won't expose a stream for), drive the lights from player *metadata* instead:
-gentle LFO-shaped energy + soft periodic pulses, with colours from the current
-album art. Not beat-accurate, but pleasant and universal — it reacts to
-play/pause, track changes and the chosen mode/colour. Mirrors the
-``MusicAssistantSource`` interface (``open`` / ``read_frame`` / ``close``).
+a slow LFO-shaped energy + per-band drift so the colour breathes, with colours
+from the current album art. It deliberately emits **no beats** — fabricating
+flashes with no real audio is exactly the "lights strobe when nothing is
+playing" problem, so beats are left to real-audio sources ("only audio moves
+lights"). Reacts to play/pause, track changes and the chosen mode/colour.
+Mirrors the ``MusicAssistantSource`` interface (``open``/``read_frame``/``close``).
 """
 
 from __future__ import annotations
@@ -21,7 +23,6 @@ from .analyzer import AnalysisFrame
 
 _FPS = 40
 _PERIOD = 1.0 / _FPS
-_PULSE_HZ = 100.0 / 60.0  # soft pulses at ~100 BPM
 
 
 class MetadataSource:
@@ -34,7 +35,6 @@ class MetadataSource:
         self._frames = 0
         self._album_art_url: str | None = None
         self._track_id: str | None = None
-        self._last_pulse = -1
 
     @property
     def entity_id(self) -> str:
@@ -107,23 +107,11 @@ class MetadataSource:
             for i in range(MELBANK_BINS)
         ]
 
-        # Soft, even pulses. These MUST set bass_beat/bass_strength on the live
-        # detector's ~1..3 scale: the engine's visible flashes and colour jumps
-        # all key off bass_beat, so setting only `beat` (the old bug) left the
-        # fallback looking dead.
-        beat = False
-        strength = 0.0
-        pulse_idx = int(t * _PULSE_HZ)
-        if pulse_idx != self._last_pulse:
-            self._last_pulse = pulse_idx
-            beat = True
-            strength = 2.0
-
-        return AnalysisFrame(
-            bands=bands, energy=energy, melbank=melbank,
-            beat=beat, beat_strength=strength,
-            bass_beat=beat, bass_strength=strength,
-        )
+        # NO fabricated beats: metadata has no real audio, and synthesising
+        # flashes here is exactly the "lights move when nothing is playing"
+        # problem. The gentle energy/melbank drift above gives a calm ambient
+        # glow; real beats only ever come from a real-audio source.
+        return AnalysisFrame(bands=bands, energy=energy, melbank=melbank)
 
     async def close(self) -> None:
         return

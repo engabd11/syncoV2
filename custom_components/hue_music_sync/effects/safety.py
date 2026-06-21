@@ -144,10 +144,15 @@ class FieldSafety:
         self._comp += (comp_target - self._comp) * rate
         limiting = self._comp < 0.999
 
-        # The anchor only tracks the field while we are *not* limiting; freezing
-        # it during a strobe keeps it from drifting into the swing (which would
-        # let the compressed field leak small flashes back through).
-        if not limiting:
+        # The anchor tracks the field while we are *not* limiting. While limiting
+        # it may still RISE toward the field but never FALL: a stale-dark anchor
+        # (e.g. seeded on the dark frame right after a mode switch into a club
+        # mode, then frozen while the new mode flashes) would otherwise pin the
+        # room black forever — the user had to cycle through Subtle to recover.
+        # Letting it climb can only *reduce* compression, never create a flash,
+        # so it is safe; freezing it against falling still stops it drifting
+        # *down* into the swing (which would leak dark flashes back through).
+        if not limiting or field > self._ema:
             self._ema += (field - self._ema) * _EMA_ALPHA
 
         # While limiting, pull the field's *temporal swing* toward that anchor two

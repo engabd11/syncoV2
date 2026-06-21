@@ -61,7 +61,10 @@ def test_locked_grid_fires_pulse_without_detected_onset():
     roles = dict(eng.roles)
     bass_cid = next(c for c, r in roles.items() if r == ROLE_BASS)
     before = max(eng.render(_quiet(), _DT, beatgrid=_grid(False, phase=0.9))[bass_cid])
+    # The beat is a slew-limited swing; take its peak over the swell window.
     after = max(eng.render(_quiet(), _DT, beatgrid=_grid(True))[bass_cid])
+    for _ in range(7):
+        after = max(after, max(eng.render(_quiet(), _DT, beatgrid=_grid(False, phase=0.1))[bass_cid]))
     assert after > before + 0.25  # the scheduled pulse landed
 
 
@@ -129,7 +132,7 @@ def test_pulse_weight_downbeat_beats_offbeats():
 def test_pulse_weight_non_highlights_still_tick_in_intense():
     p = MODE_PARAMS[SyncMode.INTENSE]
     # A beat that did NOT rank as a highlight keeps the quiet metronome tick.
-    assert 0.0 < pulse_weight(p, 0.0, 1, highlight=False) < 0.3
+    assert 0.0 < pulse_weight(p, 0.0, 1, highlight=False) < 0.4
     # A ranked highlight always lands a substantial pulse, even if its
     # absolute accent is small (quiet passages still get their hits).
     assert pulse_weight(p, 0.0, 1, highlight=True) > 0.4
@@ -194,9 +197,13 @@ def test_marginal_lock_pulses_smaller_than_solid_lock():
             eng.render(_quiet(), _DT, beatgrid=_grid(False, phase=0.4))
         g = _grid(True)
         g.schedule_strength = weight
-        out = eng.render(_quiet(), _DT, beatgrid=g)
+        # Peak over the beat's slew-limited swell, not the single tick frame.
         bass = [c for c, r in eng.roles.items() if r == ROLE_BASS]
-        return max(max(out[c]) for c in bass)
+        peak = max(max(eng.render(_quiet(), _DT, beatgrid=g)[c]) for c in bass)
+        for _ in range(7):
+            out = eng.render(_quiet(), _DT, beatgrid=_grid(False, phase=0.1))
+            peak = max(peak, max(max(out[c]) for c in bass))
+        return peak
 
     assert pulse_at(1.0) > pulse_at(0.6) + 0.1
 
