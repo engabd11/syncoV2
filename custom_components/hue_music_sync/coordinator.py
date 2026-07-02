@@ -239,6 +239,7 @@ class SyncSession:
         self._map_commit: bool | None = None
         self._play_track: str | None = None  # last track seen by the rhythm models
         self._fallback_track: str | None = None  # track the metadata source opened on
+        self._meta_warned_track: str | None = None  # last track warned about
         self._source: (
             MusicAssistantSource | MetadataSource | SnapcastSource | TrackMapSource | None
         ) = None
@@ -458,6 +459,29 @@ class SyncSession:
             return False
         meta = MetadataSource(self._hass, entity_id)
         if await meta.open():
+            if meta.track_id and meta.track_id != self._meta_warned_track:
+                # Once per track, at WARNING so it survives in the system log:
+                # a track on the generic animation is the #1 "sync doesn't work
+                # on this song" report, and the reason is otherwise invisible.
+                self._meta_warned_track = meta.track_id
+                url = resolve_map_url(self._hass, entity_id, self._subsonic)
+                if url is None:
+                    reason = (
+                        "no per-track stream URL could be resolved from Music "
+                        "Assistant (and no cached track map exists). If this is "
+                        "a library track, set the OpenSubsonic/Navidrome URL + "
+                        "login in the integration options, or run the "
+                        "hue_music_sync.prewarm_library service once"
+                    )
+                else:
+                    reason = (
+                        "offline analysis has not produced a usable track map "
+                        "(failed or still pending); see earlier log entries"
+                    )
+                _LOGGER.warning(
+                    "%s: track %r is using the generic metadata animation — %s",
+                    self._config.name, meta.track_id, reason,
+                )
             _LOGGER.info(
                 "No tappable audio for %s yet; using metadata-driven sync and "
                 "probing for a real tap", entity_id

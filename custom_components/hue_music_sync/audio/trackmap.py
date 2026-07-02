@@ -1100,35 +1100,59 @@ class TrackMapper:
             return  # disk probe / analysis hand-off already underway
         self._ensuring.add(track_id)
         self._spawn(
-            self._ensure_async(track_id, url),
+            self._ensure_task(track_id, url),
             f"hue_music_sync_mapload_{track_id[:24]}",
         )
 
-    async def _ensure_async(self, track_id: str, url: str | None) -> None:
+    async def ensure_ready(self, track_id: str | None, url: str | None) -> "TrackMap | None":
+        """Awaitable :meth:`ensure`: probe the disk cache *now* and return the map.
+
+        For callers that need the answer in-line (``TrackMapSource.open`` deciding
+        between track-map and metadata playback for a cached single track). Returns
+        the usable map when one is in memory or on disk; otherwise kicks background
+        analysis exactly like :meth:`ensure` and returns None.
+        """
+        if not track_id:
+            return None
+        tm = self.get(track_id)
+        if tm is not None:
+            return tm
+        if track_id not in self._ensuring:
+            self._ensuring.add(track_id)
+            try:
+                await self._ensure_async(track_id, url)
+            finally:
+                self._ensuring.discard(track_id)
+        return self.get(track_id)
+
+    async def _ensure_task(self, track_id: str, url: str | None) -> None:
         try:
-            disk = await asyncio.get_running_loop().run_in_executor(
-                None, self._load_disk, track_id
-            )
-            if disk is not None:
-                self._cache[track_id] = disk
-                self._cache.move_to_end(track_id)
-                while len(self._cache) > self._max_cache:
-                    self._cache.popitem(last=False)
-                self._failures.pop(track_id, None)
-                return
-            if not url:
-                return
-            f = self._failures.get(track_id)
-            if f and (f.permanent or time.monotonic() < f.retry_at):
-                return  # permanently failed, or waiting out the retry backoff
-            if self._task is not None and not self._task.done():
-                return  # one analysis at a time; retried on the next track poll
-            self._inflight = track_id
-            self._task = self._spawn(
-                self._analyze(track_id, url), f"hue_music_sync_trackmap_{track_id[:24]}"
-            )
+            await self._ensure_async(track_id, url)
         finally:
             self._ensuring.discard(track_id)
+
+    async def _ensure_async(self, track_id: str, url: str | None) -> None:
+        disk = await asyncio.get_running_loop().run_in_executor(
+            None, self._load_disk, track_id
+        )
+        if disk is not None:
+            self._cache[track_id] = disk
+            self._cache.move_to_end(track_id)
+            while len(self._cache) > self._max_cache:
+                self._cache.popitem(last=False)
+            self._failures.pop(track_id, None)
+            return
+        if not url:
+            return
+        f = self._failures.get(track_id)
+        if f and (f.permanent or time.monotonic() < f.retry_at):
+            return  # permanently failed, or waiting out the retry backoff
+        if self._task is not None and not self._task.done():
+            return  # one analysis at a time; retried on the next track poll
+        self._inflight = track_id
+        self._task = self._spawn(
+            self._analyze(track_id, url), f"hue_music_sync_trackmap_{track_id[:24]}"
+        )
 
     def _analysis_lock(self) -> "asyncio.Lock":
         return _global_analysis_lock()

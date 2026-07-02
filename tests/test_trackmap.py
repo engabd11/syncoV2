@@ -169,6 +169,42 @@ def test_ensure_loads_from_disk_even_without_a_url(map_120: TrackMap, tmp_path):
     assert len(spawned) == 1  # and no analysis needed
 
 
+def test_ensure_ready_serves_cached_map_inline(map_120: TrackMap, tmp_path):
+    # TrackMapSource.open() awaits ensure_ready() and needs the cached map in
+    # the SAME call — a cached single track must open as track-map playback,
+    # not fall to the metadata animation until a later poll finds the map.
+    import asyncio
+
+    spawned = []
+    mapper = TrackMapper(
+        "ffmpeg",
+        spawner=lambda coro, name: spawned.append((name, coro)) or _DummyTask(),
+        cache_dir=tmp_path,
+    )
+    tid = "single|track|2"
+    mapper._save_disk(tid, map_120)
+    tm = asyncio.run(mapper.ensure_ready(tid, None))
+    assert tm is not None and tm.usable
+    assert spawned == []  # disk hit resolved inline: no probe, no analysis
+    assert mapper.get(tid) is not None
+
+
+def test_ensure_ready_kicks_analysis_when_uncached(map_120: TrackMap, tmp_path):
+    import asyncio
+
+    spawned = []
+    mapper = TrackMapper(
+        "ffmpeg",
+        spawner=lambda coro, name: spawned.append((name, coro)) or _DummyTask(),
+        cache_dir=tmp_path,
+    )
+    tm = asyncio.run(mapper.ensure_ready("never|seen|1", "http://lib/x"))
+    assert tm is None  # not ready yet — analysis runs in the background
+    [(name, coro)] = spawned
+    assert "trackmap" in name  # the analysis task was chained
+    coro.close()
+
+
 class _DummyTask:
     def __init__(self, coro=None):
         if coro is not None:

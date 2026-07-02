@@ -153,6 +153,15 @@ def resolve_map_url(
         uri = getattr(media, "uri", None) if media else None
         if isinstance(uri, str) and uri.startswith(("http://", "https://")):
             return uri
+        # The queue item's library media item carries the provider mappings —
+        # the same data the library pre-warm builds its URLs from. This covers
+        # sessions whose streamdetails expose neither a path nor a provider
+        # item id (some player/session types resolve the stream provider-side),
+        # which otherwise silently land every track on the metadata animation.
+        media_item = getattr(item, "media_item", None) if item is not None else None
+        lib = library_track_url(media_item, subsonic)
+        if lib:
+            return lib
         # Auto-discover a decodable URL MA exposes elsewhere (provider stream
         # URL not on .path, e.g. OpenSubsonic). Skip the album-art image url.
         art = getattr(media, "image_url", None) if media else None
@@ -234,6 +243,10 @@ def resolve_next_map(
             url = _subsonic_candidate(sd, subsonic)
         if url is None and isinstance(uri, str) and uri.startswith(("http://", "https://")):
             url = uri
+        if url is None:
+            # Same library-mapping fallback as resolve_map_url, so the
+            # next-track prefetch works on sessions without streamdetails too.
+            url = library_track_url(media_item, subsonic)
         if url is None:
             return None
         signature = track_signature(
