@@ -96,19 +96,24 @@ def test_load_handles_a_corrupt_file(tmp_path):
 
 def test_mapper_loads_from_disk_without_reanalysing(map_120: TrackMap, tmp_path):
     # Pre-seed the disk cache, then a fresh mapper must serve the map from disk
-    # via ensure() and NEVER spawn an analysis task.
+    # via ensure() (an off-loop disk probe) and NEVER spawn an analysis task.
+    import asyncio
+
     spawned = []
     mapper = TrackMapper(
         "ffmpeg",
-        spawner=lambda coro, name: spawned.append(name) or _DummyTask(coro),
+        spawner=lambda coro, name: spawned.append((name, coro)) or _DummyTask(),
         cache_dir=tmp_path,
     )
     tid = "artist|title|1"
     mapper._save_disk(tid, map_120)
     assert mapper.has_disk(tid)
     assert mapper.get(tid) is None  # not in memory yet
-    mapper.ensure(tid, "http://example/stream")  # loads from disk, no analysis
-    assert spawned == []  # crucially: no analysis was kicked off
+    mapper.ensure(tid, "http://example/stream")
+    [(name, coro)] = spawned  # exactly one task: the disk probe, not analysis
+    assert "mapload" in name
+    asyncio.run(coro)  # run the probe; a disk hit must not chain an analysis
+    assert len(spawned) == 1  # crucially: no analysis was kicked off
     assert mapper.get(tid) is not None  # now served from memory
 
 
@@ -147,22 +152,27 @@ def test_ensure_loads_from_disk_even_without_a_url(map_120: TrackMap, tmp_path):
     # with NO fresh per-track URL (a single ad-hoc track MA won't expose a stream
     # for), ensure() serves it from disk instead of failing to the metadata
     # fallback — TrackMapSource.open() then succeeds and the lights react.
+    import asyncio
+
     spawned = []
     mapper = TrackMapper(
         "ffmpeg",
-        spawner=lambda coro, name: spawned.append(name) or _DummyTask(coro),
+        spawner=lambda coro, name: spawned.append((name, coro)) or _DummyTask(),
         cache_dir=tmp_path,
     )
     tid = "single|track|1"
     mapper._save_disk(tid, map_120)
     mapper.ensure(tid, None)  # no URL at all
+    [(name, coro)] = spawned  # just the disk probe
+    asyncio.run(coro)
     assert mapper.get(tid) is not None  # served from disk
-    assert spawned == []  # and no analysis needed
+    assert len(spawned) == 1  # and no analysis needed
 
 
 class _DummyTask:
-    def __init__(self, coro):
-        coro.close()  # we never run it; just don't leak the coroutine
+    def __init__(self, coro=None):
+        if coro is not None:
+            coro.close()  # we never run it; just don't leak the coroutine
 
     def done(self):
         return True
@@ -302,10 +312,9 @@ class _FakeTask:
         return True
 
 
-def _spawner(recorder: list[str]):
+def _spawner(recorder: list):
     def spawn(coro, name):
-        coro.close()  # don't actually run analysis in these unit tests
-        recorder.append(name)
+        recorder.append((name, coro))
         return _FakeTask()
     return spawn
 
@@ -344,16 +353,31 @@ def test_success_caches_map_and_clears_prior_failure():
 
 
 def test_ensure_respects_backoff_and_permanence():
-    spawned: list[str] = []
+    import asyncio
+
+    spawned: list = []
+
+    def run_probe() -> list[str]:
+        # ensure() spawns an off-loop disk probe; drive it and report the names
+        # of anything it chained (the analysis task, if any), without actually
+        # running an analysis in these unit tests.
+        name, coro = spawned.pop(0)
+        assert "mapload" in name
+        asyncio.run(coro)
+        names = [n for n, _ in spawned]
+        for _, chained in spawned:
+            chained.close()
+        spawned.clear()
+        return names
+
     m = TrackMapper("ffmpeg", spawner=_spawner(spawned))
     m._record_result("t", "u", MapResult(None, decoded=False))
     m._failures["t"].retry_at = time.monotonic() + 100  # still backing off
     m.ensure("t", "u")
-    assert spawned == []  # must not re-spawn before the backoff elapses
+    assert run_probe() == []  # must not re-spawn before the backoff elapses
     m._failures["t"].retry_at = time.monotonic() - 1  # backoff elapsed
     m.ensure("t", "u")
-    assert spawned == ["hue_music_sync_trackmap_t"]
-    spawned.clear()
+    assert run_probe() == ["hue_music_sync_trackmap_t"]
     m._failures["t"].permanent = True  # given up: never retried again
     m.ensure("t", "u")
-    assert spawned == []
+    assert run_probe() == []

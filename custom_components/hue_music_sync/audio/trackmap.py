@@ -1010,6 +1010,7 @@ class TrackMapper:
         self._spawn = spawner or (lambda coro, name: asyncio.create_task(coro, name=name))
         self._cache: OrderedDict[str, TrackMap] = OrderedDict()  # usable maps only
         self._failures: OrderedDict[str, _Failure] = OrderedDict()
+        self._ensuring: set[str] = set()  # track_ids with a disk probe in flight
         self._max_cache = max_cache
         self._task: asyncio.Task | None = None
         self._inflight: str | None = None
@@ -1088,31 +1089,46 @@ class TrackMapper:
     def ensure(self, track_id: str | None, url: str | None) -> None:
         """Make a map available for ``track_id``: load from disk, else analyse.
 
-        Called ~1 Hz (not in the render path), so a disk hit (the common case
-        once a track has been played/prefetched/pre-warmed) populates the
-        in-memory cache here and analysis is skipped entirely.
+        Called ~1 Hz from the event loop, so the disk read (numpy decompressing
+        a cache file) runs in an executor — it must never block the loop. On a
+        disk hit the map shows up in :meth:`get` on a later poll (typically the
+        very next one); callers already poll, so nothing else changes.
         """
         if not track_id or track_id in self._cache:
             return
-        disk = self._load_disk(track_id)
-        if disk is not None:
-            self._cache[track_id] = disk
-            self._cache.move_to_end(track_id)
-            while len(self._cache) > self._max_cache:
-                self._cache.popitem(last=False)
-            self._failures.pop(track_id, None)
-            return
-        if not url:
-            return
-        f = self._failures.get(track_id)
-        if f and (f.permanent or time.monotonic() < f.retry_at):
-            return  # permanently failed, or waiting out the retry backoff
-        if self._task is not None and not self._task.done():
-            return  # one analysis at a time; retried on the next track poll
-        self._inflight = track_id
-        self._task = self._spawn(
-            self._analyze(track_id, url), f"hue_music_sync_trackmap_{track_id[:24]}"
+        if track_id in self._ensuring:
+            return  # disk probe / analysis hand-off already underway
+        self._ensuring.add(track_id)
+        self._spawn(
+            self._ensure_async(track_id, url),
+            f"hue_music_sync_mapload_{track_id[:24]}",
         )
+
+    async def _ensure_async(self, track_id: str, url: str | None) -> None:
+        try:
+            disk = await asyncio.get_running_loop().run_in_executor(
+                None, self._load_disk, track_id
+            )
+            if disk is not None:
+                self._cache[track_id] = disk
+                self._cache.move_to_end(track_id)
+                while len(self._cache) > self._max_cache:
+                    self._cache.popitem(last=False)
+                self._failures.pop(track_id, None)
+                return
+            if not url:
+                return
+            f = self._failures.get(track_id)
+            if f and (f.permanent or time.monotonic() < f.retry_at):
+                return  # permanently failed, or waiting out the retry backoff
+            if self._task is not None and not self._task.done():
+                return  # one analysis at a time; retried on the next track poll
+            self._inflight = track_id
+            self._task = self._spawn(
+                self._analyze(track_id, url), f"hue_music_sync_trackmap_{track_id[:24]}"
+            )
+        finally:
+            self._ensuring.discard(track_id)
 
     def _analysis_lock(self) -> "asyncio.Lock":
         return _global_analysis_lock()

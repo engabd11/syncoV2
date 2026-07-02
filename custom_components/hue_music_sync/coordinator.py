@@ -82,10 +82,13 @@ _IDLE_FPS = 10
 _IDLE_REOPEN_S = 2.0
 
 # DTLS auto-reconnect: a dropped channel (transient packet loss, bridge hiccup)
-# should recover on its own instead of silently ending the session.
-_RECONNECT_ATTEMPTS = 5
+# should recover on its own instead of silently ending the session. The window
+# must outlast a full bridge reboot / Wi-Fi AP restart (~60-90 s): with 14
+# attempts at 1,2,…,10,10,… s of backoff this keeps trying for ~95 s before
+# giving the area back, instead of quietly ending the show after ~15 s.
+_RECONNECT_ATTEMPTS = 14
 _RECONNECT_BASE_S = 1.0
-_RECONNECT_MAX_S = 8.0
+_RECONNECT_MAX_S = 10.0
 
 # Background upgrade of the metadata fallback to a real tap: probe soon after
 # falling back (the MA stream / queue streamdetails are usually ready within a
@@ -1345,12 +1348,25 @@ class SyncManager:
             ws_broadcast=lambda payload: self.ws_broadcast(area_id, payload),
             ws_active=lambda: self.ws_has_subs(area_id),
         )
-        await session.start()
+        # Register before the (multi-second) handshake: the session's first
+        # publish fires the area-update dispatcher, and a switch reconciling
+        # against an unregistered session would briefly write off/on.
         self._sessions[area_id] = session
+        try:
+            await session.start()
+        except BaseException:
+            self._sessions.pop(area_id, None)
+            raise
 
     def _on_session_finished(self, area_id: str) -> None:
         """A session ended on its own (e.g. lost DTLS); drop it and refresh."""
-        self._sessions.pop(area_id, None)
+        if self._sessions.pop(area_id, None) is not None:
+            name = getattr(self.configs.get(area_id), "name", area_id)
+            _LOGGER.warning(
+                "Music sync for %s ended on its own (DTLS lost beyond the "
+                "reconnect window, or a sync-loop crash — see earlier log "
+                "entries); the switch has been turned off", name,
+            )
         async_dispatcher_send(self.hass, signal_area_update(area_id))
 
     async def stop_area(self, area_id: str) -> None:

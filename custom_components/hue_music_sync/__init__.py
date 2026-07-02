@@ -117,7 +117,13 @@ def _install_card_to_www(hass: HomeAssistant, card_file: "Path") -> str | None:
             with open(dest, "rb") as fh:
                 current = hashlib.sha256(fh.read()).hexdigest()[:12]
         if current != token:
-            shutil.copyfile(card_file, dest)
+            # Stage via a temp file + atomic rename: a dashboard fetching the
+            # card mid-copy must never be served a truncated module (which
+            # parses as a broken script and leaves the card unregistered until
+            # the next full reload).
+            tmp = dest + ".tmp"
+            shutil.copyfile(card_file, tmp)
+            os.replace(tmp, dest)
     except OSError as err:
         _LOGGER.warning("Could not stage the Hue Synco card into www/: %s", err)
         return None
