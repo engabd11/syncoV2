@@ -1196,8 +1196,10 @@ class TrackMapper:
         f.attempts += 1
         if result.decoded:
             # Audio decoded but no usable beat map — re-analysing won't help.
+            # WARNING: this permanently disables track-map sync for the track,
+            # which reads as "this song doesn't react" — it must be visible.
             f.permanent = True
-            _LOGGER.info(
+            _LOGGER.warning(
                 "Track-map analysis produced no usable map for %s "
                 "(decoded but unanalysable); using live/fallback sync", url
             )
@@ -1226,7 +1228,7 @@ class TrackMapper:
         *,
         delay_s: float = 1.0,
         progress=None,
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int, list[tuple[str, str]]]:
         """Analyse + cache every uncached ``(track_id, url)`` one at a time.
 
         A gentle, resumable background sweep of a music library so a track plays
@@ -1235,10 +1237,13 @@ class TrackMapper:
         re-run continues where it left off. The shared analysis lock means a
         live playback analysis takes priority — the pre-warm waits between
         tracks and never decodes two streams at once. Returns
-        ``(analysed, considered)``.
+        ``(analysed, considered, failures)`` where ``failures`` is up to 20
+        ``(url, error)`` samples — a systematically failing library (bad login,
+        wrong URL scheme) must be visible, not silent.
         """
         self._stop_prewarm = False
-        analysed = considered = 0
+        analysed = considered = failed = 0
+        failures: list[tuple[str, str]] = []
         for track_id, url in items:
             if self._stop_prewarm:
                 break
@@ -1257,18 +1262,37 @@ class TrackMapper:
                 result = MapResult(None, decoded=False, error="prewarm crashed")
             self._record_result(track_id, url, result)
             tm = result.track_map
-            if tm is not None and tm.usable and self._cache_dir is not None:
-                try:
-                    await asyncio.get_running_loop().run_in_executor(
-                        None, self._save_disk, track_id, tm
-                    )
-                except Exception:  # noqa: BLE001
-                    _LOGGER.debug("Pre-warm disk save failed for %s", track_id, exc_info=True)
+            if tm is not None and tm.usable:
+                if self._cache_dir is not None:
+                    try:
+                        await asyncio.get_running_loop().run_in_executor(
+                            None, self._save_disk, track_id, tm
+                        )
+                    except Exception:  # noqa: BLE001
+                        _LOGGER.debug(
+                            "Pre-warm disk save failed for %s", track_id, exc_info=True
+                        )
                 analysed += 1
                 if progress is not None:
                     progress(analysed, considered)
+            else:
+                failed += 1
+                err = result.error or (
+                    "decoded but unanalysable" if result.decoded else "unknown error"
+                )
+                if len(failures) < 20:
+                    failures.append((url, err))
+                if failed <= 10:  # first few at WARNING; a broken library must show
+                    _LOGGER.warning(
+                        "Library pre-warm: analysis failed for %s (%s)", url, err
+                    )
+                elif failed == 11:
+                    _LOGGER.warning(
+                        "Library pre-warm: more analysis failures; further ones "
+                        "logged at debug level only"
+                    )
             await asyncio.sleep(delay_s)  # be gentle on CPU + the music library
-        return analysed, considered
+        return analysed, considered, failures
 
     def stop_prewarm(self) -> None:
         """Ask an in-flight :meth:`prewarm` sweep to stop after the current track."""

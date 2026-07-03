@@ -55,6 +55,11 @@ SERVICE_SET_OPTIONS = "set_options"
 SERVICE_PREWARM_LIBRARY = "prewarm_library"
 
 DATA_PREWARM_RUNNING = "prewarm_running"
+DATA_PREWARM_RESUME = "prewarm_resume_scheduled"
+
+# How long after a config entry loads before an interrupted library pre-warm
+# resumes on its own (lets HA finish starting before background analysis).
+PREWARM_RESUME_DELAY_S = 120.0
 
 # switch entity_id -> (SyncManager, area_id), populated by switch entities.
 DATA_AREA_INDEX = "area_index"
@@ -284,6 +289,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "provide the audio stream"
         )
 
+    # A library pre-warm interrupted by a restart resumes on its own (it is
+    # resumable by design: already-cached tracks are skipped). Scheduled once,
+    # delayed so HA finishes starting before background analysis begins.
+    if not hass.data[DOMAIN].get(DATA_PREWARM_RESUME):
+        hass.data[DOMAIN][DATA_PREWARM_RESUME] = True
+
+        async def _resume_prewarm(_now) -> None:
+            if hass.data.get(DOMAIN, {}).get(DATA_PREWARM_RUNNING):
+                return
+            state = await hass.async_add_executor_job(_read_prewarm_state, hass)
+            if state is not None and not state.get("completed"):
+                _LOGGER.info(
+                    "Resuming the interrupted library pre-warm (%s tracks total)",
+                    state.get("total", "?"),
+                )
+                await _start_library_prewarm(hass)
+
+        from homeassistant.helpers.event import async_call_later
+
+        async_call_later(hass, PREWARM_RESUME_DELAY_S, _resume_prewarm)
+
     session = async_get_clientsession(hass)
     ssl_ctx = await hass.async_add_executor_job(_build_ssl_context)
     host = entry.data[CONF_HOST]
@@ -392,6 +418,55 @@ def _register_services(hass: HomeAssistant) -> None:
     )
 
 
+def _prewarm_state_path(hass: HomeAssistant) -> str:
+    import os
+
+    return os.path.join(trackmap_cache_dir(hass), "prewarm_state.json")
+
+
+def _read_prewarm_state(hass: HomeAssistant) -> dict | None:
+    """Blocking (executor). The persisted progress of the library pre-warm."""
+    import json
+
+    try:
+        with open(_prewarm_state_path(hass), encoding="utf-8") as fh:
+            state = json.load(fh)
+        return state if isinstance(state, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _write_prewarm_state(hass: HomeAssistant, state: dict) -> None:
+    """Blocking (executor). Persist pre-warm progress so a restart resumes it."""
+    import json
+    import os
+
+    path = _prewarm_state_path(hass)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(state, fh)
+        os.replace(tmp, path)
+    except OSError:
+        _LOGGER.debug("Could not persist pre-warm state", exc_info=True)
+
+
+def _prewarm_notify(hass: HomeAssistant, message: str) -> None:
+    """Progress/result surface the user can actually see (HA notification)."""
+    hass.async_create_task(
+        hass.services.async_call(
+            "persistent_notification",
+            "create",
+            {
+                "title": "Hue Synco — library analysis",
+                "message": message,
+                "notification_id": "hue_music_sync_prewarm",
+            },
+        )
+    )
+
+
 def _subsonic_cfg(hass: HomeAssistant):
     """(url, user, password) from the first entry that configured a library, or None."""
     for entry in hass.config_entries.async_entries(DOMAIN):
@@ -425,6 +500,12 @@ async def _start_library_prewarm(hass: HomeAssistant) -> None:
     def _progress(done: int, total: int) -> None:
         if done % 25 == 0:
             _LOGGER.info("Library pre-warm progress: %d analysed of %d tracks", done, total)
+            _prewarm_notify(
+                hass,
+                f"Analysing your music library so every song reacts from the "
+                f"first beat: {done} newly analysed (of up to {total} tracks). "
+                f"Runs gently in the background; survives restarts.",
+            )
 
     async def _run() -> None:
         mapper = TrackMapper(
@@ -442,18 +523,57 @@ async def _start_library_prewarm(hass: HomeAssistant) -> None:
                     "/ OpenSubsonic library, set the library URL + login in the "
                     "integration options so stream URLs can be built."
                 )
+                _prewarm_notify(
+                    hass,
+                    "No analysable tracks were found in the Music Assistant "
+                    "library. For a Navidrome/OpenSubsonic library, set the "
+                    "library URL + login in the Hue Synco integration options, "
+                    "then run the `hue_music_sync.prewarm_library` service again.",
+                )
                 return
             total = len(items)
             _LOGGER.info("Library pre-warm starting: %d tracks to consider", total)
-            analysed, _ = await mapper.prewarm(
+            # Mark the sweep in-flight so an HA restart resumes it automatically.
+            await hass.async_add_executor_job(
+                _write_prewarm_state, hass, {"completed": False, "total": total}
+            )
+            analysed, considered, failures = await mapper.prewarm(
                 items, delay_s=1.0, progress=lambda d, _c: _progress(d, total)
+            )
+            interrupted = considered < total  # stop_prewarm() ended it early
+            await hass.async_add_executor_job(
+                _write_prewarm_state,
+                hass,
+                {
+                    "completed": not interrupted,
+                    "total": total,
+                    "analysed": analysed,
+                    "failed": len(failures),
+                },
             )
             _LOGGER.info(
                 "Library pre-warm complete: %d newly analysed of %d tracks "
-                "(the rest were already cached or not analysable)", analysed, total
+                "(the rest were already cached, failed, or not analysable)",
+                analysed, total,
             )
+            skipped = considered - analysed - len(failures)
+            msg = (
+                f"Library analysis finished: {analysed} newly analysed, "
+                f"{max(0, skipped)} already cached or skipped"
+            )
+            if failures:
+                url, err = failures[0]
+                msg += (
+                    f", **{len(failures)}+ failed**. First failure: `{url}` "
+                    f"({err}). If most tracks failed, check the "
+                    f"OpenSubsonic/Navidrome URL + login in the integration "
+                    f"options and re-run `hue_music_sync.prewarm_library`."
+                )
+            else:
+                msg += ". Every analysed song now reacts from the first beat."
+            _prewarm_notify(hass, msg)
         except asyncio.CancelledError:
-            _LOGGER.info("Library pre-warm cancelled")
+            _LOGGER.info("Library pre-warm cancelled; will resume on next start")
         except Exception:  # noqa: BLE001 - never let the sweep crash HA
             _LOGGER.exception("Library pre-warm failed")
         finally:

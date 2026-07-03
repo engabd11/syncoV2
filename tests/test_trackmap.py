@@ -134,17 +134,37 @@ def test_prewarm_analyses_and_caches_then_skips_on_rerun(map_120: TrackMap, tmp_
     items = [("artist|a|1", "http://lib/1"), ("artist|b|2", "http://lib/2")]
 
     mapper = TrackMapper("ffmpeg", cache_dir=tmp_path)
-    analysed, considered = asyncio.run(mapper.prewarm(items, delay_s=0))
-    assert (analysed, considered) == (2, 2)
+    analysed, considered, failures = asyncio.run(mapper.prewarm(items, delay_s=0))
+    assert (analysed, considered, failures) == (2, 2, [])
     assert mapper.has_disk("artist|a|1") and mapper.has_disk("artist|b|2")
     assert seen == ["http://lib/1", "http://lib/2"]
 
     # A fresh mapper over the same library: everything is already on disk.
     seen.clear()
     mapper2 = TrackMapper("ffmpeg", cache_dir=tmp_path)
-    analysed2, considered2 = asyncio.run(mapper2.prewarm(items, delay_s=0))
-    assert (analysed2, considered2) == (0, 2)
+    analysed2, considered2, failures2 = asyncio.run(mapper2.prewarm(items, delay_s=0))
+    assert (analysed2, considered2, failures2) == (0, 2, [])
     assert seen == []  # nothing re-analysed
+
+
+def test_prewarm_reports_failures(map_120: TrackMap, tmp_path, monkeypatch):
+    # A systematically failing library (bad login, wrong URL) must be VISIBLE:
+    # prewarm returns (url, error) samples instead of failing silently.
+    import asyncio
+
+    import hue_music_sync.audio.trackmap as tmmod
+
+    async def fake_build(ffmpeg, url, max_seconds=tmmod._MAX_TRACK_S):
+        if url.endswith("/bad"):
+            return MapResult(None, decoded=False, error="HTTP 401")
+        return MapResult(track_map=map_120, decoded=True)
+
+    monkeypatch.setattr(tmmod, "build_track_map", fake_build)
+    items = [("t|good|1", "http://lib/good"), ("t|bad|2", "http://lib/bad")]
+    mapper = TrackMapper("ffmpeg", cache_dir=tmp_path)
+    analysed, considered, failures = asyncio.run(mapper.prewarm(items, delay_s=0))
+    assert (analysed, considered) == (1, 2)
+    assert failures == [("http://lib/bad", "HTTP 401")]
 
 
 def test_ensure_loads_from_disk_even_without_a_url(map_120: TrackMap, tmp_path):
