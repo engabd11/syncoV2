@@ -526,6 +526,49 @@ def _estimate_tempo(env: np.ndarray) -> tuple[float, float]:
     return bpm, confidence
 
 
+# Beats-on-peaks contrast below this reads as noise (measured: white noise
+# ~2.9, real steady grooves 4.2-5.7); the rescue scales in over the next 1.6.
+_RESCUE_CONTRAST_FLOOR = 3.4
+_RESCUE_CONF_CAP = 0.60
+
+
+def _rescue_confidence(
+    conf: float,
+    env: np.ndarray,
+    beat_frames: np.ndarray,
+    beats: np.ndarray,
+    duration: float,
+) -> float:
+    """Lift a diluted tempo confidence using the tracked beat grid itself.
+
+    Only when the grid looks like a real steady groove: enough beats, a
+    musically-plausible and tight median interval, coverage of most of the
+    track, and — the discriminator the DP tracker's regularising bias cannot
+    fake — beats landing on onset-envelope peaks far above the track mean.
+    Returns the (possibly lifted) confidence; never lowers it.
+    """
+    if beats.size < 16 or duration < 10.0:
+        return conf
+    intervals = np.diff(beats)
+    med = float(np.median(intervals))
+    if med <= 0 or not (60.0 / _MAX_BPM <= med <= 60.0 / _MIN_BPM):
+        return conf
+    mad = float(np.median(np.abs(intervals - med)))
+    if mad / med > 0.12:
+        return conf  # wobbly grid: not a steady groove
+    if (beats[-1] - beats[0]) < 0.6 * duration:
+        return conf  # beats cover too little of the track
+    mean = float(env.mean())
+    if mean <= 1e-9:
+        return conf
+    idx = np.minimum(beat_frames, env.size - 1)
+    contrast = float(env[idx].mean()) / mean
+    rescue = 0.55 * min(1.0, max(0.0, (contrast - _RESCUE_CONTRAST_FLOOR) / 1.6))
+    if rescue <= 0.0:
+        return conf
+    return max(conf, min(_RESCUE_CONF_CAP, conf + rescue))
+
+
 def _track_beats(env: np.ndarray, bpm: float) -> np.ndarray:
     """Ellis dynamic-programming beat tracker; returns beat frame indices.
 
@@ -776,6 +819,15 @@ def _finish_analysis(ex: EnvelopeExtractor) -> TrackMap | None:
     if beat_frames.size < 4:
         return None
     beats = beat_frames.astype(np.float64) * _FRAME_PERIOD
+    # Steady-groove rescue: the normalised autocorrelation dilutes on long
+    # quiet passages / big dynamics, failing perfectly steady grooves (a real
+    # funk track measured 0.29 against the 0.30 usability gate with only a 3%
+    # beat-interval wobble over 4 minutes). The tracked grid itself is better
+    # evidence: when the beats land on strong onset-envelope peaks (contrast
+    # well above the ~2.9 a noise floor produces) and the grid is tight and
+    # covers the track, lift the confidence — capped, so a rescued map never
+    # outranks a true autocorrelation lock.
+    confidence = _rescue_confidence(confidence, env, beat_frames, beats, duration)
     idx = np.minimum(beat_frames, env.size - 1)
     accents_raw = env[idx]
     # Bass-weight each beat's accent (same formula as the live tracker:

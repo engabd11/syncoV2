@@ -361,6 +361,37 @@ def test_silence_returns_none():
     assert analyze_pcm(np.zeros(_SR * 2, dtype=np.float32)) is None
 
 
+def test_steady_groove_rescued_from_diluted_autocorr_confidence(monkeypatch):
+    # The real-world failure (BALTHVS "Ojos Verdes", measured live): a
+    # perfectly steady groove whose normalised autocorrelation confidence
+    # (0.29) fell a hair under the 0.30 usability gate, permanently sending
+    # the song to the dead metadata animation. The grid rescue must lift it:
+    # dense regular beats landing on strong envelope peaks ARE the evidence.
+    import hue_music_sync.audio.trackmap as tmmod
+
+    real = tmmod._estimate_tempo
+
+    def diluted(env):
+        bpm, _conf = real(env)
+        return bpm, 0.29  # simulate the dynamics-diluted confidence
+
+    monkeypatch.setattr(tmmod, "_estimate_tempo", diluted)
+    tm = analyze_pcm(_song(bpm=120.0, seconds=40.0))
+    assert tm is not None
+    assert tm.confidence > 0.30 and tm.usable
+
+
+def test_noise_is_not_rescued():
+    # The rescue must not resurrect noise: the DP tracker regularises beat
+    # intervals even on noise, so the discriminator is beats-on-peaks contrast
+    # (measured ~2.9 on noise vs 4.2+ on real grooves) — below the floor, the
+    # diluted confidence stays as-is and the map stays unusable.
+    rng = np.random.default_rng(7)
+    noise = (rng.standard_normal(_SR * 45) * 0.3).astype(np.float32)
+    tm = analyze_pcm(noise)
+    assert tm is None or not tm.usable
+
+
 # --- TrackMapper retry / failure policy -----------------------------------
 
 class _FakeTask:
