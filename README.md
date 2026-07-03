@@ -1,6 +1,6 @@
 # Hue Synco for Home Assistant
 
-A custom Home Assistant integration that drives **Philips Hue Entertainment areas** in real-time with music from **Music Assistant** — no microphone, no cloud relay. Beat detection, frequency analysis, and spatial choreography stream directly to the bridge over the Hue Entertainment API (~40 Hz, DTLS-encrypted), while a bundled dashboard card visualises everything live.
+A custom Home Assistant integration that drives **Philips Hue Entertainment areas** in real-time with music from **Music Assistant**. Beat detection, frequency analysis, and spatial choreography stream directly to the bridge over the Hue Entertainment API (~40 Hz, DTLS-encrypted), while a bundled dashboard card visualises everything live.
 
 <p align="center">
   <img src="docs/card.png" alt="Hue Synco dashboard card" width="360" />
