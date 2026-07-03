@@ -1300,50 +1300,55 @@ class TrackMapper:
             if self._stop_prewarm:
                 break
             considered += 1
-            if not track_id or not url:
-                continue
-            if track_id in self._cache or self.has_disk(track_id) or self.failed(track_id):
-                continue
             try:
-                async with self._analysis_lock():
-                    result = await build_track_map(self._ffmpeg, url)
-            except asyncio.CancelledError:
-                raise
-            except Exception:  # noqa: BLE001 - one bad track must not stop the sweep
-                _LOGGER.debug("Pre-warm analysis crashed for %s", url, exc_info=True)
-                result = MapResult(None, decoded=False, error="prewarm crashed")
-            self._record_result(track_id, url, result)
-            tm = result.track_map
-            if tm is not None and tm.usable:
-                if self._cache_dir is not None:
-                    try:
-                        await asyncio.get_running_loop().run_in_executor(
-                            None, self._save_disk, track_id, tm
+                if not track_id or not url:
+                    continue
+                if track_id in self._cache or self.has_disk(track_id) or self.failed(track_id):
+                    continue
+                try:
+                    async with self._analysis_lock():
+                        result = await build_track_map(self._ffmpeg, url)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:  # noqa: BLE001 - one bad track must not stop the sweep
+                    _LOGGER.debug("Pre-warm analysis crashed for %s", url, exc_info=True)
+                    result = MapResult(None, decoded=False, error="prewarm crashed")
+                self._record_result(track_id, url, result)
+                tm = result.track_map
+                if tm is not None and tm.usable:
+                    if self._cache_dir is not None:
+                        try:
+                            await asyncio.get_running_loop().run_in_executor(
+                                None, self._save_disk, track_id, tm
+                            )
+                        except Exception:  # noqa: BLE001
+                            _LOGGER.debug(
+                                "Pre-warm disk save failed for %s", track_id, exc_info=True
+                            )
+                    analysed += 1
+                else:
+                    failed += 1
+                    err = result.error or (
+                        "decoded but unanalysable" if result.decoded else "unknown error"
+                    )
+                    if len(failures) < 20:
+                        failures.append((url, err))
+                    if failed <= 10:  # first few at WARNING; a broken library must show
+                        _LOGGER.warning(
+                            "Library pre-warm: analysis failed for %s (%s)", url, err
                         )
-                    except Exception:  # noqa: BLE001
-                        _LOGGER.debug(
-                            "Pre-warm disk save failed for %s", track_id, exc_info=True
+                    elif failed == 11:
+                        _LOGGER.warning(
+                            "Library pre-warm: more analysis failures; further ones "
+                            "logged at debug level only"
                         )
-                analysed += 1
+                await asyncio.sleep(delay_s)  # be gentle on CPU + the music library
+            finally:
+                # Every item counts as progress (cached/skipped ones too), so a
+                # progress surface moves smoothly instead of stalling on a
+                # mostly-cached library.
                 if progress is not None:
                     progress(analysed, considered)
-            else:
-                failed += 1
-                err = result.error or (
-                    "decoded but unanalysable" if result.decoded else "unknown error"
-                )
-                if len(failures) < 20:
-                    failures.append((url, err))
-                if failed <= 10:  # first few at WARNING; a broken library must show
-                    _LOGGER.warning(
-                        "Library pre-warm: analysis failed for %s (%s)", url, err
-                    )
-                elif failed == 11:
-                    _LOGGER.warning(
-                        "Library pre-warm: more analysis failures; further ones "
-                        "logged at debug level only"
-                    )
-            await asyncio.sleep(delay_s)  # be gentle on CPU + the music library
         return analysed, considered, failures
 
     def stop_prewarm(self) -> None:

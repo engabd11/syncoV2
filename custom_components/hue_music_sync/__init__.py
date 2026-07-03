@@ -40,6 +40,7 @@ from .const import (
     CONF_SUBSONIC_USER,
     DOMAIN,
     PLATFORMS,
+    SIGNAL_PREWARM,
     ColorScheme,
     SyncEffect,
     SyncMode,
@@ -56,6 +57,7 @@ SERVICE_PREWARM_LIBRARY = "prewarm_library"
 
 DATA_PREWARM_RUNNING = "prewarm_running"
 DATA_PREWARM_RESUME = "prewarm_resume_scheduled"
+DATA_PREWARM_STATUS = "prewarm_status"
 
 # How long after a config entry loads before an interrupted library pre-warm
 # resumes on its own (lets HA finish starting before background analysis).
@@ -452,6 +454,31 @@ def _write_prewarm_state(hass: HomeAssistant, state: dict) -> None:
         _LOGGER.debug("Could not persist pre-warm state", exc_info=True)
 
 
+def prewarm_status(hass: HomeAssistant) -> dict:
+    """The live library-analysis status shared with the button/sensor entities."""
+    data = hass.data.setdefault(DOMAIN, {})
+    return data.setdefault(
+        DATA_PREWARM_STATUS,
+        {
+            "status": "never run",
+            "running": False,
+            "total": 0,
+            "done": 0,
+            "analysed": 0,
+            "failed": 0,
+            "last_error": None,
+        },
+    )
+
+
+def _prewarm_update(hass: HomeAssistant, **changes) -> None:
+    """Apply status changes and wake every subscribed entity."""
+    from homeassistant.helpers.dispatcher import async_dispatcher_send
+
+    prewarm_status(hass).update(changes)
+    async_dispatcher_send(hass, SIGNAL_PREWARM)
+
+
 def _prewarm_notify(hass: HomeAssistant, message: str) -> None:
     """Progress/result surface the user can actually see (HA notification)."""
     hass.async_create_task(
@@ -491,20 +518,40 @@ async def _start_library_prewarm(hass: HomeAssistant) -> None:
     from .audio.source import library_prewarm_items
     from .audio.trackmap import TrackMapper
 
+    import time as _time
+
     data = hass.data.setdefault(DOMAIN, {})
     if data.get(DATA_PREWARM_RUNNING):
         _LOGGER.info("Library pre-warm is already running")
         return
     data[DATA_PREWARM_RUNNING] = True
+    _prewarm_update(
+        hass, status="finding tracks", running=True,
+        done=0, analysed=0, failed=0, last_error=None,
+    )
 
-    def _progress(done: int, total: int) -> None:
-        if done % 25 == 0:
-            _LOGGER.info("Library pre-warm progress: %d analysed of %d tracks", done, total)
+    throttle = {"sensor": 0.0, "notify": 0.0}
+
+    def _progress(analysed: int, considered: int, total: int) -> None:
+        now = _time.monotonic()
+        # Live sensor: at most ~1/s (skipped cached tracks sweep very fast).
+        if now - throttle["sensor"] >= 1.0 or considered >= total:
+            throttle["sensor"] = now
+            _prewarm_update(hass, done=considered, analysed=analysed)
+        # Notification: a slow secondary surface.
+        if now - throttle["notify"] >= 60.0:
+            throttle["notify"] = now
+            pct = round(100 * considered / max(1, total))
+            _LOGGER.info(
+                "Library pre-warm progress: %d of %d tracks (%d%%), %d newly analysed",
+                considered, total, pct, analysed,
+            )
             _prewarm_notify(
                 hass,
                 f"Analysing your music library so every song reacts from the "
-                f"first beat: {done} newly analysed (of up to {total} tracks). "
-                f"Runs gently in the background; survives restarts.",
+                f"first beat: {pct}% ({considered} of {total} tracks checked, "
+                f"{analysed} newly analysed). Runs gently in the background "
+                f"and survives restarts.",
             )
 
     async def _run() -> None:
@@ -530,15 +577,17 @@ async def _start_library_prewarm(hass: HomeAssistant) -> None:
                     "library URL + login in the Hue Synco integration options, "
                     "then run the `hue_music_sync.prewarm_library` service again.",
                 )
+                _prewarm_update(hass, status="no analysable tracks", running=False)
                 return
             total = len(items)
             _LOGGER.info("Library pre-warm starting: %d tracks to consider", total)
+            _prewarm_update(hass, status="running", total=total)
             # Mark the sweep in-flight so an HA restart resumes it automatically.
             await hass.async_add_executor_job(
                 _write_prewarm_state, hass, {"completed": False, "total": total}
             )
             analysed, considered, failures = await mapper.prewarm(
-                items, delay_s=1.0, progress=lambda d, _c: _progress(d, total)
+                items, delay_s=1.0, progress=lambda a, c: _progress(a, c, total)
             )
             interrupted = considered < total  # stop_prewarm() ended it early
             await hass.async_add_executor_job(
@@ -550,6 +599,17 @@ async def _start_library_prewarm(hass: HomeAssistant) -> None:
                     "analysed": analysed,
                     "failed": len(failures),
                 },
+            )
+            _prewarm_update(
+                hass,
+                status="interrupted" if interrupted else "complete",
+                running=False,
+                done=considered,
+                analysed=analysed,
+                failed=len(failures),
+                last_error=(
+                    f"{failures[0][0]} ({failures[0][1]})" if failures else None
+                ),
             )
             _LOGGER.info(
                 "Library pre-warm complete: %d newly analysed of %d tracks "
@@ -574,8 +634,10 @@ async def _start_library_prewarm(hass: HomeAssistant) -> None:
             _prewarm_notify(hass, msg)
         except asyncio.CancelledError:
             _LOGGER.info("Library pre-warm cancelled; will resume on next start")
+            _prewarm_update(hass, status="interrupted", running=False)
         except Exception:  # noqa: BLE001 - never let the sweep crash HA
             _LOGGER.exception("Library pre-warm failed")
+            _prewarm_update(hass, status="failed — see the log", running=False)
         finally:
             data[DATA_PREWARM_RUNNING] = False
             await mapper.close()

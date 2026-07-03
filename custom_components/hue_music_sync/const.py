@@ -147,7 +147,10 @@ DEFAULT_MODE: Final = SyncMode.HIGH
 DEFAULT_EFFECT: Final = SyncEffect.MUSIC
 DEFAULT_COLOUR: Final = ColorScheme.ALBUM_ART
 
-PLATFORMS: Final = ["switch", "select", "number"]
+PLATFORMS: Final = ["switch", "select", "number", "button", "sensor"]
+
+# Dispatcher signal fired whenever the library pre-warm status changes.
+SIGNAL_PREWARM: Final = f"{DOMAIN}_prewarm_update"
 
 
 def signal_area_update(area_id: str) -> str:
