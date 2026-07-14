@@ -28,6 +28,7 @@ from .audio.ma_stream import is_snapcast_backed
 from .audio.snapcast import SnapcastSource
 from .audio.source import (
     MusicAssistantSource,
+    ha_track_query,
     ma_player_provider,
     resolve_map_url,
     resolve_next_map,
@@ -113,6 +114,12 @@ _MAP_COMMIT_WINDOW_S = 6.0
 def trackmap_cache_dir(hass) -> str:
     """The shared on-disk track-map cache directory (coordinator + pre-warm)."""
     return hass.config.path("hue_music_sync", "trackmaps")
+
+
+def is_ma_player(hass: HomeAssistant, entity_id: str) -> bool:
+    """Whether a media_player entity is provided by the Music Assistant integration."""
+    entry = er.async_get(hass).async_get(entity_id)
+    return entry is not None and entry.platform == "music_assistant"
 
 
 def _circular_distance(a: float, b: float, period: float) -> float:
@@ -247,6 +254,7 @@ class SyncSession:
         self._running = False
         self._stopping = False
         self._last_track: str | None = None
+        self._last_art_url: str | None = None
         self._art_task: asyncio.Task | None = None
         self._delay_buf: deque[tuple[float, dict]] = deque()
         # Now-playing / album-colour / tempo snapshot surfaced on the switch entity
@@ -313,10 +321,17 @@ class SyncSession:
             self._last_safe_t = None
         if settings.colour != prev.colour:
             self._apply_colour()
-            self._last_track = None  # re-extract album art if switching to Album
+            # Re-extract album art if switching to Album (both guards, or the
+            # "same artwork" check below would skip the extraction we want).
+            self._last_track = None
+            self._last_art_url = None
             self._map_section = None  # re-apply Song section palette on next poll
-        if self._source is not None and settings.media_player != prev.media_player:
-            # Player changed: drop current source so the loop re-opens it.
+        if settings.media_player != prev.media_player:
+            # Player changed: drop the current source so the loop re-opens it on
+            # the new one. Unconditional (a no-op without a source) because it
+            # also cancels an in-flight upgrade probe — one opened against the
+            # *old* player would otherwise be installed as the source moments
+            # after the switch.
             self._hass.async_create_task(self._reset_source())
 
     # -- drum-pad (manual beats) ----------------------------------------------
@@ -349,6 +364,7 @@ class SyncSession:
         previous track's locked grid can't keep firing stale beats on the new one.
         """
         self._last_track = None
+        self._last_art_url = None
         self._play_track = None
         self._tempo.reset()
         self._structure.reset()
@@ -369,7 +385,6 @@ class SyncSession:
         if self._settings.media_player:
             return self._settings.media_player
         # Auto-pick a currently-playing player, preferring Music Assistant ones.
-        registry = er.async_get(self._hass)
         playing = [
             s.entity_id
             for s in self._hass.states.async_all("media_player")
@@ -377,8 +392,7 @@ class SyncSession:
         ]
         _LOGGER.debug("Playing media_players: %s", playing)
         for entity_id in playing:
-            entry = registry.async_get(entity_id)
-            if entry is not None and entry.platform == "music_assistant":
+            if is_ma_player(self._hass, entity_id):
                 _LOGGER.debug("Following Music Assistant player %s", entity_id)
                 return entity_id
         if playing:
@@ -421,8 +435,16 @@ class SyncSession:
         entity_id = self._resolve_player()
         if entity_id is None:
             return None
-        if self._snapserver_host and is_snapcast_backed(
-            ma_player_provider(self._hass, entity_id)
+        # The snapcast tap is only ever offered for a Music Assistant player:
+        # ma_player_provider() returns None for anything else, and
+        # is_snapcast_backed(None) is deliberately True, so without this a
+        # followed non-MA player (a Subsonic radio, say) would fall into the
+        # snapserver's "use the playing stream" fallback and sync the lights to
+        # a different room's audio.
+        if (
+            self._snapserver_host
+            and is_ma_player(self._hass, entity_id)
+            and is_snapcast_backed(ma_player_provider(self._hass, entity_id))
         ):
             entry = er.async_get(self._hass).async_get(entity_id)
             player_uid = entry.unique_id if entry else None
@@ -466,12 +488,20 @@ class SyncSession:
                 self._meta_warned_track = meta.track_id
                 url = resolve_map_url(self._hass, entity_id, self._subsonic)
                 if url is None:
+                    # We only get here after TrackMapSource.open() has *awaited*
+                    # the library match and come back empty, so the song genuinely
+                    # isn't matchable — say so, rather than blaming a Subsonic URL
+                    # the user has very likely already set.
+                    query = ha_track_query(self._hass, entity_id)
                     reason = (
                         "no per-track stream URL could be resolved from Music "
-                        "Assistant (and no cached track map exists). If this is "
-                        "a library track, set the OpenSubsonic/Navidrome URL + "
-                        "login in the integration options, or run the "
+                        "Assistant, and the song could not be matched to a track "
+                        "in the Music Assistant library by its title/artist "
+                        "(%r by %r). If it *is* a library track, check that its "
+                        "tags match, set the OpenSubsonic/Navidrome URL + login "
+                        "in the integration options, or run the "
                         "hue_music_sync.prewarm_library service once"
+                        % (query.title, query.artist)
                     )
                 else:
                     reason = (
@@ -892,6 +922,11 @@ class SyncSession:
         src = self._source
         if src is None:
             return
+        if isinstance(src, TrackMapSource):
+            # It owns its own map lifecycle (including the library match that
+            # re-keys the track), and resolve_map_url() here would be resolving
+            # a *different* key than the one it is playing under.
+            return
         track = src.track_id
         if not track or track == self._map_track:
             return
@@ -1038,6 +1073,10 @@ class SyncSession:
             return  # artwork URL not populated for the new track yet; retry later
         # Only now claim the track as handled, since we're actually extracting it.
         self._last_track = track
+        if url == self._last_art_url:
+            return  # same artwork, new track key (a library match re-keyed the
+            # song mid-track): the palette is already the one we'd extract.
+        self._last_art_url = url
         self._art_task = self._hass.async_create_task(self._extract_art(url))
 
     async def _extract_art(self, url: str) -> None:
@@ -1320,6 +1359,59 @@ class SyncManager:
         """
         session = self._sessions.get(area_id)
         return dict(session.public_state) if session is not None else {}
+
+    def player_candidates(self, area_id: str) -> dict:
+        """The players this area may be told to follow (for the card's picker).
+
+        The active Music Assistant players — the short, useful list — plus the
+        pinned and currently-followed players even when they are neither active
+        nor Music Assistant's: a Subsonic radio is not an MA player and must not
+        be missing from its own picker. ``selected`` is None when the area is on
+        the automatic pick (the card offers that as "Auto").
+        """
+        selected = self.get_settings(area_id).media_player
+        following = self.area_attributes(area_id).get("source_player")
+        pinned = {eid for eid in (selected, following) if eid}
+        players: list[dict] = []
+        for state in self.hass.states.async_all("media_player"):
+            entity_id = state.entity_id
+            mass = is_ma_player(self.hass, entity_id)
+            active = state.state in ("playing", "paused")
+            if not ((mass and active) or entity_id in pinned):
+                continue
+            pinned.discard(entity_id)
+            attrs = state.attributes
+            players.append(
+                {
+                    "entity_id": entity_id,
+                    "name": attrs.get("friendly_name") or entity_id,
+                    "state": state.state,
+                    "title": attrs.get("media_title"),
+                    "artist": attrs.get("media_artist"),
+                    "music_assistant": mass,
+                }
+            )
+        # A pinned player that no longer exists still gets an entry, so the card
+        # can show *why* nothing is syncing and let the user pick something else.
+        for entity_id in pinned:
+            players.append(
+                {
+                    "entity_id": entity_id,
+                    "name": entity_id,
+                    "state": "unavailable",
+                    "title": None,
+                    "artist": None,
+                    "music_assistant": False,
+                }
+            )
+        players.sort(
+            key=lambda p: (
+                not p["music_assistant"],
+                p["state"] != "playing",
+                p["name"].lower(),
+            )
+        )
+        return {"players": players, "selected": selected, "following": following}
 
     async def update_settings(self, area_id: str, **changes) -> None:
         current = self.get_settings(area_id)

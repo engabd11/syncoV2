@@ -24,8 +24,9 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 
-from ..const import ANALYSIS_HOP, ANALYSIS_SAMPLE_RATE
+from ..const import ANALYSIS_HOP, ANALYSIS_SAMPLE_RATE, DOMAIN
 from .analyzer import AnalysisFrame, Analyzer
+from .library_match import LibraryEntry, TrackQuery, best_match, build_index, query_key
 from .ma_stream import (
     as_track_list,
     attr_summary,
@@ -44,6 +45,18 @@ _LOGGER = logging.getLogger(__name__)
 _DRIFT_RESYNC_S = 0.5
 _RESYNC_POLL_S = 1.0
 _HOP_BYTES = ANALYSIS_HOP * 2  # s16le mono
+
+# The shared library index (see :class:`MaLibraryIndex`) lives in hass.data.
+DATA_LIBRARY_INDEX = "library_index"
+# Rebuild the index at most this often, and only when a song misses it (a new
+# song can be added to the library at any time; a hit must never pay for that).
+_INDEX_TTL_S = 1800.0
+# Remember "this song is not in the library" this long. Mandatory: the lookup is
+# driven from the ~2 Hz metadata poll, so without it an unmatchable track would
+# re-scan the whole library forever.
+_MISS_TTL_S = 600.0
+
+_MISS = object()  # cached negative result, distinct from "not looked up yet"
 
 
 @dataclass(slots=True)
@@ -327,6 +340,186 @@ async def library_prewarm_items(
         except Exception:  # noqa: BLE001 - skip any malformed item
             _LOGGER.debug("Library pre-warm: skipping a malformed track", exc_info=True)
     return out
+
+
+def _media_item_album(media_item) -> str | None:
+    """Best-effort album name for an MA media item (matches HA media_album_name)."""
+    album = getattr(media_item, "album", None)
+    if album is None:
+        return None
+    if isinstance(album, str):
+        return album
+    name = getattr(album, "name", None)
+    return str(name) if name else None
+
+
+def ha_track_query(hass: HomeAssistant, entity_id: str) -> TrackQuery:
+    """What a Home Assistant player says it is playing, ready for a library match."""
+    state = hass.states.get(entity_id)
+    if state is None:
+        return TrackQuery(None)
+    attrs = state.attributes
+    return TrackQuery(
+        title=attrs.get("media_title"),
+        artist=attrs.get("media_artist") or attrs.get("media_album_artist"),
+        album=attrs.get("media_album_name"),
+        duration=attrs.get("media_duration"),
+    )
+
+
+class MaLibraryIndex:
+    """Find the Music Assistant library track a player is playing, by metadata.
+
+    Everything else here resolves audio through Music Assistant's *player*
+    objects, which is empty for a player MA does not own — a Subsonic radio
+    hitting the same Navidrome server, for instance. Such a player still reports
+    a title/artist/album/duration, so we match that against the MA library and
+    recover the two things that matter:
+
+    * the pre-warm's :func:`track_signature` for the track, so a map the
+      "Analyse library" pass already cached is an immediate hit, and
+    * :func:`library_track_url`, so an un-analysed track can still be analysed.
+
+    The index is built lazily (nothing pays for it until a song actually misses
+    the Music-Assistant-native path), shared per HA instance, and memoises both
+    hits and misses — see the TTLs above.
+    """
+
+    def __init__(self, hass: HomeAssistant, subsonic: SubsonicCfg = None) -> None:
+        self._hass = hass
+        self._subsonic = subsonic
+        self._index: dict[str, list[LibraryEntry]] | None = None
+        self._built_at = 0.0
+        self._lock = asyncio.Lock()
+        self._hits: dict[str, LibraryEntry] = {}
+        self._misses: dict[str, float] = {}
+        self._tasks: dict[str, asyncio.Task] = {}
+
+    @property
+    def subsonic(self) -> SubsonicCfg:
+        return self._subsonic
+
+    def lookup_soon(self, query: TrackQuery) -> LibraryEntry | None:
+        """The memoised match, starting a background lookup when we don't have one.
+
+        Sync, and never blocks. Sources are opened *inline on the render loop* —
+        the same loop that keeps the Hue stream alive between songs — so the first
+        library enumeration (potentially thousands of tracks over the MA API) must
+        not be awaited there. Until the match lands, the song plays on the metadata
+        animation and the coordinator's upgrade probe swaps in track-map playback
+        as soon as it does. The task is owned by the index, not the caller, so a
+        source closing mid-build can't cancel the enumeration everyone is waiting
+        on.
+        """
+        cached = self.cached(query)
+        if cached is not None:
+            return None if cached is _MISS else cached
+        if not query.title:
+            return None
+        key = query_key(query)
+        task = self._tasks.get(key)
+        if task is None or task.done():
+            self._tasks[key] = self._hass.async_create_task(self._lookup_task(key, query))
+        return None
+
+    async def _lookup_task(self, key: str, query: TrackQuery) -> None:
+        try:
+            await self.async_lookup(query)
+        finally:
+            self._tasks.pop(key, None)
+
+    def cached(self, query: TrackQuery):
+        """The memoised result: an entry, ``_MISS``, or None for "not looked up".
+
+        Sync and allocation-cheap, so the ~2 Hz metadata poll can call it.
+        """
+        key = query_key(query)
+        hit = self._hits.get(key)
+        if hit is not None:
+            return hit
+        expires = self._misses.get(key)
+        if expires is not None and time.monotonic() < expires:
+            return _MISS
+        return None
+
+    async def async_lookup(self, query: TrackQuery) -> LibraryEntry | None:
+        """Match a playing song to a library track (building the index if needed)."""
+        if not query.title:
+            return None
+        cached = self.cached(query)
+        if cached is not None:
+            return None if cached is _MISS else cached
+        async with self._lock:
+            # Another caller may have resolved this song while we waited.
+            cached = self.cached(query)
+            if cached is not None:
+                return None if cached is _MISS else cached
+            if self._index is None or time.monotonic() - self._built_at > _INDEX_TTL_S:
+                await self._build()
+            entry = best_match(query, self._index or {})
+            key = query_key(query)
+            if entry is None:
+                self._misses[key] = time.monotonic() + _MISS_TTL_S
+                _LOGGER.debug(
+                    "No Music Assistant library track matches %r by %r (%ss)",
+                    query.title, query.artist, query.duration,
+                )
+                return None
+            self._hits[key] = entry
+            _LOGGER.info(
+                "Matched %r by %r to the library track %s",
+                query.title, query.artist, entry.signature,
+            )
+            return entry
+
+    async def _build(self) -> None:
+        """(Re)enumerate the MA library. Runs under the lock, at most per TTL."""
+        mass = _find_mass_client(self._hass)
+        music = getattr(mass, "music", None) if mass is not None else None
+        if music is None or not hasattr(music, "get_library_tracks"):
+            _LOGGER.debug("Library index: Music Assistant library is not available")
+            self._index = self._index or {}
+            self._built_at = time.monotonic()
+            return
+        entries: list[LibraryEntry] = []
+        async for track in _iter_library_tracks(music):
+            try:
+                artist = _media_item_artist(track)
+                # The SAME signature library_prewarm_items() stores its maps
+                # under — that parity is the whole point of the match.
+                signature = track_signature(
+                    getattr(track, "uri", None), artist, getattr(track, "name", None)
+                )
+                if not signature:
+                    continue
+                entries.append(
+                    LibraryEntry(
+                        signature=signature,
+                        title=getattr(track, "name", None),
+                        artist=artist,
+                        album=_media_item_album(track),
+                        duration=getattr(track, "duration", None),
+                        # May be None: the signature alone can still hit a map
+                        # cached on disk from a Music Assistant playback.
+                        url=library_track_url(track, self._subsonic),
+                    )
+                )
+            except Exception:  # noqa: BLE001 - skip any malformed item
+                _LOGGER.debug("Library index: skipping a malformed track", exc_info=True)
+        self._index = build_index(entries)
+        self._misses.clear()  # a rebuild may well have added the missing songs
+        self._built_at = time.monotonic()
+        _LOGGER.info("Indexed %d Music Assistant library tracks for metadata matching", len(entries))
+
+
+def library_index(hass: HomeAssistant, subsonic: SubsonicCfg = None) -> MaLibraryIndex:
+    """The shared library index, rebuilt if the library credentials changed."""
+    store = hass.data.setdefault(DOMAIN, {})
+    index = store.get(DATA_LIBRARY_INDEX)
+    if index is None or index.subsonic != subsonic:
+        index = MaLibraryIndex(hass, subsonic)
+        store[DATA_LIBRARY_INDEX] = index
+    return index
 
 
 def _ma_player_codec(player) -> str:

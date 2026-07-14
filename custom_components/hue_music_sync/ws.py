@@ -38,6 +38,7 @@ def async_register_ws(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_subscribe)
     websocket_api.async_register_command(hass, ws_tap)
     websocket_api.async_register_command(hass, ws_drum)
+    websocket_api.async_register_command(hass, ws_players)
 
 
 def _resolve_area(hass: HomeAssistant, connection, msg):
@@ -117,6 +118,29 @@ def ws_tap(
         manager, area_id = target
         manager.tap(area_id, msg["group"], msg["strength"])
         connection.send_result(msg["id"])
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/players",
+        vol.Required("entity_id"): str,
+    }
+)
+@callback
+def ws_players(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
+) -> None:
+    """The players this area can follow, for the card's picker.
+
+    Read-only, and the same low-sensitivity, authenticated-user scope as the live
+    feed: every field (entity id, friendly name, state, now-playing title) is
+    already readable from the state machine by any dashboard user. Changing the
+    followed player goes through the ``set_options`` service, not through here.
+    """
+    target = _resolve_area(hass, connection, msg)
+    if target is not None:
+        manager, area_id = target
+        connection.send_result(msg["id"], manager.player_candidates(area_id))
 
 
 @websocket_api.websocket_command(

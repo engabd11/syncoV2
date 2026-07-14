@@ -32,7 +32,8 @@ from homeassistant.util import dt as dt_util
 
 from ..const import ANALYSIS_HOP, ANALYSIS_SAMPLE_RATE, BANDS, LIGHT_PIPELINE_MS, TIMING_BUFFER_MS
 from .analyzer import AnalysisFrame
-from .source import resolve_map_url, track_signature
+from .library_match import LibraryEntry
+from .source import ha_track_query, library_index, resolve_map_url, track_signature
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -66,7 +67,12 @@ class TrackMapSource:
         self._entity_id = entity_id
         self._mapper = mapper
         self._subsonic = subsonic  # (url, user, password) for OpenSubsonic, or None
+        self._lib = library_index(hass, subsonic)
+        # The map key: the matched library track's signature once we know it
+        # (see _apply_library_match), else the player's own signature.
         self._track_id: str | None = None
+        self._ha_track: str | None = None  # what the player itself reports
+        self._native_url: str | None = None  # per-track URL from MA, if it has one
         self._album_art_url: str | None = None
         self._pos = 0.0  # smoothed audible position (PLL clock)
         self._prev_query: float | None = None  # last frame_at position queried
@@ -130,7 +136,8 @@ class TrackMapSource:
             attrs.get("media_artist"),
             attrs.get("media_title"),
         )
-        if track != self._track_id:
+        if track != self._ha_track:
+            self._ha_track = track
             self._track_id = track
             self._prev_query = None
             # Re-anchor the replay clock to the new song immediately (it starts
@@ -138,7 +145,17 @@ class TrackMapSource:
             reported = self._reported_position()
             if reported is not None:
                 self._pos = reported
-            self._ensure_map()
+            # Music Assistant's own per-track URL, if this player has one. When it
+            # doesn't (a player MA doesn't own), matching the song in the MA
+            # library is the only route to its audio — and the only players that
+            # pay for that lookup are the ones that actually need it.
+            self._native_url = resolve_map_url(self._hass, self._entity_id, self._subsonic)
+            if self._native_url:
+                self._mapper.ensure(self._track_id, self._native_url)
+        if self._native_url is None and self._track_id == self._ha_track:
+            # Not (yet) keyed to a library track: the background match may have
+            # landed since the last poll, and this is only a dict lookup.
+            self._apply_library_match()
         pic = attrs.get("entity_picture")
         if pic:
             if pic.startswith(("http://", "https://")):
@@ -147,13 +164,24 @@ class TrackMapSource:
                 base = self._hass.config.internal_url or self._hass.config.external_url or ""
                 self._album_art_url = f"{base.rstrip('/')}{pic}" if base else pic
 
-    def _ensure_map(self) -> None:
-        """Kick background analysis for the current track (cheap if cached)."""
-        if not self._track_id:
-            return
-        url = resolve_map_url(self._hass, self._entity_id, self._subsonic)
-        if url:
-            self._mapper.ensure(self._track_id, url)
+    # -- library matching ----------------------------------------------------
+
+    def _apply_library_match(self) -> LibraryEntry | None:
+        """Key this song by the Music Assistant library track it *is*.
+
+        The signature is the one the library pre-warm analysed under, so a song
+        the "Analyse library" pass has already seen becomes a straight cache hit
+        — whichever player is playing it. Sync and non-blocking: an unknown song
+        only starts the lookup (see :meth:`MaLibraryIndex.lookup_soon`), and the
+        alias lands on a later poll.
+        """
+        if not self._ha_track:
+            return None
+        entry = self._lib.lookup_soon(ha_track_query(self._hass, self._entity_id))
+        if entry is not None:
+            self._track_id = entry.signature
+            self._mapper.ensure(entry.signature, entry.url)
+        return entry
 
     # -- source interface ----------------------------------------------------
 
@@ -176,7 +204,18 @@ class TrackMapSource:
         if self._mapper.failed(self._track_id):
             return False  # analysis already tried and failed for this track
         if self._mapper.get(self._track_id) is None:
-            url = resolve_map_url(self._hass, self._entity_id, self._subsonic)
+            url = self._native_url
+            if url is None:
+                # Music Assistant can't resolve audio for this player (it may not
+                # even be an MA player — a Subsonic radio on the same Navidrome
+                # library, say). The song's library match, once known, yields the
+                # pre-warm's map key *and* a decodable URL, so the same library
+                # track lights up the room whoever is playing it. Still matching?
+                # Then there's nothing to play yet: the metadata animation covers
+                # the song and the coordinator's probe re-opens us once it lands.
+                entry = self._apply_library_match()
+                if entry is not None:
+                    url = entry.url
             # ensure_ready() loads a cached map from disk (awaited, off-loop) even
             # when ``url`` is None, so a previously-played track gets track-map
             # playback as a *single* track too (no queue / no fresh per-track URL

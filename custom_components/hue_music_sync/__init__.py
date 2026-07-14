@@ -375,7 +375,11 @@ def _register_services(hass: HomeAssistant) -> None:
         if CONF_BRIGHTNESS in call.data:
             changes["brightness"] = call.data[CONF_BRIGHTNESS] / 100.0
         if CONF_MEDIA_PLAYER in call.data:
-            changes["media_player"] = call.data[CONF_MEDIA_PLAYER]
+            # An empty value clears the pin and returns the area to auto-picking
+            # whatever is playing. Normalise "" to None so the stored setting has
+            # exactly one "no player" value (an empty string would read as a
+            # change every time and churn a source reset).
+            changes["media_player"] = call.data[CONF_MEDIA_PLAYER] or None
         return changes
 
     async def _activate(call: ServiceCall) -> None:
@@ -401,7 +405,8 @@ def _register_services(hass: HomeAssistant) -> None:
         vol.Optional(CONF_BRIGHTNESS): vol.All(
             vol.Coerce(float), vol.Range(min=5, max=100)
         ),
-        vol.Optional(CONF_MEDIA_PLAYER): cv.entity_id,
+        # "" / None means "no pinned player": follow whatever is playing.
+        vol.Optional(CONF_MEDIA_PLAYER): vol.Any(None, "", cv.entity_id),
     }
     activate_schema = vol.Schema({vol.Required(ATTR_ENTITY_ID): cv.entity_ids, **options_fields})
     deactivate_schema = vol.Schema({vol.Required(ATTR_ENTITY_ID): cv.entity_ids})

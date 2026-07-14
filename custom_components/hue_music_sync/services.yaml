@@ -140,7 +140,9 @@ set_options:
           unit_of_measurement: "%"
     media_player:
       name: Media player
-      description: Media player to follow.
+      description: >-
+        Media player to follow. Leave empty to clear the pin and go back to
+        auto-picking whichever player is playing.
       required: false
       selector:
         entity:
