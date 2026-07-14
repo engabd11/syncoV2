@@ -23,6 +23,8 @@ For Snapcast-backed players the live audio stream is tapped directly; for stream
 ### Audio analysis
 - **Full-track beat tracking** — dynamic-programming beat tracker run offline so beats are pre-located, not guessed in real time
 - **SuperFlux onset detection** — spectral flux on log-compressed magnitudes with vibrato immunity; separate bass/kick, mid/guitar, and broadband streams avoid hi-hat false positives
+- **Salience-proportional reactions** — every flash, wave, and scheduled pulse scales with the sound's *absolute* loudness relative to the track: a quiet pluck gives a small dim pulse, the drop slams full. Tiny sounds can never flash at full brightness, and a locked beat grid stops slamming through breakdowns
+- **Vocal rejection** — onsets are classified by how broadband their spectral flux is: drums splash across the spectrum, sung vowels and sustained tones stay narrow. Narrowband onsets are muted (with a soft knee, per intensity mode) so the lights follow the instruments, not the singing
 - **5-band frequency decomposition** with per-band automatic gain control (normalises loud and quiet tracks to the same 0–1 range)
 - **16-bin melbank** — continuous exponentially-smoothed spectrum spread left-to-right across the room so the show is always alive
 - **Song structure detection** — builds, drops, verses, and choruses are identified; brightness swells on drops, desaturates during builds, breathes during breakdowns
@@ -115,7 +117,16 @@ Each entertainment area gets the following entities:
 | Brightness | Number | Master brightness ceiling (5–100%) |
 | Timing offset | Number | Manual sync trim in milliseconds (-500 to +500) |
 
+Plus, once per installation:
+
+| Entity | Type | Description |
+|---|---|---|
+| Analyse library | Button | Kicks off the background library pre-analysis (same as the `prewarm_library` service) |
+| Library analysis | Sensor | Live progress of the pre-analysis, with failure details in its attributes |
+
 ### Modes
+
+Every mode also sets how *picky* the beat selection is: Subtle reacts only to loud, unambiguous percussion, High is strictly proportional with a firm vocal guard, and Extreme lets nearly everything through (still proportional to loudness). There is no separate sensitivity slider — the mode is the sensitivity.
 
 | Mode | Flash limiter | Character |
 |---|---|---|
@@ -175,7 +186,8 @@ Access via **Settings → Devices & Services → Hue Synco → Configure**:
 ```
 Audio source (Snapcast tap / stream URL / track map)
         ↓
-Real-time analysis (5-band FFT, 16-bin melbank, SuperFlux onsets, tempo)
+Real-time analysis (5-band FFT, 16-bin melbank, SuperFlux onsets, tempo,
+absolute-loudness salience + onset broadbandness for event selection)
         ↓
 Offline track map (beat grid, downbeats, section boundaries — analysed once,
 then cached to disk so the same track plays instantly the next time)
@@ -201,4 +213,5 @@ The DTLS transport is implemented in pure Python — no external OpenSSL depende
 - **One area streaming at a time per bridge** — a single DTLS channel per bridge; multiple bridges each get their own entry
 - **Track analysis takes a moment** — full offline analysis can take 10+ seconds on slower hardware; the fallback runs during this window, then the show upgrades to the real analysis as soon as it is ready (transient failures, e.g. a busy library, are retried automatically, and the next track is pre-analysed for gapless transitions). Run the `prewarm_library` service once to analyse the whole library ahead of time and remove this first-play delay entirely
 - **Playback position granularity** — players that report position coarsely (e.g. Sonos at ~500 ms) reduce track-map timing precision
+- **Cache re-analysis after upgrades** — when an update changes the track-map format, previously analysed tracks re-analyse once in the background on their next play (or in one sweep via `prewarm_library`)
 - **Intense / Extreme strobing** — these modes bypass the flash limiter by design; they are not suitable for anyone with photosensitivity
