@@ -27,6 +27,12 @@ recording) has three parts the high modes deliver together:
 * **A real dark room.** Base brightness is ~0; the chorus is lit by the song's
   own energy, the breakdown goes black, and the flashes punch out of it.
 
+Every rung also applies the **event-salience precision gates** (see
+:func:`event_gates`): flash amplitude follows the frame's absolute
+track-relative loudness (a quiet pluck pulses small, the drop slams full) and
+narrowband onsets (sung vowels, sustained tones) are muted — Subtle picks the
+strictest, Extreme the loosest.
+
 The ladder — same pattern throughout, each rung harder, darker and more unified:
 
 * **Subtle** — no dimming; one gentle spatial gradient, colour drifts + small
@@ -139,6 +145,22 @@ class ModeParams:
     spectral_pop: float = 0.0   # transient pop per lamp from a fresh attack in its
     #                             melbank slice: reacts to EVERY instrument across the
     #                             spectrum (kick/snare/guitar/lead/cymbal), not just roles
+    # --- event-salience precision gates (proportional reactions) --------------
+    # Flash amplitude follows the frame's ABSOLUTE loudness relative to the
+    # track (frame.salience): a quiet pluck gives a small dim pulse, the drop
+    # slams full. gamma shapes the ladder's strictness: >1 compresses quiet
+    # events harder (Subtle), <1 lets them through (Extreme).
+    salience_gamma: float = 1.0
+    salience_floor: float = 0.05  # a real detected beat never renders at literal 0
+    # Detected onsets narrower than width_min across the SuperFlux filterbank
+    # (frame.onset_width — vocals/sustained tones are narrowband, drums are
+    # broadband) are fully muted; a smoothstep knee of width_soft above it
+    # keeps borderline onsets from flickering in and out.
+    width_min: float = 0.0
+    width_soft: float = 0.10
+    # The bass-content weight floor in kick_flash (was a hard-coded 0.4):
+    # how much a bass-less onset may still flash.
+    kick_bass_floor: float = 0.40
 
 
 MODE_PARAMS: dict[SyncMode, ModeParams] = {
@@ -150,6 +172,13 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         spread=0.0, colour_speed=0.04, shimmer=0.0, colour_sat=1.0,
         colour_beat_step=0.008, colour_lerp=0.10, bri_attack=0.12, bri_decay=0.08,
         highlight_quantile=0.0, colour_jump=0.020, colour_spread=1.0,
+        # Width calibration (synthetic measurement, see tests/test_salience.py):
+        # kick with attack click ~0.9, isolated sine kick ~0.49, kicks buried
+        # in a dense noise bed 0.13-0.31, sung-vowel onsets 0.11-0.13. The
+        # ladder brackets that vocal band: Subtle mutes anything not clearly
+        # broadband, High cuts right above the vowel cluster, Extreme keeps
+        # all but the purest tones.
+        salience_gamma=1.6, width_min=0.20,
     ),
     # Gentle club: visible dimming, soft flashes on the stronger beats, album
     # colours stepping each beat across a wide spatial spread. The calmest of
@@ -165,6 +194,7 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         colour_jump=0.045, colour_spread=0.70,
         energy_gain=0.15,
         melbank_gain=0.45, melbank_floor=0.06, colour_flow=0.05, spectral_pop=0.35,
+        salience_gamma=1.3, width_min=0.15, kick_bass_floor=0.30,
     ),
     # The band on your lights: bass lights snap on kicks, guitar lights pop on
     # mid onsets, and vocal lights shimmer dimly with the singing — assignments
@@ -186,6 +216,7 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         colour_jump=0.09, colour_spread=0.55, full_room_accent=0.94,
         energy_gain=0.15,
         melbank_gain=0.44, melbank_floor=0.035, colour_flow=0.05, spectral_pop=0.45,
+        salience_gamma=1.0, width_min=0.12, kick_bass_floor=0.35,
     ),
     # UNRESTRAINED (eye-safety limiter bypassed - explicit user choice, see
     # effects/safety.py). The SAME smooth dim<->bright SWING as Extreme - the
@@ -207,6 +238,7 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         highlight_quantile=0.18, weak_pulse=0.42, downbeat_pulse=0.55,
         colour_jump=0.16, colour_spread=0.22, full_room_accent=0.0,
         melbank_gain=0.42, melbank_floor=0.06, colour_flow=0.05, spectral_pop=0.45,
+        salience_gamma=0.8, width_min=0.08,
     ),
     # UNRESTRAINED maximum club. The same quick dim<->bright SWING as Intense,
     # but a TRUE dark room: floor 0, so the quiet parts go black and every beat
@@ -226,6 +258,7 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         highlight_quantile=0.16, colour_jump=0.20, colour_spread=0.0,
         full_room_accent=0.0,
         melbank_gain=0.14, melbank_floor=0.0, colour_flow=0.03, spectral_pop=0.45,
+        salience_gamma=0.6, width_min=0.05,
     ),
 }
 
@@ -439,6 +472,25 @@ def beat_pulse(
     )
 
 
+def event_gates(p: ModeParams, salience: float, width: float) -> tuple[float, float]:
+    """(amplitude_scale, width_gate) for a detected onset under this mode.
+
+    The two precision gates of the event-selection upgrade. ``amplitude_scale``
+    makes every reaction proportional to the frame's ABSOLUTE loudness within
+    the track (never amplifies — salience saturates at 1): the quiet-intro
+    pluck pulses small, the drop slams. ``width_gate`` mutes detected onsets
+    whose flux is too narrowband to be percussion (sung vowels, sustained
+    tones) through a smoothstep knee so borderline onsets fade rather than
+    flicker. Scheduled grid beats are amplitude-scaled but never width-gated —
+    they were verified by the tempo model, not by this frame's spectrum.
+    """
+    s = max(0.0, min(1.0, salience))
+    amp = max(p.salience_floor, s ** p.salience_gamma)
+    w = (width - p.width_min) / max(1e-6, p.width_soft)
+    w = max(0.0, min(1.0, w))
+    return amp, w * w * (3.0 - 2.0 * w)
+
+
 def accent_knee(strength: float, threshold: float) -> float:
     """Continuous accent gate: 0 below (thr−0.4), 1 above (thr+0.4).
 
@@ -460,7 +512,8 @@ def kick_flash(params: ModeParams, strength: float, bass: float) -> float:
     """
     if strength <= 0.0:
         return 0.0
-    weight = 0.4 + 0.6 * bass  # full on kicks, dimmer on bass-less onsets
+    # Full on kicks, dimmer on bass-less onsets; the floor is per-mode.
+    weight = params.kick_bass_floor + (1.0 - params.kick_bass_floor) * bass
     return (
         params.beat_gain
         * min(1.0, strength / 2.0)

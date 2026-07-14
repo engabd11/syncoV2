@@ -17,6 +17,7 @@ import math
 import random
 
 from ..color.palette import RGB
+from .modes import event_gates
 
 # Fade time constants (seconds) for the burst trail, fastest..slowest intensity.
 # Indexed by the mode's beat_threshold band; resolved in :meth:`_tau` below.
@@ -66,12 +67,19 @@ class FireworksEffect:
             self._state[cid] = (r * fade, g * fade, b * fade)
 
         # Decide whether to ignite new bursts this frame (kick/bass onsets only,
-        # so vocals and hi-hats don't launch fireworks).
+        # so vocals and hi-hats don't launch fireworks). The mode's event gates
+        # apply here too: narrowband (vocal/tonal) onsets are muted and burst
+        # size follows the frame's absolute track-relative loudness, so only
+        # genuinely big hits burst wide.
         self._since_launch += dt
-        qualifying = frame.bass_beat and frame.bass_strength >= params.beat_threshold
+        amp_scale, width_gate = event_gates(
+            params, frame.salience, frame.onset_width
+        )
+        gated = frame.bass_strength * width_gate
+        qualifying = frame.bass_beat and gated >= params.beat_threshold
         if qualifying or self._since_launch >= _AUTO_LAUNCH_S:
             self._since_launch = 0.0
-            strength = frame.bass_strength if qualifying else 1.0
+            strength = gated * amp_scale if qualifying else 1.0
             self._launch(engine, channels, strength, params)
 
         floor = params.floor * 0.25  # faint palette ember so it's never pitch black

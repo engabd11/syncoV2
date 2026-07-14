@@ -72,6 +72,7 @@ def test_track_map_save_load_round_trips(map_120: TrackMap, tmp_path):
     if map_120.features is not None:
         np.testing.assert_allclose(back.features.energy, map_120.features.energy)
         np.testing.assert_allclose(back.features.melbank, map_120.features.melbank)
+        np.testing.assert_allclose(back.features.width, map_120.features.width)
     assert len(back.sections) == len(map_120.sections)
     # A reloaded map drives playback identically (same scheduled frame).
     a = map_120.frame_at(5.0, 4.9)
@@ -468,3 +469,39 @@ def test_ensure_respects_backoff_and_permanence():
     m._failures["t"].permanent = True  # given up: never retried again
     m.ensure("t", "u")
     assert run_probe() == []
+
+
+# --- event-selection evidence on the map path (salience + onset width) -------
+
+def test_features_carry_width_and_frame_at_reports_evidence(map_120: TrackMap):
+    f = map_120.features
+    assert f is not None
+    assert f.width.shape[0] == f.energy.shape[0]  # per-frame, same length
+    assert float(f.width.max()) <= 1.0 and float(f.width.min()) >= 0.0
+    fr = map_120.frame_at(5.0, 4.9)
+    assert fr is not None
+    i = int(5.0 / 0.02)
+    assert fr.salience == pytest.approx(float(f.energy[i]))
+    assert fr.onset_width == pytest.approx(float(f.width[i]))
+
+
+def test_map_salience_is_proportional_across_quiet_and_loud_sections():
+    tm = analyze_pcm(_song(bpm=120.0, seconds=40.0, quiet_until=20.0))
+    assert tm is not None and tm.features is not None
+    e = tm.features.energy
+    n = int(20.0 / 0.02)
+    quiet = float(np.percentile(e[100:n], 95))
+    loud = float(np.percentile(e[n + 100:], 95))
+    assert loud > quiet + 0.2  # the quiet intro replays proportionally dimmer
+
+
+def test_width_filter_drops_narrowband_picks():
+    from hue_music_sync.audio.trackmap import _FRAME_PERIOD, _width_filter
+
+    width = np.full(1000, 0.5)
+    width[490:520] = 0.03  # a narrowband (vocal-like) stretch
+    times = np.array([100, 300, 505]) * _FRAME_PERIOD
+    accents = np.array([0.5, 0.6, 0.9])
+    t2, a2 = _width_filter(times, accents, width)
+    np.testing.assert_allclose(t2, times[:2])
+    np.testing.assert_allclose(a2, accents[:2])

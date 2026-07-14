@@ -15,6 +15,13 @@ onset streams are produced:
   anything *visible* (flashes, waves, colour steps). Vocals and hi-hats live
   above this band, which is exactly why lights keyed to broadband onsets feel
   random on busy music.
+
+On top of detection, each frame carries two pieces of event-selection
+*evidence* the effect engine turns into mode-strict gates: ``salience`` (the
+frame's absolute loudness against a slow track-level reference — the AGC'd
+values are relative, so without it a whisper-quiet passage flashes at full)
+and ``onset_width`` (how broadband the onset flux is — drums splash wide,
+sung vowels and sustained tones stay narrow).
 """
 
 from __future__ import annotations
@@ -60,6 +67,18 @@ class AnalysisFrame:
     # brightness so the room is alive whether or not a beat fires. Empty list
     # means "not computed" (callers fall back to the coarse ``bands``).
     melbank: list[float] = field(default_factory=list)
+    # Event-selection evidence (defaults are neutral so frame producers that
+    # don't compute them behave exactly as before they existed):
+    # Absolute loudness of this frame relative to the track's rolling loud
+    # reference — the AGC'd values above are *relative*, so without this a
+    # whisper-quiet passage looks identical to a drop and tiny sounds flash
+    # at full brightness. 1.0 = as loud as the track gets.
+    salience: float = 1.0
+    # Broadbandness of this frame's onset flux across the SuperFlux filterbank
+    # (normalised inverse participation ratio, 0..1). Drums splash flux across
+    # many bands; a sung vowel or sustained tone concentrates it in a
+    # fundamental plus a few harmonics — the vocal/tone discriminator.
+    onset_width: float = 1.0
 
 
 # SuperFlux parameters, shared with the offline track-map analysis.
@@ -91,6 +110,24 @@ MID_FLUX_SHARE = 0.30
 # never confusing a swell with a hit.
 MID_MAX_ATTACK_FRAMES = 3
 MID_RISE_RATIO = 1.05  # energy growth per frame that still counts as "rising"
+# Absolute-loudness salience: a decaying peak of smoothed raw RMS is the
+# track-level "as loud as it gets" reference (O(1) stand-in for a rolling p95).
+# The ~60 ms pre-smoothing stops one transient spike from setting the
+# reference; the ~46 s half-life makes it track-level rather than
+# phrase-level, so a quiet bridge stays quiet relative to the chorus.
+SALIENCE_DECAY = 0.9997  # loud-ref decay per frame (~46 s half-life at 50 fps)
+SALIENCE_SMOOTH = 0.30  # EMA coefficient on raw RMS (~60 ms)
+# Absolute anchor (~-28 dBFS): a whisper-quiet stream must stay
+# proportionally dim instead of self-normalising up to salience 1.
+SALIENCE_MIN_REF = 0.04
+# Long-horizon floor under the adaptive onset threshold (bass/mid streams
+# only — never the broadband stream, which feeds the tempo tracker). The
+# median+MAD window is ~0.9 s, so in a quiet passage it adapts down until
+# faint residue "beats"; the floor pins it to a fraction of the
+# passage-scale flux peak. Real kicks hit 0.5-1.5x that peak, vocal/vibrato
+# residue in a quiet bridge sits below 0.1x.
+LONG_FLUX_DECAY = 0.9995  # slow per-stream flux peak (~28 s half-life)
+LONG_FLUX_FLOOR_FRAC = 0.20
 
 
 def log_spectrum(mag: np.ndarray) -> np.ndarray:
@@ -265,6 +302,13 @@ class Analyzer:
         self._beat_times: deque[float] = deque(maxlen=8)
         self._frame_index = 0
 
+        # Absolute-loudness salience state (see SALIENCE_* above).
+        self._rms_smooth = 0.0
+        self._loud_ref = SALIENCE_MIN_REF
+        # Slow per-stream flux peaks for the long-horizon threshold floor.
+        self._bass_slow = 0.0
+        self._mid_slow = 0.0
+
     @property
     def frame_period(self) -> float:
         """Seconds represented by one hop/frame."""
@@ -311,6 +355,7 @@ class Analyzer:
                 bands={name: 0.0 for name in self._band_bins},
                 t_audio=t_audio,
                 melbank=melbank,
+                salience=0.0,  # silent frames are maximally non-salient
             )
 
         spectrum = np.fft.rfft(self._buf * self._hann)
@@ -323,6 +368,16 @@ class Analyzer:
             bands[name] = self._agc[name].normalise(np.sqrt(raw))
 
         energy = self._energy_agc.normalise(rms)
+
+        # Absolute salience: smoothed raw RMS against the decaying track-level
+        # loud reference. Rising is instant (the first drop sets the bar), so
+        # early in a track salience ~1 and behaviour degrades gracefully to
+        # the pre-salience one until the reference has heard a loud section.
+        self._rms_smooth += (rms - self._rms_smooth) * SALIENCE_SMOOTH
+        self._loud_ref = max(
+            self._rms_smooth, self._loud_ref * SALIENCE_DECAY, SALIENCE_MIN_REF
+        )
+        salience = min(1.0, self._rms_smooth / self._loud_ref)
 
         onsets = self._detect_onsets(mag)
         flux = self._flux_agc.normalise(onsets["flux"])
@@ -349,6 +404,8 @@ class Analyzer:
             mid_flux=self._mid_flux_agc.normalise(onsets["mid_flux"]),
             mid_beat=onsets["mid_beat"],
             mid_strength=onsets["mid_strength"],
+            salience=salience,
+            onset_width=onsets["width"],
         )
 
     def _melbank(self, mag: np.ndarray) -> list[float]:
@@ -386,6 +443,7 @@ class Analyzer:
                 "beat": False, "strength": 0.0, "flux": 0.0,
                 "bass_beat": False, "bass_strength": 0.0, "bass_flux": 0.0,
                 "mid_beat": False, "mid_strength": 0.0, "mid_flux": 0.0,
+                "width": 1.0,
             }
         # SuperFlux on all three streams: positive increases over the
         # frequency-max-filtered previous frame. Vibrato, slides AND a low
@@ -395,6 +453,15 @@ class Analyzer:
         mf_prev = max_filter_freq(self._prev_log)
         diff = cur - mf_prev
         flux = float(np.sum(diff[diff > 0]))
+        # Onset width: normalised inverse participation ratio of the positive
+        # flux — 1.0 when spread evenly over all bands, 1/n_bands when a
+        # single band carries it. A kick's thump + attack click and a snare
+        # light up 12-25 bands; a vowel onset or a sustained tone getting
+        # louder lights up its fundamental plus a few harmonics.
+        pos = diff[diff > 0.0]
+        s1 = float(np.sum(pos))
+        s2 = float(np.sum(pos * pos))
+        width = (s1 * s1) / (len(diff) * s2) if s2 > 1e-12 else 0.0
         nb, nm = self._n_bass, self._n_mid
         bdiff = diff[:nb]
         bass_flux = float(np.sum(bdiff[bdiff > 0]))
@@ -412,6 +479,11 @@ class Analyzer:
         mid_share = lin_mid / lin_pos if lin_pos > 1e-9 else 0.0
         self._prev_log = cur
         self._prev_lin = lin
+        # Passage-scale flux peaks: the long-horizon floor under the adaptive
+        # thresholds below (bass/mid only — the broadband stream feeds tempo
+        # and must keep firing through quiet bridges).
+        self._bass_slow = max(bass_flux, self._bass_slow * LONG_FLUX_DECAY)
+        self._mid_slow = max(mid_flux, self._mid_slow * LONG_FLUX_DECAY)
 
         beat, strength, self._since_beat = self._threshold_onset(
             flux, self._flux_hist, self._since_beat
@@ -423,7 +495,10 @@ class Analyzer:
         # or snare is mid-dominant — attack splash alone can't cross over.
         if bass_share >= BASS_FLUX_SHARE and bass_share >= mid_share:
             bass_beat, bass_strength, self._since_bass = self._threshold_onset(
-                bass_flux, self._bass_hist, self._since_bass
+                bass_flux,
+                self._bass_hist,
+                self._since_bass,
+                floor=LONG_FLUX_FLOOR_FRAC * self._bass_slow,
             )
         else:  # broadband/treble splash (hi-hat attack), not a bass hit
             bass_beat, bass_strength = False, 0.0
@@ -451,6 +526,7 @@ class Analyzer:
                     self._mid_hist,
                     self._since_mid,
                     require_rising=False,
+                    floor=LONG_FLUX_FLOOR_FRAC * self._mid_slow,
                 )
             else:
                 self._since_mid += 1
@@ -466,10 +542,16 @@ class Analyzer:
             "bass_flux": bass_flux,
             "mid_beat": mid_beat, "mid_strength": mid_strength,
             "mid_flux": mid_flux,
+            "width": width,
         }
 
     def _threshold_onset(
-        self, flux: float, hist: deque[float], since: int, require_rising: bool = True
+        self,
+        flux: float,
+        hist: deque[float],
+        since: int,
+        require_rising: bool = True,
+        floor: float = 0.0,
     ) -> tuple[bool, float, int]:
         """Adaptive median+k·MAD threshold with a refractory, on one flux stream.
 
@@ -485,7 +567,7 @@ class Analyzer:
         arr = np.fromiter(hist, dtype=np.float32)
         med = float(np.median(arr))
         mad = float(np.median(np.abs(arr - med)))
-        threshold = max(med + self._sensitivity * 3.0 * mad, MIN_ONSET_FLUX)
+        threshold = max(med + self._sensitivity * 3.0 * mad, MIN_ONSET_FLUX, floor)
         # Rising edge required (hist[-1] is the previous frame's flux): a real
         # attack is climbing when it crosses; a long decay tail re-crossing the
         # now-lower robust threshold right as the refractory expires is not.
@@ -530,3 +612,10 @@ class Analyzer:
         self._since_beat = self._refractory
         self._since_bass = self._refractory
         self._since_mid = self._refractory
+        # Same rationale as the AGC resets: the loud reference and the flux
+        # floors are track-scale, so a quiet song after a loud one must not
+        # start dim / deaf.
+        self._rms_smooth = 0.0
+        self._loud_ref = SALIENCE_MIN_REF
+        self._bass_slow = 0.0
+        self._mid_slow = 0.0

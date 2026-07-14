@@ -50,6 +50,7 @@ from ..const import (
     MELBANK_BINS,
 )
 from .analyzer import (
+    LONG_FLUX_FLOOR_FRAC,
     AnalysisFrame,
     band_means,
     log_spectrum,
@@ -84,7 +85,14 @@ MIN_MAP_CONFIDENCE = 0.30
 
 # On-disk cache format version: bump when the serialised layout changes so stale
 # files are ignored rather than mis-read. Stored in each .npz's ``meta`` row.
-_CACHE_FORMAT = 1
+# v2: per-frame onset width (``f_width``) + long-horizon floor on mid picks.
+_CACHE_FORMAT = 2
+
+# Offline mid picks narrower than this across the SuperFlux filterbank are
+# dropped as vocal/tonal (see AnalysisFrame.onset_width). Deliberately at the
+# LOOSEST mode's gate (Extreme's width_min): the mode is unknown at analysis
+# time, so anything stricter happens in the engine at render time.
+_MID_WIDTH_FLOOR = 0.05
 
 _MAX_TRACK_S = 720.0  # analysis cap (12 min); beyond this fall back to live
 _DECODE_TIMEOUT_S = 90.0  # ffmpeg must finish well before the track does
@@ -147,6 +155,10 @@ class TrackFeatures:
     # and smoothed offline so scheduled playback drives the same continuous
     # reactive layer as the live tap. Empty array on older/failed analyses.
     melbank: np.ndarray = field(default_factory=lambda: np.zeros((0, 0), dtype=np.float32))
+    # Per-frame onset width (broadbandness of the SuperFlux, 0..1 — see
+    # AnalysisFrame.onset_width), already 0..1 so not normalised. Empty on
+    # older analyses (frame_at then reports the neutral 1.0).
+    width: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float32))
 
 
 @dataclass(slots=True)
@@ -201,6 +213,7 @@ class TrackMap:
                 "f_bands": f.bands, "f_energy": f.energy, "f_flux": f.flux,
                 "f_bass_flux": f.bass_flux, "f_mid_flux": f.mid_flux,
                 "f_centroid": f.centroid, "f_melbank": f.melbank,
+                "f_width": f.width,
             })
         tmp = Path(path).with_suffix(".npz.tmp")
         with open(tmp, "wb") as fh:
@@ -231,7 +244,8 @@ class TrackMap:
                     features = TrackFeatures(
                         bands=z["f_bands"], energy=z["f_energy"], flux=z["f_flux"],
                         bass_flux=z["f_bass_flux"], mid_flux=z["f_mid_flux"],
-                        centroid=z["f_centroid"], melbank=z["f_melbank"])
+                        centroid=z["f_centroid"], melbank=z["f_melbank"],
+                        width=z["f_width"])
                 return cls(
                     duration=float(meta[0]), bpm=float(meta[1]),
                     confidence=float(meta[2]), beats=z["beats"],
@@ -286,6 +300,11 @@ class TrackMap:
             mid_beat=mid,
             mid_strength=mid_strength,
             melbank=melbank,
+            # Globally p95-normalised energy IS the salience signal (better
+            # than the live rolling reference: the whole track was seen at
+            # once), so map playback gets the same proportional reactions.
+            salience=float(f.energy[i]),
+            onset_width=float(f.width[i]) if f.width.shape[0] > i else 1.0,
         )
 
     def grid_at(self, pos: float, prev_pos: float | None = None) -> BeatGrid | None:
@@ -415,6 +434,7 @@ class EnvelopeExtractor:
         self.env: list[float] = []  # SuperFlux onset envelope per frame
         self.bass_env: list[float] = []  # bass-band log-flux per frame
         self.mid_env: list[float] = []  # mid-band (guitar/snare) log-flux
+        self.width: list[float] = []  # onset broadbandness per frame (0..1)
         # Per-frame linear-domain mid dominance (same gate as the live
         # detector): without it the offline mid stream fires on every kick's
         # attack splash, and map-driven "guitar" lights pop on the kicks.
@@ -450,6 +470,14 @@ class EnvelopeExtractor:
         self.env.extend(np.sum(diff, axis=1).tolist())
         self.bass_env.extend(np.sum(diff[:, : self.n_bass], axis=1).tolist())
         self.mid_env.extend(np.sum(diff[:, self.n_bass : self.n_mid], axis=1).tolist())
+        # Onset width (normalised inverse participation ratio of the positive
+        # flux — same maths as the live analyzer): drums are broadband, a
+        # sung vowel / sustained tone concentrates in a few bands.
+        s1 = diff.sum(axis=1)
+        s2 = (diff * diff).sum(axis=1)
+        width = (s1 * s1) / (diff.shape[1] * np.maximum(s2, 1e-12))
+        width[s2 <= 1e-12] = 0.0
+        self.width.extend(width.tolist())
         # Linear-domain onset shares (leakage-proof, as in the live analyzer).
         if self._prev_lin is not None:
             prev_lin = np.vstack([self._prev_lin[None, :], lin[:-1]])
@@ -612,6 +640,20 @@ def _track_beats(env: np.ndarray, bpm: float) -> np.ndarray:
     return np.array(beats[::-1], dtype=np.int64)
 
 
+def _rolling_max(env: np.ndarray, w: int) -> np.ndarray:
+    """Cheap per-frame rolling maximum over roughly ±``w`` frames (block max)."""
+    n = env.size
+    if n == 0 or w <= 1:
+        return env.copy()
+    nb = (n + w - 1) // w
+    pad = np.pad(env, (0, nb * w - n), constant_values=0.0)
+    bm = pad.reshape(nb, w).max(axis=1)
+    left = np.concatenate([bm[:1], bm[:-1]])
+    right = np.concatenate([bm[1:], bm[-1:]])
+    per_block = np.maximum(bm, np.maximum(left, right))
+    return np.repeat(per_block, w)[:n]
+
+
 def _pick_onsets(
     env: np.ndarray,
     sensitivity: float = 1.5,
@@ -634,6 +676,10 @@ def _pick_onsets(
     mean = np.convolve(env, kernel, mode="same")
     var = np.convolve(env * env, kernel, mode="same") - mean * mean
     thr = np.maximum(mean + sensitivity * np.sqrt(np.maximum(var, 0.0)), floor)
+    # Long-horizon floor (offline twin of the live detector's): the ~0.9 s
+    # window collapses in quiet passages until faint residue "beats"; pin the
+    # threshold to a fraction of the passage-scale (~30 s) envelope peak.
+    thr = np.maximum(thr, LONG_FLUX_FLOOR_FRAC * _rolling_max(env, 1500))
     is_peak = (env > thr) & (env >= np.roll(env, 1)) & (env >= np.roll(env, -1))
     if allowed is not None and allowed.size == n:
         ok = allowed | np.roll(allowed, 1) | np.roll(allowed, -1)
@@ -710,6 +756,28 @@ def _quantize_to_eighths(
     hi = slots[np.clip(j, 0, slots.size - 1)]
     dist = np.minimum(np.abs(times - lo), np.abs(times - hi))
     keep = dist <= tolerance * period
+    return times[keep], accents[keep]
+
+
+def _width_filter(
+    times: np.ndarray,
+    accents: np.ndarray,
+    width: np.ndarray,
+    floor: float = _MID_WIDTH_FLOOR,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Drop onsets whose SuperFlux was too narrowband to be percussion.
+
+    The offline twin of the engine's width gate, at the loosest mode's floor
+    only (mode strictness is applied at render time). A peak can land a hop
+    off its widest frame, so each onset gets the best width of ±1 frame.
+    """
+    if times.size == 0 or width.size == 0:
+        return times, accents
+    idx = np.clip(np.round(times / _FRAME_PERIOD).astype(np.int64), 0, width.size - 1)
+    lo = np.clip(idx - 1, 0, width.size - 1)
+    hi = np.clip(idx + 1, 0, width.size - 1)
+    best = np.maximum(width[idx], np.maximum(width[lo], width[hi]))
+    keep = best >= floor
     return times[keep], accents[keep]
 
 
@@ -851,6 +919,9 @@ def _finish_analysis(ex: EnvelopeExtractor) -> TrackMap | None:
     mid_energy = bands[:, ex.n_bass : ex.n_mid].sum(axis=1).astype(np.float64)
     mid_beats, mid_accents = _percussive_filter(mid_beats, mid_accents, mid_energy)
     mid_beats, mid_accents = _quantize_to_eighths(mid_beats, mid_accents, beats)
+    mid_beats, mid_accents = _width_filter(
+        mid_beats, mid_accents, np.asarray(ex.width, dtype=np.float64)
+    )
     return TrackMap(
         duration=duration,
         bpm=bpm,
@@ -939,6 +1010,7 @@ def _build_features(
         mid_flux=_norm_p(mid_env, 99.0, floor=2.5),
         centroid=np.asarray(ex.centroid, dtype=np.float32),
         melbank=_build_melbank(np.asarray(ex.melbank, dtype=np.float32)),
+        width=np.asarray(ex.width, dtype=np.float32),  # already 0..1
     )
 
 

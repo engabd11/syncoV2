@@ -36,6 +36,7 @@ from .modes import (
     band_for_rank,
     beat_colour_advance,
     beat_pulse,
+    event_gates,
     kick_flash,
     mid_flash,
     pulse_weight,
@@ -335,12 +336,12 @@ class EffectEngine:
 
     @staticmethod
     def _visible_event(
-        frame: AnalysisFrame, beatgrid: BeatGrid | None
+        frame: AnalysisFrame, beatgrid: BeatGrid | None, det_gate: float = 1.0
     ) -> tuple[float, float, bool]:
         """(strength, bass, grid_locked) of the beat driving visible accents.
 
-        **Reactive first.** A detected bass onset (``frame.bass_beat``) ALWAYS
-        fires — this is what makes the room actually move with the song (it is
+        **Reactive first.** A detected bass onset (``frame.bass_beat``) fires —
+        this is what makes the room actually move with the song (it is
         exactly what the Fireworks effect reacts to). When a tempo grid is
         locked it *also* fires the scheduled/anticipated beat (so beats land
         even through a dense bar), and the larger of the two wins. The grid is
@@ -348,9 +349,15 @@ class EffectEngine:
         detected onset to sit within a tight phase window of the grid, so a
         slightly-misaligned grid (common on a replayed track map) rejected the
         real beats and the show went dead while the audio was clearly pumping.
+
+        ``det_gate`` (the mode's onset-width gate) attenuates only the
+        *detected* path: a narrowband onset (a sung vowel, a swelling tone)
+        that slipped past the analyzer's shape guards is muted here, while
+        scheduled grid beats — verified by the tempo model, not by this
+        frame's spectrum — pass untouched.
         """
         bass = max(frame.bands.get("sub_bass", 0.0), frame.bands.get("bass", 0.0))
-        det = frame.bass_strength if frame.bass_beat else 0.0
+        det = frame.bass_strength * det_gate if frame.bass_beat else 0.0
         if beatgrid is not None and beatgrid.locked:
             sched = 0.0
             if beatgrid.predicted_beat:
@@ -511,7 +518,9 @@ class EffectEngine:
             knee = accent_knee(vis_strength, p.beat_threshold)
             if knee > 0.2:
                 strength = min(1.5, (0.5 + vis_strength) * knee)
-        strength *= gate  # silence gate: no wavefronts without audio (item 2)
+        # Silence gate x salience: no wavefronts without audio (item 2), and a
+        # quiet passage's waves ripple in proportion to its real loudness.
+        strength *= gate
         if strength <= 0.0:
             return
         bass = max(frame.bands.get("sub_bass", 0.0), frame.bands.get("bass", 0.0))
@@ -551,14 +560,28 @@ class EffectEngine:
         music_gate = min(1.0, self._loud / _SILENCE_GATE) if _SILENCE_GATE > 0 else 1.0
         # Refresh the instrument-role assignments (rotate on schedule + drops).
         self._update_roles(p, frame, beatgrid, structure)
+        # The event-selection gates (precision upgrade): amplitude proportional
+        # to the frame's ABSOLUTE track-relative loudness, and a width gate
+        # muting narrowband (vocal/tonal) detections. Both come from the mode,
+        # so Subtle picks strictly and Extreme stays permissive.
+        amp_scale, width_gate = event_gates(p, frame.salience, frame.onset_width)
         # One decision for everything visible: the scheduled beat (locked) or
         # the qualifying kick (unlocked reactive fallback).
-        vis_strength, vis_bass, grid_locked = self._visible_event(frame, beatgrid)
+        vis_strength, vis_bass, grid_locked = self._visible_event(
+            frame, beatgrid, width_gate
+        )
         # Scale the flash by the beat's actual HEIGHT (item 3 / fade-outs): the
         # scheduled accent is normalised to the passage, so without this a track
         # fading out keeps flashing full on tiny beats. The smoothed loudness
-        # follows the fade down, so flashes shrink with the music.
-        loud_scale = min(1.0, max(vis_bass, self._energy_env) / _LOUD_REF)
+        # follows the fade down, so flashes shrink with the music. The salience
+        # amplitude composes by min() (not multiply — no double attenuation):
+        # the legacy term is ~1 outside fade-outs, so the absolute
+        # proportionality dominates — a quiet pluck pulses small, the drop
+        # slams full (salience saturates at 1, it never amplifies).
+        loud_scale = min(
+            min(1.0, max(vis_bass, self._energy_env) / _LOUD_REF),
+            amp_scale,
+        )
         # The highlight decision: rank this beat's accent against the recent
         # passage. Selective modes only *fire* on highlights — everything else
         # ticks quietly or stays dark — which is what makes the hits read as
@@ -574,7 +597,7 @@ class EffectEngine:
             # scheduled beat. Either advances the colour and the highlight
             # window - so colour jumps WITH the song's beats, not on a timer.
             beat_now = (
-                frame.bass_beat
+                (frame.bass_beat and width_gate > 0.0)
                 or (not grid_locked)
                 or (beatgrid is not None and beatgrid.predicted_beat)
             )
@@ -586,7 +609,9 @@ class EffectEngine:
         # eighth-note slots: syncopated riffs live on that grid, vocal
         # syllables float between its slots — the other half of the old
         # "pops on the singing" problem.
-        mid_strength = frame.mid_strength if frame.mid_beat else 0.0
+        # The width gate applies here too — the third, complementary vocal
+        # guard next to the attack machine and the eighth-note quantiser.
+        mid_strength = frame.mid_strength * width_gate if frame.mid_beat else 0.0
         if mid_strength > 0.0 and grid_locked and beatgrid is not None:
             ph = beatgrid.phase % 0.5
             if min(ph, 0.5 - ph) > _EIGHTH_PHASE:
@@ -646,7 +671,9 @@ class EffectEngine:
         if p.wave_gain > 0.0:
             # drum mode: no automatic wavefronts; silence: none either.
             if not self.manual_only and music_gate > 0.0:
-                self._spawn_waves(p, frame, beatgrid, vis_strength, music_gate)
+                self._spawn_waves(
+                    p, frame, beatgrid, vis_strength, music_gate * amp_scale
+                )
             for w in self._waves:
                 w.advance(dt, decay_tau=0.45)
             self._waves = [w for w in self._waves if not w.dead()]

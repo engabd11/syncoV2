@@ -828,6 +828,11 @@ class SyncSession:
             "energy": round(frame.energy, 3),
             "beat": bool(frame.bass_beat),
             "strength": round(frame.bass_strength, 2),
+            # Event-selection evidence (calibration instruments for the
+            # salience/width gates): absolute track-relative loudness and
+            # onset broadbandness of this frame.
+            "salience": round(frame.salience, 2),
+            "width": round(frame.onset_width, 2),
         }
 
     def _ws_stream(self, colors: dict, features: dict | None) -> None:
