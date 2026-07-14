@@ -1,6 +1,6 @@
 # Hue Synco for Home Assistant
 
-A custom Home Assistant integration that drives **Philips Hue Entertainment areas** in real-time with music from **Music Assistant**. Beat detection, frequency analysis, and spatial choreography stream directly to the bridge over the Hue Entertainment API (~40 Hz, DTLS-encrypted), while a bundled dashboard card visualises everything live.
+A custom Home Assistant integration that drives **Philips Hue Entertainment areas** in real time with music from **Music Assistant**. Beat detection, frequency analysis, and spatial choreography stream directly to the bridge over the Hue Entertainment API (~40 Hz, DTLS-encrypted), while a bundled dashboard card mirrors the whole show live.
 
 <p align="center">
   <img src="docs/card.png" alt="Hue Synco dashboard card" width="360" />
@@ -14,7 +14,9 @@ Hue Synco listens to whatever is playing through Music Assistant and translates 
 
 Every track is analysed once in the background — beats are located precisely, downbeats and section boundaries are found (verse, chorus, build, drop). During playback those events are **scheduled** ahead of time, so the choreography reacts exactly on the beat rather than chasing it. A continuous spectral layer (a 16-band melbank spread spatially across the room) keeps every lamp alive between beats.
 
-For Snapcast-backed players the live audio stream is tapped directly; for streaming-source players (Squeezelite, Slimproto) the stream URL is decoded in sync with the reported playback position; and for players without a tappable stream (AirPlay, Chromecast, Sonos, DLNA, ESPHome) the pre-analysed track map drives the show at full beat accuracy.
+What reacts is as important as when: reactions are **proportional to the sound's real loudness** (a quiet pluck gives a small dim pulse, the drop slams the room) and are keyed to **instruments, not vocals** — sung melodies and sustained tones are filtered out of the beat streams so the lights follow the music, not the singing.
+
+You choose which player drives the lights — pick any player right from the card, or let the integration auto-follow whatever is playing. For Snapcast-backed players the live audio stream is tapped directly; for streaming-source players (Squeezelite, Slimproto) the stream URL is decoded in sync with the reported playback position; and for players without a tappable stream (AirPlay, Chromecast, Sonos, DLNA, ESPHome) the pre-analysed track map drives the show at full beat accuracy.
 
 ---
 
@@ -28,6 +30,7 @@ For Snapcast-backed players the live audio stream is tapped directly; for stream
 - **5-band frequency decomposition** with per-band automatic gain control (normalises loud and quiet tracks to the same 0–1 range)
 - **16-bin melbank** — continuous exponentially-smoothed spectrum spread left-to-right across the room so the show is always alive
 - **Song structure detection** — builds, drops, verses, and choruses are identified; brightness swells on drops, desaturates during builds, breathes during breakdowns
+- **Library pre-analysis** — a background sweep analyses your whole library ahead of time (resumable, survives restarts, one track at a time, always yielding to live playback) with a progress sensor and failure reporting
 
 ### Player support
 | Player type | Audio source |
@@ -35,16 +38,18 @@ For Snapcast-backed players the live audio stream is tapped directly; for stream
 | Snapcast (Music Assistant) | Real-time stream tap with automatic buffer-alignment |
 | Squeezelite / Slimproto | Position-locked stream decoding (re-syncs on drift) |
 | AirPlay, Chromecast, Sonos, DLNA, ESPHome, groups | Pre-analysed track map (full beat accuracy, no live stream required) |
-| Any player | Metadata fallback — gentle LFO animation when no stream is available |
+| Any player | Metadata fallback — gentle animation when no stream is available, upgraded to a real source automatically as soon as one becomes tappable |
+
+The followed player can be **pinned per area** (from the card's player picker or the `set_options` service) or left on auto, where the integration follows whichever player is currently playing, preferring Music Assistant ones.
 
 ### Choreography
-- **5 intensity modes** (Subtle → Medium → High → Intense → Extreme) sharing the same unified renderer with different parameters
+- **5 intensity modes** (Subtle → Medium → High → Intense → Extreme) sharing the same unified renderer with different parameters; the mode also sets how *picky* beat selection is — there is no separate sensitivity slider, the mode is the sensitivity
 - **Instrument role assignment** — lights are divided into bass, guitar, and vocal roles, spread evenly around the room and rotated every few bars; the split scales cleanly from 1 to 10 lights so larger rooms stay balanced
 - **3D spatial waves** — beat wavefronts sweep the room using actual lamp positions from the entertainment area; low frequencies to one side, highs to the other; treble assigned to higher lamps
 - **Beat highlight selection** — brightness pops only on beats that stand out against the recent 24-beat window, so not every beat looks the same
 
 ### Color
-- **Album art extraction** — dominant colors pulled from cover art in perceptual CIELAB space; mood tones preserved (muted artwork stays muted)
+- **Album art extraction** — dominant colors pulled from cover art in perceptual CIELAB space; mood tones preserved (muted artwork stays muted); re-extracted on every track change
 - **Song harmony coloring** — derives a palette from the track's pitch content; each section's dominant pitch classes map to hues across the spectrum
 - **11 preset themes** — Sunset, Ocean, Forest, Lavender, Ember, Aurora, Rainbow, Tropical, Savanna, Blossom, Honolulu, Galaxy
 
@@ -53,15 +58,58 @@ Subtle, Medium, High, and Movies apply a WCAG 2.3.1-compliant flash limiter: har
 
 Intense and Extreme deliberately bypass the flash limiter for maximum impact — those modes are unsuitable for photosensitive individuals.
 
-### Dashboard card
-A custom Lovelace card is registered automatically — no manual resource download needed. It provides:
-- Real-time band-energy visualiser bars at ~20 Hz driven by the actual analysis output
-- Room mirror showing every lamp at its real position, glowing in the exact color being streamed, with instrument-role rings
-- Song-structure timeline with energy silhouette and a playhead; the next section pulses as a drop approaches
-- Transport controls (previous / play-pause / next) that drive the media player directly
-- **Play-the-beats drum pad** — a Low / Mid / High pad page where each pad drives a third of the room; while it's open the automatic beats pause so *your taps* drive the lights, with the music's colour and energy still flowing underneath
-- Per-mode intensity previews with marquee titles for long track names
-- Respects `prefers-reduced-motion` and pauses animation when the card is off-screen
+---
+
+## The dashboard card
+
+The **Hue Synco Card** ships inside the integration and registers itself as a dashboard resource automatically — no HACS frontend entry, no manual resource URL, no build step. Search for *"Hue Synco Card"* in the card picker. Card updates are picked up automatically (the resource URL carries a content hash, so you never need to hard-refresh).
+
+### The hero
+
+An immersive now-playing header themed by the music itself — the blurred album art bleeds into the backdrop, and the extracted album colours drive every accent in the card:
+
+- **Audio-source pill** — shows what is actually driving the lights right now: `Live audio`, `Live (snapcast)`, `Track map`, or `Metadata only` (amber warning — no real audio is being analysed), so a dead tap is obvious at a glance
+- **Player chip** — which media player the lights follow; tap it to open the **player picker** and point the lights at any player (or back to auto)
+- **Power toggle** — starts/stops sync for the area
+- **Album art, track title and artist** — long titles scroll once into view (marquee), the cover glosses on the beat
+- **Live brightness readout**, and **transport controls** (previous / play-pause / next) that drive the followed player directly — icons are inline SVG and follow the theme
+- **Song-structure timeline** — the track's energy silhouette with section boundaries and a moving playhead; the next section pulses as a drop approaches
+
+### The body
+
+- **Visualizer bars** — a real ~20 Hz feed of the analysis output (band energies, beats), not a fake animation; it renders exactly what the room is reacting to, delayed through the same timing buffer as the lights
+- **Room mirror** — every lamp at its real position from the entertainment area, glowing in the exact colour being streamed to it, with rings marking its current instrument role (bass / guitar / vocal)
+- **Area chips** — one card controls several areas; switch between them with a tap
+- **Intensity selector** — Subtle → Extreme, each option with a live micro-animation preview of its character
+- **Colour palette dots** — album art, song harmony, and the preset themes as tappable gradient swatches
+- **Brightness slider** and a **timing-offset stepper** (±ms fine trim so the lights land exactly on the audible beat in your room)
+- **Play-the-beats drum pad** — a Low / Mid / High pad page where each pad drives a third of the room. While it's open the automatic beats pause so *your taps* flash the lights, with the music's colour and energy still flowing underneath; it auto-releases when you close it
+
+### Behaviour
+
+- **Idle beauty** — while paused, the card (and the room) drifts slowly through the palette instead of freezing
+- Respects `prefers-reduced-motion`, and pauses all animation when the card is scrolled off-screen (wall tablets keep dashboards open 24/7)
+- **Demo mode** — added with no config, the card renders a self-running demo so you can style your dashboard before wiring entities
+
+### Card configuration
+
+The card picker pre-fills a working template. Full form:
+
+```yaml
+type: custom:hue-music-sync-card
+areas:
+  - name: Living Room
+    switch: switch.music_sync_living_room
+    intensity: select.music_sync_living_room_intensity
+    effect: select.music_sync_living_room_effect
+    colour: select.music_sync_living_room_colour
+    brightness: number.music_sync_living_room_brightness
+    timing: number.music_sync_living_room_timing_offset
+    media_player: media_player.living_room   # optional; the picker can change it live
+  # ...more areas
+```
+
+A single flat area (`switch:`, `intensity:`, … at the top level) also works. Every key is optional — the card renders whatever you give it and falls back to demo mode with none.
 
 ---
 
@@ -98,9 +146,9 @@ Optional:
 2. Enter your Hue bridge IP address (or let it be discovered)
 3. Press the **link button** on the bridge when prompted
 4. Select which entertainment areas to enable
-5. The integration creates a switch, mode selector, effect selector, colour selector, brightness slider, and timing slider for each area
+5. Add the **Hue Synco Card** to a dashboard (it's already in the card picker)
 
-> Create and arrange your entertainment areas in the **Hue app** before setting up Hue Synco — the integration discovers whatever areas already exist on the bridge.
+> Create and arrange your entertainment areas in the **Hue app** before setting up Hue Synco — the integration discovers whatever areas already exist on the bridge. The lamp positions you set there are what the spatial choreography and the card's room mirror use.
 
 ---
 
@@ -124,6 +172,8 @@ Plus, once per installation:
 | Analyse library | Button | Kicks off the background library pre-analysis (same as the `prewarm_library` service) |
 | Library analysis | Sensor | Live progress of the pre-analysis, with failure details in its attributes |
 
+While an area is syncing, its switch also exposes now-playing, album-colour, tempo, and audio-source attributes — this is the state the card runs on, and it's available to your own automations too.
+
 ### Modes
 
 Every mode also sets how *picky* the beat selection is: Subtle reacts only to loud, unambiguous percussion, High is strictly proportional with a firm vocal guard, and Extreme lets nearly everything through (still proportional to loudness). There is no separate sensitivity slider — the mode is the sensitivity.
@@ -144,8 +194,8 @@ Every mode also sets how *picky* the beat selection is: Subtle reacts only to lo
 
 ### Colour schemes
 
-- **Album Art** — extracted from the current track's cover art
-- **Song** — derived from the track's harmonic content
+- **Album Art** — extracted from the current track's cover art, refreshed on every track change
+- **Song** — derived from the track's harmonic content, shifting with each section
 - **Preset themes** — Sunset, Ocean, Forest, Lavender, Ember, Aurora, Rainbow, Tropical, Savanna, Blossom, Honolulu, Galaxy
 
 ---
@@ -154,18 +204,12 @@ Every mode also sets how *picky* the beat selection is: Subtle reacts only to lo
 
 | Service | Description |
 |---|---|
-| `hue_music_sync.activate` | Start sync; optionally set mode, effect, colour, brightness, and media player |
+| `hue_music_sync.activate` | Start sync for one or more areas; optionally set mode, effect, colour, brightness, and the media player to follow |
 | `hue_music_sync.deactivate` | Stop sync |
-| `hue_music_sync.set_options` | Update any setting live without restarting the sync session |
+| `hue_music_sync.set_options` | Change any setting live without restarting the session — including pinning or clearing the followed player |
 | `hue_music_sync.prewarm_library` | Analyse your whole Music Assistant library in the background and cache it to disk, so **every** track plays instantly with full beat-accurate reaction the first time too — not just on a repeat or in a queue |
 
-**Pre-analysing the library** (`prewarm_library`) is the way to make a brand-new
-single track react immediately. It runs gently in the background — one track at
-a time, yielding to live playback — and is resumable, so re-running only
-analyses what's new (run it once after setup, or schedule it from an
-automation). For a Navidrome / OpenSubsonic library, set the library URL and
-login in the options first so stream URLs can be built without a playback
-session.
+**Pre-analysing the library** (`prewarm_library`, or the **Analyse library** button) is the way to make a brand-new single track react immediately. It runs gently in the background — one track at a time, yielding to live playback — and is resumable, so re-running only analyses what's new (run it once after setup, or schedule it from an automation). Progress and failures are surfaced on the **Library analysis** sensor. For a Navidrome / OpenSubsonic library, set the library URL and login in the options first so stream URLs can be built without a playback session.
 
 ---
 
@@ -203,7 +247,9 @@ HueStream encoder (RGB → xy chromaticity + brightness, Gamut C clamping)
 Pure-Python DTLS 1.2 (PSK auth, AES-128-GCM) → Hue Bridge (~40 Hz)
 ```
 
-The DTLS transport is implemented in pure Python — no external OpenSSL dependency — and covers exactly what the bridge needs: PSK handshake and AES-128-GCM record encryption with 9-second keepalives.
+The DTLS transport is implemented in pure Python — no external OpenSSL dependency — and covers exactly what the bridge needs: PSK handshake, AES-128-GCM record encryption, 9-second keepalives, and a graceful close so the bridge frees the session immediately when sync stops.
+
+The card talks to the integration over Home Assistant's WebSocket API (`hue_music_sync/subscribe` for the ~20 Hz live feed, `/players` for the picker, `/tap` and `/drum` for the drum pad), so everything on it — bars, room mirror, timeline — reflects the actual session, not a simulation.
 
 ---
 
