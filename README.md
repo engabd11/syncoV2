@@ -16,7 +16,7 @@ Every track is analysed once in the background — beats are located precisely, 
 
 What reacts is as important as when: reactions are **proportional to the sound's real loudness** (a quiet pluck gives a small dim pulse, the drop slams the room) and are keyed to **instruments, not vocals** — sung melodies and sustained tones are filtered out of the beat streams so the lights follow the music, not the singing.
 
-You choose which player drives the lights — pick any player right from the card, or let the integration auto-follow whatever is playing. For Snapcast-backed players the live audio stream is tapped directly; for streaming-source players (Squeezelite, Slimproto) the stream URL is decoded in sync with the reported playback position; and for players without a tappable stream (AirPlay, Chromecast, Sonos, DLNA, ESPHome) the pre-analysed track map drives the show at full beat accuracy.
+You choose which player drives the lights — pick any player right from the card, or let the integration auto-follow whatever is playing. For Snapcast-backed players the live audio stream is tapped directly; for streaming-source players (Sendspin, Squeezelite, Slimproto) the track's stream is decoded in sync with the reported playback position; and for players without a tappable stream (AirPlay, Chromecast, Sonos, DLNA, ESPHome) the pre-analysed track map drives the show at full beat accuracy.
 
 ---
 
@@ -36,6 +36,7 @@ You choose which player drives the lights — pick any player right from the car
 | Player type | Audio source |
 |---|---|
 | Snapcast (Music Assistant) | Real-time stream tap with automatic buffer-alignment |
+| Sendspin | Position-locked decoding of the track's library stream (resolved via OpenSubsonic/provider mappings, since MA exposes no tappable URL for Sendspin) — real live audio, full beat accuracy |
 | Squeezelite / Slimproto | Position-locked stream decoding (re-syncs on drift) |
 | AirPlay, Chromecast, Sonos, DLNA, ESPHome, groups | Pre-analysed track map (full beat accuracy, no live stream required) |
 | Any player | Metadata fallback — gentle animation when no stream is available, upgraded to a real source automatically as soon as one becomes tappable |
@@ -123,7 +124,7 @@ A single flat area (`switch:`, `intensity:`, … at the top level) also works. E
 
 Optional:
 - **Snapcast server** — for real-time buffer-aligned audio on Snapcast-backed players
-- **OpenSubsonic / Navidrome** — for direct library-track analysis on players where MA does not expose a stream URL
+- **OpenSubsonic / Navidrome** — for direct library-track streaming and analysis on players where MA does not expose a stream URL (e.g. Sendspin)
 
 ---
 
