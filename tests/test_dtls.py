@@ -69,3 +69,46 @@ def test_record_increments_sequence():
     # epoch(2)+seq(6) live at bytes 3..11; sequence must advance.
     assert r0[3:11] == b"\x00\x00" + (0).to_bytes(6, "big")
     assert r1[3:11] == b"\x00\x00" + (1).to_bytes(6, "big")
+
+
+def test_close_sends_close_notify_when_connected():
+    # A graceful close must tell the bridge the session is over: without the
+    # close_notify alert the bridge holds the DTLS session ~10 s and silently
+    # ignores a new handshake in that window (the "turn sync back on right
+    # after turning it off" failure).
+    from hue_music_sync.hue.dtls import _CT_ALERT, AESGCM, _Keys
+
+    client = DtlsPskClient("h", 1, b"id", b"\x00" * 16)
+    client._keys = _Keys(bytes(range(40)))
+    client._gcm_client = AESGCM(client._keys.client_key)
+    client._send_epoch = 1
+
+    sent: list[bytes] = []
+
+    class _Sock:
+        def sendall(self, data):
+            sent.append(bytes(data))
+        def close(self):
+            pass
+
+    client._sock = _Sock()
+    client.close()
+    assert client._sock is None
+    assert len(sent) == 1
+    assert sent[0][0] == _CT_ALERT  # record content type 21
+
+
+def test_close_without_keys_sends_nothing():
+    client = DtlsPskClient("h", 1, b"id", b"\x00" * 16)
+    sent: list[bytes] = []
+
+    class _Sock:
+        def sendall(self, data):
+            sent.append(bytes(data))
+        def close(self):
+            pass
+
+    client._sock = _Sock()
+    client.close()  # handshake never completed: just close the socket
+    assert client._sock is None
+    assert sent == []

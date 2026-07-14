@@ -193,11 +193,27 @@ async def _register_frontend_card(hass: HomeAssistant) -> None:
         #  2. add_extra_js_url — covers YAML-mode dashboards.
         add_extra_js_url(hass, url)
         if not await _register_lovelace_resource(hass, url):
-            # Lovelace not ready yet at startup; retry once HA has fully started.
+            # Lovelace not ready yet at startup; retry once HA has fully
+            # started, and keep retrying briefly — the resource is the ONLY
+            # load path that a stale (service-worker-cached) app shell can't
+            # break, so giving up after one silent attempt left desktops with
+            # an old shell showing "Configuration error" until a cache clear.
             from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
 
             async def _retry(_event) -> None:
-                await _register_lovelace_resource(hass, url)
+                for delay in (0.0, 5.0, 15.0, 30.0):
+                    if delay:
+                        await asyncio.sleep(delay)
+                    if await _register_lovelace_resource(hass, url):
+                        return
+                _LOGGER.warning(
+                    "Could not register the Hue Synco card as a dashboard "
+                    "resource. If your dashboards run in YAML mode, add it "
+                    "manually under lovelace: resources: (url: %s, "
+                    "type: module); otherwise add it in Settings > Dashboards "
+                    "> Resources.",
+                    url,
+                )
 
             hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _retry)
         _LOGGER.info(

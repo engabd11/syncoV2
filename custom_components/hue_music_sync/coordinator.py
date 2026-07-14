@@ -110,6 +110,13 @@ _DRUM_WINDOW_S = 4.0
 # than switching mid-song, and the freshly-analysed map is cached for next time.
 _MAP_COMMIT_WINDOW_S = 6.0
 
+# Album-art refresh: how long to wait for a new track's entity_picture to
+# catch up with its title (HA writes them in separate state updates) before
+# accepting an unchanged URL as "this track genuinely reuses the artwork",
+# and how long to back off before retrying a failed extraction.
+_ART_URL_GRACE_S = 6.0
+_ART_RETRY_S = 10.0
+
 
 def trackmap_cache_dir(hass) -> str:
     """The shared on-disk track-map cache directory (coordinator + pre-warm)."""
@@ -256,6 +263,8 @@ class SyncSession:
         self._last_track: str | None = None
         self._last_art_url: str | None = None
         self._art_task: asyncio.Task | None = None
+        self._art_grace: float | None = None  # deadline for a lagging artwork URL
+        self._art_retry_at = 0.0  # pacing after a failed extraction
         self._delay_buf: deque[tuple[float, dict]] = deque()
         # Now-playing / album-colour / tempo snapshot surfaced on the switch entity
         # so dashboard cards can recolour and lock a visualizer to the song.
@@ -291,12 +300,31 @@ class SyncSession:
             except Exception as err:  # noqa: BLE001 - best-effort, never block start
                 _LOGGER.debug("Light snapshot for %s failed: %s", self._config.name, err)
                 self._light_snapshot = None
-        await self._bridge.start_stream(self._config.id)
-        try:
-            await self._stream.start()
-        except Exception:
-            await self._bridge.stop_stream(self._config.id)
-            raise
+        # The bridge silently ignores a new handshake while a previous DTLS
+        # session still lingers (up to ~10 s after an unclean end — an HA
+        # restart, a crash, a kill). Retry across that window with a fresh
+        # stream activation each time instead of failing the switch outright.
+        last_err: Exception | None = None
+        for attempt in range(3):
+            if attempt:
+                await asyncio.sleep(4.0)
+            await self._bridge.start_stream(self._config.id)
+            try:
+                await self._stream.start()
+                last_err = None
+                break
+            except Exception as err:  # noqa: BLE001
+                last_err = err
+                _LOGGER.debug(
+                    "DTLS handshake attempt %d/3 for %s failed: %s",
+                    attempt + 1, self._config.name, err,
+                )
+                try:
+                    await self._bridge.stop_stream(self._config.id)
+                except Exception:  # noqa: BLE001 - best-effort before retry
+                    pass
+        if last_err is not None:
+            raise last_err
         self._running = True
         self._task = self._hass.async_create_background_task(
             self._run(), f"hue_music_sync_{self._config.id}"
@@ -325,6 +353,8 @@ class SyncSession:
             # "same artwork" check below would skip the extraction we want).
             self._last_track = None
             self._last_art_url = None
+            self._art_grace = None
+            self._art_retry_at = 0.0
             self._map_section = None  # re-apply Song section palette on next poll
         if settings.media_player != prev.media_player:
             # Player changed: drop the current source so the loop re-opens it on
@@ -365,6 +395,7 @@ class SyncSession:
         """
         self._last_track = None
         self._last_art_url = None
+        self._art_grace = None
         self._play_track = None
         self._tempo.reset()
         self._structure.reset()
@@ -1066,6 +1097,9 @@ class SyncSession:
         # Only when the Album colour is selected; preset themes are static.
         if self._settings.colour != ColorScheme.ALBUM_ART or self._source is None:
             return
+        now = time.monotonic()
+        if now < self._art_retry_at:
+            return  # backing off after a failed extraction
         track = self._source.track_id
         if track == self._last_track:
             return
@@ -1076,11 +1110,24 @@ class SyncSession:
         url = self._source.album_art_url
         if not url:
             return  # artwork URL not populated for the new track yet; retry later
-        # Only now claim the track as handled, since we're actually extracting it.
-        self._last_track = track
         if url == self._last_art_url:
-            return  # same artwork, new track key (a library match re-keyed the
-            # song mid-track): the palette is already the one we'd extract.
+            # A new track but the artwork URL hasn't changed. Usually HA just
+            # hasn't written the new entity_picture yet (title lands first,
+            # artwork a moment later) — claiming the track NOW would freeze the
+            # colours on the previous song's palette. Give the artwork a grace
+            # window to catch up; only if the URL genuinely stays the same
+            # (same-album tracks, a library match re-keying the song mid-track)
+            # accept it and keep the current palette.
+            if self._art_grace is None:
+                self._art_grace = now + _ART_URL_GRACE_S
+            if now < self._art_grace:
+                return  # not claimed yet: keep polling for the new artwork
+            self._art_grace = None
+            self._last_track = track
+            return
+        # Only now claim the track as handled, since we're actually extracting it.
+        self._art_grace = None
+        self._last_track = track
         self._last_art_url = url
         self._art_task = self._hass.async_create_task(self._extract_art(url))
 
@@ -1097,6 +1144,11 @@ class SyncSession:
             )
         elif palette is None:
             _LOGGER.warning("Album-art extraction failed for %s (%s)", self._config.name, url)
+            # Un-claim the track so it's retried (paced): a transient artwork
+            # fetch failure must not strand the colours on the previous song.
+            self._last_track = None
+            self._last_art_url = None
+            self._art_retry_at = time.monotonic() + _ART_RETRY_S
 
     @staticmethod
     def _palette_to_hex(palette) -> list[str]:
@@ -1219,22 +1271,54 @@ class SyncSession:
         async_dispatcher_send(self._hass, signal_area_update(self._config.id))
 
     async def stop(self) -> None:
+        """Tear the session down. Must never raise and never hang.
+
+        The bridge-facing resources are released FIRST and unconditionally:
+        if the DTLS channel isn't closed (its keepalive would keep the ghost
+        session alive on the bridge indefinitely) or the entertainment area
+        isn't handed back, every later handshake times out waiting for the
+        bridge's HelloVerify — the "switch stuck off, turning on again fails"
+        failure. The audio teardown (ffmpeg, snapcast, analysis tasks) happens
+        after, each step bounded and best-effort.
+        """
         self._stopping = True
         self._running = False
-        if self._task is not None:
-            self._task.cancel()
-            self._task = None
-        await self._cancel_meta_upgrade()
-        await self._mapper.close()
-        if self._source is not None:
-            await self._source.close()
-            self._source = None
-        await self._stream.stop()
+        task = self._task
+        self._task = None
+        if task is not None:
+            task.cancel()
+            try:
+                # Let the render loop actually exit before yanking the socket
+                # out from under a mid-flight send.
+                await asyncio.wait_for(asyncio.shield(task), timeout=3.0)
+            except BaseException:  # noqa: BLE001 - cancelled/timeout/crash: proceed
+                pass
+        try:
+            await self._stream.stop()
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Error closing DTLS stream for %s: %s", self._config.name, err)
         try:
             await self._bridge.stop_stream(self._config.id)
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("Error stopping bridge stream for %s: %s", self._config.name, err)
+        for label, closer in (
+            ("meta upgrade", self._cancel_meta_upgrade()),
+            ("track mapper", self._mapper.close()),
+            ("audio source", self._close_source()),
+        ):
+            try:
+                await asyncio.wait_for(closer, timeout=5.0)
+            except Exception as err:  # noqa: BLE001 - bounded, best-effort
+                _LOGGER.debug(
+                    "Teardown of %s for %s failed: %s", label, self._config.name, err
+                )
         await self._restore_snapshot()
+
+    async def _close_source(self) -> None:
+        source = self._source
+        self._source = None
+        if source is not None:
+            await source.close()
 
     async def _restore_snapshot(self) -> None:
         """Re-apply the captured pre-sync light state (opt-in; never raises)."""

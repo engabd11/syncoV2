@@ -362,6 +362,17 @@ class DtlsPskClient:
 
     def close(self) -> None:
         if self._sock is not None:
+            # Send a close_notify alert first (best-effort): without it the
+            # bridge keeps the DTLS session (and the entertainment stream)
+            # alive until its ~10 s idle timeout, and a new handshake started
+            # in that window is silently ignored — the "turn sync back on
+            # right after turning it off" failure.
+            if self._keys is not None:
+                try:
+                    alert = bytes([1, 0])  # AlertLevel.warning, close_notify
+                    self._sock.sendall(self._record(_CT_ALERT, alert, encrypt=True))
+                except Exception:  # noqa: BLE001 - best-effort
+                    pass
             try:
                 self._sock.close()
             finally:

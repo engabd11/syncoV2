@@ -13,7 +13,7 @@
 // Cosmetic version (shown in the console banner). The browser cache-bust no
 // longer depends on this: the integration appends ?v=<content-hash> derived from
 // this file's bytes, so any edit is picked up without a manual hard refresh.
-const VERSION = "1.17.0";
+const VERSION = "1.17.1";
 
 /* ------------------------- Palette data ------------------------- */
 // Colour schemes from the integration, each a small gradient swatch.
@@ -610,7 +610,11 @@ class HueMusicSyncCard extends HTMLElement {
 
   /* -- config -- */
   setConfig(config) {
-    this._config = config || {};
+    // Guard: the picker/editor can call with no config at all; touching
+    // `config.areas` on null would throw and Lovelace renders that as a
+    // red "Configuration error" card.
+    config = config || {};
+    this._config = config;
     // Normalise area definitions.
     if (Array.isArray(config.areas) && config.areas.length) {
       this._areas = config.areas.map((a) => ({
@@ -1145,17 +1149,28 @@ class HueMusicSyncCard extends HTMLElement {
           this._hass.callService("media_player", service, { entity_id: m.now.player });
         }
       };
-      const mkBtn = (sym, service, label) => {
+      // Inline SVG icons (fill: currentColor) rather than the Unicode media
+      // glyphs: browsers render those as coloured emoji (a yellow/blue play
+      // symbol that ignores CSS color) \u2014 the icons must follow the theme.
+      const ICONS = {
+        prev: "M6 5h2v14H6zM20 5v14l-11-7z",
+        play: "M8 5l12 7-12 7z",
+        pause: "M7 5h4v14H7zM13 5h4v14h-4z",
+        next: "M16 5h2v14h-2zM4 5l11 7-11 7z",
+      };
+      const mkBtn = (icon, service, label) => {
         const b = document.createElement("button");
         b.className = "hue-tr-btn";
-        b.textContent = sym;
+        b.innerHTML =
+          `<svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true">` +
+          `<path d="${ICONS[icon]}" fill="currentColor"/></svg>`;
         b.setAttribute("aria-label", label);
         b.addEventListener("click", () => svc(service));
         return b;
       };
-      tr.appendChild(mkBtn("\u23ee", "media_previous_track", "Previous track"));
-      tr.appendChild(mkBtn(m.now.playing ? "\u23f8" : "\u25b6", "media_play_pause", "Play / pause"));
-      tr.appendChild(mkBtn("\u23ed", "media_next_track", "Next track"));
+      tr.appendChild(mkBtn("prev", "media_previous_track", "Previous track"));
+      tr.appendChild(mkBtn(m.now.playing ? "pause" : "play", "media_play_pause", "Play / pause"));
+      tr.appendChild(mkBtn("next", "media_next_track", "Next track"));
       const time = document.createElement("div");
       time.className = "hue-tr-time";
       this._trTime = time;
