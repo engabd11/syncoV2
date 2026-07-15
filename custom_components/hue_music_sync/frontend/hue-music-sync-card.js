@@ -35,7 +35,7 @@ const PALETTES = [
   { id: "galaxy",   name: "Galaxy",        colors: ["#3d6bff", "#7b3dff", "#ff3dd0"], scene: true },
 ];
 
-const DEFAULT_INTENSITIES = ["Subtle", "Medium", "High", "Intense"];
+const DEFAULT_INTENSITIES = ["Auto", "Subtle", "Medium", "High", "Intense"];
 const DEFAULT_EFFECTS = ["Movie", "Music", "Fireworks"];
 const DEFAULT_SWATCH = ["#6f6c86", "#4a4862"];
 
@@ -426,6 +426,7 @@ const CARD_CSS = `
   /* -- intensity preview micro-animations -- */
   .hue-seg-anim { position: absolute; left: 50%; bottom: 3px; transform: translateX(-50%);
     width: 18px; height: 3px; border-radius: 2px; opacity: .8; pointer-events: none; }
+  .hue-seg-anim.m-auto { background: linear-gradient(90deg, #27d3ff, #7b5cff, #ff7ab8, #27d3ff); background-size: 300% 100%; animation: hue-pv-drift 2.6s linear infinite; }
   .hue-seg-anim.m-subtle { background: linear-gradient(90deg, #ff7ab8, #7b5cff, #27d3ff); background-size: 300% 100%; animation: hue-pv-drift 4s linear infinite; }
   .hue-seg-anim.m-medium { background: currentColor; animation: hue-pv-breathe 1.4s ease-in-out infinite; }
   .hue-seg-anim.m-high { background: currentColor; animation: hue-pv-trio 1.1s ease-in-out infinite; }
@@ -926,9 +927,14 @@ class HueMusicSyncCard extends HTMLElement {
     const ba = swAttr.beat_anchor ?? mpAttr.beat_anchor;
     const beatAnchor = ba != null && Number.isFinite(Number(ba)) ? Number(ba) : null;
 
+    // When Auto intensity is active, the integration publishes the level it
+    // resolved to from the song's tempo (subtle/medium/high) so we can show it.
+    const autoMode = intensityVal === "auto" && swAttr.auto_mode
+      ? String(swAttr.auto_mode) : null;
+
     return {
       area, on,
-      intensity: { ...intensity, value: intensityVal },
+      intensity: { ...intensity, value: intensityVal, autoMode },
       effect: { ...effect, value: effectVal },
       colour: {
         entity: colourEntity, value: colourVal, options: colourOptions,
@@ -1223,11 +1229,13 @@ class HueMusicSyncCard extends HTMLElement {
 
     body.appendChild(this._areaChips(accent));
 
+    const intensityHint = m.intensity.autoMode
+      ? `Auto · ${titleize(m.intensity.autoMode)}` : null;
     body.appendChild(
       this._segField("Intensity", m.intensity.options, m.intensity.value, accent, (v) => {
         this._callSelect(m.intensity.entity, v, "intensity");
         this._render();
-      }, true)
+      }, true, intensityHint)
     );
     body.appendChild(
       this._segField("Effect", m.effect.options, m.effect.value, accent, (v) => {
@@ -1572,11 +1580,11 @@ class HueMusicSyncCard extends HTMLElement {
     return l;
   }
 
-  _segField(label, options, value, accent, onChange, previews = false) {
+  _segField(label, options, value, accent, onChange, previews = false, valueOverride = null) {
     const field = document.createElement("div");
     field.className = "hue-field";
     const sel = options.find((o) => o.value === value);
-    field.appendChild(this._label(label, sel ? sel.label : ""));
+    field.appendChild(this._label(label, valueOverride != null ? valueOverride : (sel ? sel.label : "")));
     field.appendChild(this._segmented(options, value, accent, onChange, previews));
     return field;
   }

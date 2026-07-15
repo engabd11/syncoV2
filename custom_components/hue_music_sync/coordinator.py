@@ -73,7 +73,7 @@ from .const import (
     signal_area_update,
 )
 from .effects.engine import EffectEngine
-from .effects.modes import UNRESTRAINED_MODES
+from .effects.modes import UNRESTRAINED_MODES, auto_mode_for_bpm
 from .effects.safety import FieldSafety
 from .hue.bridge import EntertainmentConfig, HueBridge
 from .hue.stream import DtlsStream, HueStreamEncoder
@@ -272,6 +272,10 @@ class SyncSession:
         self.public_state: dict = {}
         self._album_hex: list[str] = []
         self._last_beatgrid: BeatGrid | None = None
+        # Concrete level the Auto intensity currently resolves to. Persists across
+        # track changes (a transient tempo unlock keeps the last level rather than
+        # dipping) and defaults to Medium before any tempo has locked.
+        self._auto_level: SyncMode = SyncMode.MEDIUM
         self._beat_anchor: float | None = None  # stable downbeat ref for the card
         self._last_publish = 0.0
         # Background probe that upgrades the metadata fallback to a real tap.
@@ -285,8 +289,16 @@ class SyncSession:
     def settings(self) -> AreaSettings:
         return self._settings
 
+    def _effective_mode(self, mode: SyncMode) -> SyncMode:
+        """Concrete engine mode for a setting: Auto resolves to its current level.
+
+        The engine only ever handles concrete modes; Auto is a session concept
+        resolved from the live tempo (see :meth:`_maybe_apply_auto_intensity`).
+        """
+        return self._auto_level if mode is SyncMode.AUTO else mode
+
     async def start(self) -> None:
-        self._engine.set_mode(self._settings.mode)
+        self._engine.set_mode(self._effective_mode(self._settings.mode))
         self._engine.set_effect(self._settings.effect)
         self._engine.set_brightness(self._settings.brightness)
         self._apply_colour()
@@ -347,7 +359,7 @@ class SyncSession:
         """Live-apply changed settings to the running session."""
         prev = self._settings
         self._settings = settings
-        self._engine.set_mode(settings.mode)
+        self._engine.set_mode(self._effective_mode(settings.mode))
         self._engine.set_effect(settings.effect)
         self._engine.set_brightness(settings.brightness)
         if settings.mode != prev.mode or settings.effect != prev.effect:
@@ -376,6 +388,27 @@ class SyncSession:
             # *old* player would otherwise be installed as the source moments
             # after the switch.
             self._hass.async_create_task(self._reset_source())
+
+    def _maybe_apply_auto_intensity(self, beatgrid: BeatGrid | None) -> None:
+        """When Auto intensity is selected, track the song's tempo to a level.
+
+        Reads the locked BPM and pushes the resolved Subtle/Medium/High into the
+        engine when it changes. Until a fresh tempo lock exists (song start,
+        track change) the last level is held rather than dipping to a default.
+        """
+        if self._settings.mode is not SyncMode.AUTO:
+            return
+        if beatgrid is None or not beatgrid.locked or beatgrid.bpm <= 0:
+            return
+        target = auto_mode_for_bpm(beatgrid.bpm, self._auto_level)
+        if target is self._auto_level:
+            return
+        self._auto_level = target
+        self._engine.set_mode(target)
+        # Mirror apply_settings: clear the flash-limiter's frozen anchor so the
+        # new level settles to its own field instead of the previous level's.
+        self._safety.reset()
+        self._last_safe_t = None
 
     # -- drum-pad (manual beats) ----------------------------------------------
 
@@ -735,6 +768,7 @@ class SyncSession:
                     if map_grid is not None:
                         beatgrid = map_grid
                     self._last_beatgrid = beatgrid
+                    self._maybe_apply_auto_intensity(beatgrid)
                     # Drum-pad mode (card taps drive the beats) auto-expires, so
                     # set it from the live window every frame before rendering.
                     self._engine.set_manual_only(now < self._drum_until)
@@ -1211,6 +1245,10 @@ class SyncSession:
         bg = self._last_beatgrid
         if bg is not None and bg.locked and bg.bpm > 0:
             state["bpm"] = round(bg.bpm)
+        # When Auto intensity is active, surface the level it resolved to so the
+        # card can show e.g. "Auto · High".
+        if self._settings.mode is SyncMode.AUTO:
+            state["auto_mode"] = str(self._auto_level)
         if self._map_section is not None:
             # Current track-map section loudness (0..1) for dashboards.
             state["section_energy"] = round(self._map_section.energy, 2)

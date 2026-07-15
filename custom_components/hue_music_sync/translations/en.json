@@ -50,6 +50,7 @@
       "mode": {
         "name": "Intensity",
         "state": {
+          "auto": "Auto",
           "subtle": "Subtle",
           "medium": "Medium",
           "high": "High",

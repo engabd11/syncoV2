@@ -123,6 +123,7 @@ class SyncMode(StrEnum):
     Parameters per mode live in ``effects.modes.MODE_PARAMS``.
     """
 
+    AUTO = "auto"  # pick Subtle/Medium/High from the song's tempo (see AUTO_BPM_*)
     SUBTLE = "subtle"  # seamless: steady level, colour just flows/shifts smoothly
     MEDIUM = "medium"  # gentle club: visible dimming, soft flashes on strong beats
     HIGH = "high"  # the band: per-instrument spatial split, kicks/guitar/vocals
@@ -146,6 +147,15 @@ class SyncEffect(StrEnum):
 DEFAULT_MODE: Final = SyncMode.HIGH
 DEFAULT_EFFECT: Final = SyncEffect.MUSIC
 DEFAULT_COLOUR: Final = ColorScheme.ALBUM_ART
+
+# Auto intensity: map the song's locked BPM to Subtle/Medium/High. Ballads sit
+# below AUTO_BPM_LOW, up-tempo tracks above AUTO_BPM_HIGH, everything between is
+# Medium. AUTO_BPM_MARGIN is a hysteresis dead-zone half-width so a track sitting
+# on a boundary doesn't oscillate between two levels. Intense/Extreme are never
+# chosen automatically - they stay manual-only.
+AUTO_BPM_LOW: Final = 95.0
+AUTO_BPM_HIGH: Final = 125.0
+AUTO_BPM_MARGIN: Final = 6.0
 
 PLATFORMS: Final = ["switch", "select", "number", "button", "sensor"]
 

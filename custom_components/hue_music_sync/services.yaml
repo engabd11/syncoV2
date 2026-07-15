@@ -15,6 +15,7 @@ activate:
       selector:
         select:
           options:
+            - auto
             - subtle
             - medium
             - high
@@ -93,6 +94,7 @@ set_options:
       selector:
         select:
           options:
+            - auto
             - subtle
             - medium
             - high

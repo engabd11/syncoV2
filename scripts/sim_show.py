@@ -182,6 +182,8 @@ def main() -> int:
     print("-" * len(hdr))
     ok = True
     for mode in SyncMode:
+        if mode is SyncMode.AUTO:
+            continue  # a session-level alias, not a renderable ModeParams bundle
         locked = _run(pcm, mode, force_unlocked=False)
         unlocked = _run(pcm, mode, force_unlocked=True)
         if locked is None:

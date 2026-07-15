@@ -59,7 +59,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from ..const import SyncMode
+from ..const import AUTO_BPM_HIGH, AUTO_BPM_LOW, AUTO_BPM_MARGIN, SyncMode
 from ..color.palette import RGB
 
 
@@ -267,6 +267,30 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
 # as the Hue pipeline can. Subtle/Medium/High and the Movies effect stay fully
 # protected. See the photosensitivity warning in the README.
 UNRESTRAINED_MODES = frozenset({SyncMode.INTENSE, SyncMode.EXTREME})
+
+
+def auto_mode_for_bpm(bpm: float, current: SyncMode) -> SyncMode:
+    """Resolve the Auto intensity to a concrete Subtle/Medium/High from ``bpm``.
+
+    Slow songs (< ``AUTO_BPM_LOW``) map to Subtle, up-tempo (> ``AUTO_BPM_HIGH``)
+    to High, everything between to Medium. ``current`` is the level in effect
+    now; a band change only commits once ``bpm`` crosses the *far* edge of the
+    ±``AUTO_BPM_MARGIN`` dead-zone, so a track hovering on a boundary can't
+    oscillate. Never returns Intense/Extreme — those stay manual-only.
+    """
+    lo, hi, m = AUTO_BPM_LOW, AUTO_BPM_HIGH, AUTO_BPM_MARGIN
+    # The current band is sticky: its edge is pushed out by the margin, so you
+    # must cross the far side of the dead-zone to leave it. While already Subtle
+    # you stay Subtle up to lo + m; from a higher band you only drop to Subtle
+    # once bpm falls below lo - m. Likewise High holds down to hi - m, but you
+    # only climb into High above hi + m.
+    low_edge = lo + m if current is SyncMode.SUBTLE else lo - m
+    high_edge = hi - m if current is SyncMode.HIGH else hi + m
+    if bpm < low_edge:
+        return SyncMode.SUBTLE
+    if bpm > high_edge:
+        return SyncMode.HIGH
+    return SyncMode.MEDIUM
 
 
 # Parameters for the Movies *effect* (not part of the intensity ladder).
