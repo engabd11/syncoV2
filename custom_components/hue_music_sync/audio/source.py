@@ -65,7 +65,11 @@ class TrackInfo:
 
     stream_url: str
     position: float  # seconds into the track
-    track_id: str  # stable id used to detect track changes
+    track_id: str  # stream identity: changes only when the decodable URL changes
+    # Song identity for the *display* layer (album-art colours, tempo reset). Folds
+    # in title+artist so it changes every song even when track_id (the stream URL)
+    # stays constant across a continuous MA flow stream.
+    song_id: str
     album_art_url: str | None
     is_live: bool  # True for non-seekable live streams (radio)
     # Alternate stream URLs to try if the primary won't decode (covers
@@ -623,7 +627,9 @@ class MusicAssistantSource:
         self._decoder = PcmDecoder(ffmpeg_bin)
         self._frame_period = ANALYSIS_HOP / ANALYSIS_SAMPLE_RATE
 
-        self._track_id: str | None = None
+        self._track_id: str | None = None  # stream identity (drives decoder resync)
+        self._song_id: str | None = None  # display identity (album-art / tempo reset)
+        self._meta_ts = 0.0  # last periodic metadata refresh (monotonic)
         self._album_art_url: str | None = None
         self._is_live = False
         self._decode_start_pos = 0.0  # track position at decoder start
@@ -649,14 +655,50 @@ class MusicAssistantSource:
 
     @property
     def track_id(self) -> str | None:
-        return self._track_id
+        # The coordinator uses this to detect song changes (album-art re-extract,
+        # tempo reset). Report the per-song id, not the constant flow-stream URL.
+        return self._song_id or self._track_id
 
     async def read_frame(self) -> AnalysisFrame | None:
         """Read the next paced hop and turn it into analysis features."""
         hop = await self.read_hop()
         if hop is None:
             return None
+        # Keep the display metadata (song id + album art) current so colours follow
+        # track changes even within a continuous flow stream, where the decoder
+        # never resyncs. Throttled; the decode path stays hot.
+        now = time.monotonic()
+        if now - self._meta_ts > 1.0:
+            self._meta_ts = now
+            self._refresh_meta()
         return self._analyzer.push(hop)
+
+    def _refresh_meta(self) -> None:
+        """Update the per-song id and album art from the player's live state."""
+        state = self._hass.states.get(self._entity_id)
+        if state is None:
+            return
+        attrs = state.attributes
+        self._song_id = self._song_signature(attrs) or self._song_id
+        art = self._current_image_url(attrs)
+        if art:
+            self._album_art_url = art
+
+    def _current_image_url(self, attrs) -> str | None:
+        """Current album-art URL: MA's image_url if available, else entity_picture."""
+        mass = self._mass_client()
+        player_id = self._mass_player_id()
+        if mass is not None and player_id is not None:
+            try:
+                player = mass.players.get(player_id)
+                media = getattr(player, "current_media", None)
+                img = getattr(media, "image_url", None) if media else None
+                if img:
+                    return img
+            except Exception:  # noqa: BLE001 - defensive across MA versions
+                pass
+        pic = attrs.get("entity_picture")
+        return self._absolute_url(pic) if pic else None
 
     def _mass_player_id(self) -> str | None:
         """The MA player id is the HA entity's unique id."""
@@ -821,9 +863,26 @@ class MusicAssistantSource:
             stream_url=stream_url,
             position=position,
             track_id=track_id or stream_url,
+            song_id=self._song_signature(attrs) or track_id or stream_url,
             album_art_url=album_art,
             is_live=bool(is_live),
             alt_urls=alt_urls,
+        )
+
+    @staticmethod
+    def _song_signature(attrs) -> str:
+        """A per-song id that changes even across a continuous flow stream.
+
+        Music Assistant serves a single continuous flow-stream URL whose uri /
+        media_content_id stays constant across tracks, so keying track changes on
+        the stream URL alone freezes the album-art colours (and tempo reset) on
+        the first song. Folding in title+artist gives an id that changes every
+        song — the same trick the Snapcast source uses.
+        """
+        return "|".join(
+            str(attrs[k])
+            for k in ("media_content_id", "media_artist", "media_title")
+            if attrs.get(k)
         )
 
     def _ma_stream_candidates(self, media, player, base_url, player_id) -> list[str]:
@@ -903,6 +962,7 @@ class MusicAssistantSource:
     async def _begin(self, info: TrackInfo, url: str | None = None) -> None:
         url = url or info.stream_url
         self._track_id = info.track_id
+        self._song_id = info.song_id
         self._album_art_url = info.album_art_url
         self._is_live = info.is_live
         start = 0.0 if info.is_live else max(0.0, info.position + self._latency)
