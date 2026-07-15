@@ -13,7 +13,7 @@
 // Cosmetic version (shown in the console banner). The browser cache-bust no
 // longer depends on this: the integration appends ?v=<content-hash> derived from
 // this file's bytes, so any edit is picked up without a manual hard refresh.
-const VERSION = "1.17.2";
+const VERSION = "1.17.3";
 
 /* ------------------------- Palette data ------------------------- */
 // Colour schemes from the integration, each a small gradient swatch.
@@ -2182,6 +2182,28 @@ if (!customElements.get("hue-music-sync-card")) {
   customElements.define("hue-music-sync-card", HueMusicSyncCard);
 }
 
+// Defensive verification. Real-world failure: another dashboard resource that
+// monkey-patches customElements.define (older card-mod / card-tools / layout
+// helpers do this to hook cards, and some builds broke on newer HA) can
+// swallow a late registration - this module then runs to completion while
+// customElements.get() still returns undefined and every dashboard shows
+// "Custom element doesn't exist". If the define above didn't actually land,
+// retry through the pristine prototype method, bypassing any patch.
+if (!customElements.get("hue-music-sync-card")) {
+  try {
+    CustomElementRegistry.prototype.define.call(
+      customElements, "hue-music-sync-card", HueMusicSyncCard
+    );
+    console.warn(
+      "hue-music-sync-card: customElements.define is patched by another " +
+      "resource and swallowed our registration; recovered via native define. " +
+      "Check for outdated custom cards (card-mod, card-tools, ...)."
+    );
+  } catch (e) {
+    console.error("hue-music-sync-card: could not register the element", e);
+  }
+}
+
 // Register in the dashboard card picker (guarded against double-loading, since
 // the integration may expose the card via both a Lovelace resource and an extra
 // JS module).
@@ -2229,4 +2251,13 @@ console.info(
   `%c HUE-MUSIC-SYNC-CARD %c ${VERSION} `,
   "color:#fff;background:#7b5cff;font-weight:700;border-radius:4px 0 0 4px;padding:2px 4px",
   "color:#7b5cff;background:#1d1c30;border-radius:0 4px 4px 0;padding:2px 4px"
+);
+// Ground-truth diagnostics right next to the banner: whether the element is
+// actually registered in THIS page's registry, whether something patched
+// customElements.define, and whether we're in the top window. This is the
+// first thing to read when a dashboard claims the element doesn't exist.
+console.info(
+  `hue-music-sync-card: registered=${!!customElements.get("hue-music-sync-card")}` +
+  ` nativeDefine=${String(customElements.define).includes("[native code]")}` +
+  ` top=${window === window.top}`
 );
