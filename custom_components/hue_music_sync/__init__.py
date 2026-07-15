@@ -139,8 +139,6 @@ async def _register_frontend_card(hass: HomeAssistant) -> None:
         return
     hass.data[DOMAIN][DATA_CARD_REGISTERED] = True
     try:
-        from homeassistant.components.frontend import add_extra_js_url
-
         token = await hass.async_add_executor_job(_card_cache_token, card_file)
         if token is None:
             raise RuntimeError(f"could not read {card_file}")
@@ -164,12 +162,18 @@ async def _register_frontend_card(hass: HomeAssistant) -> None:
             hass.http.register_static_path(CARD_BASE_URL, str(frontend_dir), True)
         url = f"{CARD_URL}?v={token}"
 
-        # Two ways to load the card, so it works regardless of dashboard mode and
-        # browser/app-shell caching:
-        #  1. A Lovelace resource (storage mode) — the canonical mechanism, loaded
-        #     by the dashboard at runtime so it isn't blocked by a cached shell.
-        #  2. add_extra_js_url — covers YAML-mode dashboards.
-        add_extra_js_url(hass, url)
+        # The card is loaded ONLY as a Lovelace resource — deliberately. The
+        # obvious second vector, frontend.add_extra_js_url, injects the module
+        # into the app shell where it races HA's own core bundle; when the
+        # (small, cached) card module wins, it registers its element BEFORE
+        # the core bundle installs the scoped custom-element-registry
+        # polyfill, whose registry then can't see the definition — every
+        # dashboard shows "Custom element doesn't exist" while the module
+        # itself ran fine. Resources are imported by the lovelace panel, which
+        # is guaranteed to run after the core bundle, so they can never lose
+        # that race. (The card itself also defers its define until HA's root
+        # element exists, protecting clients with stale cached shells that
+        # still carry the old extra_js entry.)
         if not await _register_lovelace_resource(hass, url):
             # Lovelace not ready yet at startup; retry once HA has fully
             # started, and keep retrying briefly — the resource is the ONLY

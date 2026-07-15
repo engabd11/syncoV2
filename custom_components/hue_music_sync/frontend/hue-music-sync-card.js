@@ -13,7 +13,7 @@
 // Cosmetic version (shown in the console banner). The browser cache-bust no
 // longer depends on this: the integration appends ?v=<content-hash> derived from
 // this file's bytes, so any edit is picked up without a manual hard refresh.
-const VERSION = "1.17.4";
+const VERSION = "1.18.0";
 
 /* ------------------------- Palette data ------------------------- */
 // Colour schemes from the integration, each a small gradient swatch.
@@ -2178,30 +2178,40 @@ class HueMusicSyncCard extends HTMLElement {
   }
 }
 
-if (!customElements.get("hue-music-sync-card")) {
-  customElements.define("hue-music-sync-card", HueMusicSyncCard);
-}
-
-// Defensive verification. Real-world failure: another dashboard resource that
-// monkey-patches customElements.define (older card-mod / card-tools / layout
-// helpers do this to hook cards, and some builds broke on newer HA) can
-// swallow a late registration - this module then runs to completion while
-// customElements.get() still returns undefined and every dashboard shows
-// "Custom element doesn't exist". If the define above didn't actually land,
-// retry through the pristine prototype method, bypassing any patch.
-if (!customElements.get("hue-music-sync-card")) {
-  try {
-    CustomElementRegistry.prototype.define.call(
-      customElements, "hue-music-sync-card", HueMusicSyncCard
-    );
-    console.warn(
-      "hue-music-sync-card: customElements.define is patched by another " +
-      "resource and swallowed our registration; recovered via native define. " +
-      "Check for outdated custom cards (card-mod, card-tools, ...)."
-    );
-  } catch (e) {
-    console.error("hue-music-sync-card: could not register the element", e);
+const defineCard = () => {
+  if (!customElements.get("hue-music-sync-card")) {
+    try {
+      customElements.define("hue-music-sync-card", HueMusicSyncCard);
+    } catch (e) {
+      console.error("hue-music-sync-card: define failed", e);
+    }
   }
+  console.info(
+    `hue-music-sync-card: registered=${!!customElements.get("hue-music-sync-card")}` +
+    ` top=${window === window.top}`
+  );
+};
+
+// DO NOT define eagerly. HA's core bundle installs a scoped custom-element-
+// registry polyfill as it boots; a definition made BEFORE that polyfill
+// installs lands in the native registry the polyfill cannot see —
+// customElements.get() then returns undefined for us forever and every
+// dashboard shows "Custom element doesn't exist", while a page where this
+// module happened to load AFTER the core bundle works fine. That is exactly
+// the race a cached app shell loses: this module (small, cached) executes
+// before HA's core chunk. Diagnosed live: registered=true at module load
+// flipping to defined=false one second later as the polyfill replaced the
+// registry. So: register only once HA's own root element exists (by then the
+// registry is final), with a timer fallback for non-HA contexts (the demo
+// harness, plain previews).
+if (customElements.get("home-assistant")) {
+  defineCard();
+} else {
+  const fallback = setTimeout(defineCard, 5000);
+  customElements.whenDefined("home-assistant").then(() => {
+    clearTimeout(fallback);
+    defineCard();
+  });
 }
 
 // Register in the dashboard card picker (guarded against double-loading, since
@@ -2262,9 +2272,14 @@ const healLateLoad = () => {
       };
       walk(doc);
       const defined = !!win.customElements.get("hue-music-sync-card");
-      if (!defined && errors.length && !doc.querySelector("script[data-hue-music-sync]")) {
+      if (!defined && doc === document) {
+        // Our own window lost the definition (the registry was replaced
+        // after an early define): re-register with the CURRENT registry.
+        defineCard();
+      } else if (!defined && errors.length && !doc.querySelector("script[data-hue-music-sync]")) {
         // A dashboard-rendering frame that never imported this module:
-        // load it there so the element exists in that realm too.
+        // load it there so the element exists in that realm too. (Useless
+        // for our own document - the module map would dedupe the import.)
         const s = doc.createElement("script");
         s.type = "module";
         s.src = import.meta.url;
@@ -2294,13 +2309,4 @@ console.info(
   `%c HUE-MUSIC-SYNC-CARD %c ${VERSION} `,
   "color:#fff;background:#7b5cff;font-weight:700;border-radius:4px 0 0 4px;padding:2px 4px",
   "color:#7b5cff;background:#1d1c30;border-radius:0 4px 4px 0;padding:2px 4px"
-);
-// Ground-truth diagnostics right next to the banner: whether the element is
-// actually registered in THIS page's registry, whether something patched
-// customElements.define, and whether we're in the top window. This is the
-// first thing to read when a dashboard claims the element doesn't exist.
-console.info(
-  `hue-music-sync-card: registered=${!!customElements.get("hue-music-sync-card")}` +
-  ` nativeDefine=${String(customElements.define).includes("[native code]")}` +
-  ` top=${window === window.top}`
 );
