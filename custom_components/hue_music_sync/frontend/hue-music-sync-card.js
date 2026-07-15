@@ -13,7 +13,7 @@
 // Cosmetic version (shown in the console banner). The browser cache-bust no
 // longer depends on this: the integration appends ?v=<content-hash> derived from
 // this file's bytes, so any edit is picked up without a manual hard refresh.
-const VERSION = "1.17.1";
+const VERSION = "1.17.2";
 
 /* ------------------------- Palette data ------------------------- */
 // Colour schemes from the integration, each a small gradient swatch.
@@ -2195,6 +2195,35 @@ if (!window.customCards.some((c) => c.type === "hue-music-sync-card")) {
     documentationURL: "https://github.com/engabd11/synco",
   });
 }
+
+// Late-load self-heal. If a dashboard rendered BEFORE this module executed
+// (slow resource import, stale app shell), Lovelace shows "Custom element
+// doesn't exist" error cards. Modern HA rebuilds those itself via
+// customElements.whenDefined -> ll-rebuild, but some frontend versions/paths
+// miss it and the error card then sticks until a lucky reload. Once we are
+// registered, nudge every error card to rebuild - the ll-rebuild event must
+// be fired on the error element itself, which lives behind nested shadow
+// roots, hence the deep walk. Rebuilding an unrelated error card is a no-op
+// (it just re-renders as the same error). Retried a few times because the
+// dashboard may finish rendering after us.
+const healLateLoad = () => {
+  const errors = [];
+  const walk = (root) => {
+    for (const el of root.querySelectorAll("*")) {
+      if (el.localName === "hui-error-card") errors.push(el);
+      if (el.shadowRoot) walk(el.shadowRoot);
+    }
+  };
+  try {
+    walk(document);
+    for (const el of errors) {
+      el.dispatchEvent(new Event("ll-rebuild", { bubbles: true, composed: true }));
+    }
+  } catch (e) {
+    console.warn("hue-music-sync-card: error-card heal failed", e);
+  }
+};
+for (const delay of [800, 3000, 8000]) setTimeout(healLateLoad, delay);
 
 console.info(
   `%c HUE-MUSIC-SYNC-CARD %c ${VERSION} `,
