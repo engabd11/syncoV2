@@ -289,6 +289,13 @@ class DtlsStream:
             raise ConnectionError(
                 f"DTLS handshake to {self._host}:{self._port} failed: {err}"
             ) from err
+        except BaseException:
+            # Cancelled (or crashed) while the handshake thread was running:
+            # the thread may still COMPLETE the handshake unaware, leaving a
+            # live session on the bridge that blocks the next connect. Close
+            # the socket under it so the bridge side is torn down either way.
+            await loop.run_in_executor(None, client.close)
+            raise
         self._client = client
         self._closed = False
         self._keepalive_task = asyncio.ensure_future(self._keepalive_loop())

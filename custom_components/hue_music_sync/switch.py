@@ -88,5 +88,7 @@ class HueMusicSyncSwitch(HueMusicSyncAreaEntity, SwitchEntity):
     async def async_turn_off(self, **kwargs: Any) -> None:
         self._attr_is_on = False
         self.async_write_ha_state()
-        await self._manager.stop_area(self._area_id)
-        self._sync_state()
+        try:
+            await self._manager.stop_area(self._area_id)
+        finally:
+            self._sync_state()

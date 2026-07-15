@@ -18,6 +18,7 @@ from dataclasses import dataclass, replace
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.util import dt as dt_util
@@ -304,10 +305,16 @@ class SyncSession:
         # session still lingers (up to ~10 s after an unclean end — an HA
         # restart, a crash, a kill). Retry across that window with a fresh
         # stream activation each time instead of failing the switch outright.
+        # ``_stopping`` is checked at every step: the user can flip the switch
+        # off while a (multi-second) handshake attempt is still in flight, and
+        # without the checks the handshake completing AFTER stop() would
+        # re-open the stream as an untracked ghost session nothing can stop.
         last_err: Exception | None = None
         for attempt in range(3):
             if attempt:
                 await asyncio.sleep(4.0)
+            if self._stopping:
+                raise HomeAssistantError("sync was turned off while starting")
             await self._bridge.start_stream(self._config.id)
             try:
                 await self._stream.start()
@@ -325,6 +332,12 @@ class SyncSession:
                     pass
         if last_err is not None:
             raise last_err
+        if self._stopping:
+            # stop() ran while the successful handshake was in flight and could
+            # not see this connection yet: release it here instead of leaving a
+            # live DTLS channel (and its keepalive) that survives the stop.
+            await self._safe_release_stream()
+            raise HomeAssistantError("sync was turned off while starting")
         self._running = True
         self._task = self._hass.async_create_background_task(
             self._run(), f"hue_music_sync_{self._config.id}"
@@ -946,6 +959,12 @@ class SyncSession:
                     attempt, _RECONNECT_ATTEMPTS, self._config.name, err,
                 )
                 continue
+            if not self._running or self._stopping:
+                # stop() ran while this handshake was in flight and couldn't
+                # see the new connection: release it instead of leaving a ghost
+                # DTLS session (with a live keepalive) the switch can't stop.
+                await self._safe_release_stream()
+                return False
             self._delay_buf.clear()  # drop stale frames buffered before the drop
             self._safety.reset()  # field history is stale after the gap
             self._last_safe_t = None
