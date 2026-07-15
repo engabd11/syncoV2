@@ -237,15 +237,30 @@ const CARD_CSS = `
   }
   .hue-cover-gloss { position: absolute; inset: 0; background: linear-gradient(160deg, #ffffff30, transparent 40%); mix-blend-mode: screen; transition: opacity .15s; }
 
-  /* -- areas -- */
-  .hue-areas { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
-  .hue-area { display: inline-flex; align-items: center; gap: 7px; padding: 7px 12px 7px 10px; border-radius: 999px;
-    background: #ffffff0a; border: 1px solid var(--hue-line); color: var(--hue-dim); font-family: var(--hk);
-    font-size: 12.5px; font-weight: 600; cursor: pointer; transition: .18s; white-space: nowrap; }
-  .hue-area:hover { background: #ffffff14; color: var(--hue-text); }
-  .hue-area.on { background: #ffffff10; color: var(--hue-text); }
-  .hue-area-dot { width: 7px; height: 7px; border-radius: 50%; transition: .18s; }
-  .hue-area-name { white-space: nowrap; }
+  /* -- area selector (themed dropdown) -- */
+  .hue-area-dd { position: relative; display: inline-block; margin-bottom: 16px; max-width: 100%; }
+  .hue-area-trigger { display: inline-flex; align-items: center; gap: 8px; max-width: 100%;
+    padding: 8px 13px; border-radius: 12px; background: #ffffff0a; border: 1px solid var(--hue-line);
+    color: var(--hue-text); font-family: var(--hk); font-size: 13px; font-weight: 700;
+    cursor: pointer; transition: .18s; white-space: nowrap; }
+  .hue-area-trigger:hover { background: #ffffff14; }
+  .hue-area-trigger.static { cursor: default; }
+  .hue-area-dot { width: 8px; height: 8px; border-radius: 50%; transition: .18s; flex: none; }
+  .hue-area-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .hue-area-badge { font-size: 10px; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; flex: none; }
+  .hue-area-caret { font-size: 8px; color: var(--hue-dim); margin-left: 1px; flex: none; transition: transform .18s; }
+  .hue-area-dd.open .hue-area-caret { transform: rotate(180deg); }
+  .hue-area-menu { position: absolute; z-index: 30; top: calc(100% + 6px); left: 0; min-width: 210px; max-width: 280px;
+    background: #17162a; border: 1px solid var(--hue-line); border-radius: 14px; padding: 6px;
+    box-shadow: 0 18px 44px -14px #000d, 0 0 0 1px #ffffff08; display: flex; flex-direction: column; gap: 2px;
+    backdrop-filter: blur(12px); }
+  .hue-area-row { display: flex; align-items: center; gap: 9px; padding: 9px 10px; border-radius: 10px;
+    background: none; border: none; text-align: left; width: 100%; cursor: pointer; color: var(--hue-dim);
+    font-family: var(--hk); font-size: 13px; font-weight: 600; transition: .14s; }
+  .hue-area-row:hover { background: #ffffff12; color: var(--hue-text); }
+  .hue-area-row.sel { background: #ffffff10; color: var(--hue-text); }
+  .hue-area-row-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .hue-area-check { width: 13px; text-align: center; font-size: 12px; font-weight: 800; flex: none; }
 
   /* -- fields / labels -- */
   .hue-field { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
@@ -327,14 +342,18 @@ const CARD_CSS = `
   .hue-pill-btn:active { transform: scale(.97); }
   .hue-pill-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .hue-pill-caret { font-size: 9px; color: var(--hue-dim); flex: none; }
-  .hue-hero-now { position: relative; z-index: 2; display: flex; align-items: center; gap: 13px; margin-top: 26px; }
+  .hue-hero-now { position: relative; z-index: 2; display: flex; align-items: stretch; gap: 14px; margin-top: 26px; }
+  /* Right column fills the cover's height: title/artist pinned to the top, the
+     transport pinned to the bottom (level with the cover's lower edge). */
+  .hue-now-right { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: space-between; gap: 10px; }
+  .hue-now-toprow { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; min-width: 0; }
   .hue-bright-mini { display: inline-flex; align-items: center; gap: 5px; padding: 7px 11px; border-radius: 11px; background: #00000040;
     backdrop-filter: blur(6px); border: 1px solid var(--hue-line); font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; }
   .hue-bright-mini-icon { font-size: 12px; }
   .hue-amb-body { position: relative; padding: 16px 20px 20px; background: linear-gradient(180deg, #121120cc, #0f0e1c); }
 
-  /* -- transport row -- */
-  .hue-transport { position: relative; z-index: 2; display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+  /* -- transport row (bottom of the now-playing right column) -- */
+  .hue-transport { position: relative; z-index: 2; display: flex; align-items: center; gap: 8px; }
   .hue-tr-btn { width: 34px; height: 30px; border-radius: 10px; border: 1px solid var(--hue-line);
     background: #00000040; color: var(--hue-text); font-size: 13px; cursor: pointer; transition: .15s;
     display: inline-flex; align-items: center; justify-content: center; backdrop-filter: blur(6px); }
@@ -547,6 +566,18 @@ class HueMusicSyncCard extends HTMLElement {
     this._areas = [];
     this._areaIndex = 0;
     this._demo = false;
+    this._areaMenuOpen = false;   // is the area dropdown expanded?
+    this._areaAutoDone = false;   // have we defaulted the view to the active area yet?
+    // Close the area dropdown when a pointer lands outside it. One persistent
+    // document listener (added on connect) rather than per-open wiring, since a
+    // re-render rebuilds the menu nodes; composedPath crosses the shadow boundary.
+    this._onDocPointer = (e) => {
+      if (!this._areaMenuOpen) return;
+      const path = e.composedPath ? e.composedPath() : [];
+      if (path.some((n) => n.classList && n.classList.contains("hue-area-dd"))) return;
+      this._areaMenuOpen = false;
+      this._render();
+    };
 
     // local optimistic UI state (only used in demo / before hass arrives)
     this._ui = {
@@ -646,20 +677,50 @@ class HueMusicSyncCard extends HTMLElement {
       this._demo = true;
     }
     this._areaIndex = Math.min(this._areaIndex, this._areas.length - 1);
+    this._maybeSelectActiveArea(); // if hass is already here, open on the live area
     this._render();
   }
 
   set hass(hass) {
     const prev = this._hass;
     this._hass = hass;
+    // On first load, open on whichever area is actually syncing rather than
+    // always the first one (may change _areaIndex, so force a render if it does).
+    const areaMoved = this._maybeSelectActiveArea();
     // HA sets `hass` on every global state change; only re-render when an entity
     // this card actually shows has changed (or on first assignment / mid-config).
     const sig = this._signature(hass);
-    if (prev && sig === this._sig && !this._dragging) return;
+    if (!areaMoved && prev && sig === this._sig && !this._dragging) return;
     this._sig = sig;
     if (!this._dragging) this._render();
   }
   get hass() { return this._hass; }
+
+  // Point the card at the active (syncing) area the first time we can tell which
+  // one it is, so opening the dashboard shows what's actually running instead of
+  // whichever area happens to be first. Runs once; a manual pick pins it after.
+  // Returns true if it changed the selected area.
+  _maybeSelectActiveArea() {
+    if (this._areaAutoDone || this._demo || !this._hass || this._areas.length < 2) {
+      return false;
+    }
+    let anyKnown = false;
+    let activeIdx = -1;
+    this._areas.forEach((a, i) => {
+      if (!a.switch) return;
+      const e = this._hass.states[a.switch];
+      if (!e) return;
+      anyKnown = true;
+      if (activeIdx < 0 && e.state === "on") activeIdx = i;
+    });
+    if (!anyKnown) return false; // switch entities not loaded yet; try next update
+    this._areaAutoDone = true;
+    if (activeIdx >= 0 && activeIdx !== this._areaIndex) {
+      this._areaIndex = activeIdx;
+      return true;
+    }
+    return false;
+  }
 
   // Cheap fingerprint of the entities the card depends on across all areas.
   _signature(hass) {
@@ -726,9 +787,12 @@ class HueMusicSyncCard extends HTMLElement {
       });
       this._io.observe(this);
     }
+    document.addEventListener("pointerdown", this._onDocPointer, true);
   }
   disconnectedCallback() {
     cancelAnimationFrame(this._raf);
+    document.removeEventListener("pointerdown", this._onDocPointer, true);
+    this._areaMenuOpen = false;
     if (this._io) {
       this._io.disconnect();
       this._io = null;
@@ -1121,9 +1185,18 @@ class HueMusicSyncCard extends HTMLElement {
     heroTop.appendChild(this._power(m, accent));
     hero.appendChild(heroTop);
 
+    // The cover is a tall tile on the left spanning the title AND transport
+    // rows; the title/artist and the transport controls stack in a column to its
+    // right, so the artwork gets the extra vertical room.
     const heroNow = document.createElement("div");
     heroNow.className = "hue-hero-now";
-    heroNow.appendChild(this._cover(72, 16, m.now.art));
+    heroNow.appendChild(this._cover(96, 18, m.now.art));
+
+    const right = document.createElement("div");
+    right.className = "hue-now-right";
+
+    const topRow = document.createElement("div");
+    topRow.className = "hue-now-toprow";
     const meta = document.createElement("div");
     meta.className = "hue-now-meta";
     const track = document.createElement("div");
@@ -1138,15 +1211,16 @@ class HueMusicSyncCard extends HTMLElement {
     artist.textContent = m.now.artist;
     meta.appendChild(track);
     meta.appendChild(artist);
-    heroNow.appendChild(meta);
+    topRow.appendChild(meta);
 
     const brightMini = document.createElement("div");
     brightMini.className = "hue-bright-mini";
     brightMini.innerHTML = `<span class="hue-bright-mini-icon">\u2600</span><span>${Math.round(m.brightness.value)}%</span>`;
-    heroNow.appendChild(brightMini);
-    hero.appendChild(heroNow);
+    topRow.appendChild(brightMini);
+    right.appendChild(topRow);
 
-    // Transport row: control the actual playing player from the card.
+    // Transport row: control the actual playing player from the card. Sits at
+    // the bottom of the right column, level with the cover's lower edge.
     if (m.now.player) {
       const tr = document.createElement("div");
       tr.className = "hue-transport";
@@ -1182,10 +1256,13 @@ class HueMusicSyncCard extends HTMLElement {
       this._trTime = time;
       this._trDur = m.now.duration;
       tr.appendChild(time);
-      hero.appendChild(tr);
+      right.appendChild(tr);
     } else {
       this._trTime = null;
     }
+
+    heroNow.appendChild(right);
+    hero.appendChild(heroNow);
 
     // Song-structure timeline (energy silhouette + playhead), filled from the
     // live meta feed once the track map is known.
@@ -1227,7 +1304,7 @@ class HueMusicSyncCard extends HTMLElement {
 
     this._accent = accent;
 
-    body.appendChild(this._areaChips(accent));
+    body.appendChild(this._areaSelect(accent));
 
     const intensityHint = m.intensity.autoMode
       ? `Auto · ${titleize(m.intensity.autoMode)}` : null;
@@ -1541,30 +1618,94 @@ class HueMusicSyncCard extends HTMLElement {
     return wrap;
   }
 
-  _areaChips(accent) {
-    const wrap = document.createElement("div");
-    wrap.className = "hue-areas";
-    this._areas.forEach((a, i) => {
-      const on = i === this._areaIndex;
-      const chip = document.createElement("button");
-      chip.className = "hue-area" + (on ? " on" : "");
-      if (on) chip.style.boxShadow = `inset 0 0 0 1px ${accent}66, 0 0 16px ${accent}33`;
-      const dot = document.createElement("span");
-      dot.className = "hue-area-dot";
-      dot.style.background = on ? accent : "#5a5f78";
-      dot.style.boxShadow = on ? `0 0 8px ${accent}` : "none";
-      const name = document.createElement("span");
-      name.className = "hue-area-name";
-      name.textContent = a.name;
-      chip.appendChild(dot);
-      chip.appendChild(name);
-      chip.addEventListener("click", () => {
-        this._areaIndex = i;
+  // Is the given area's sync currently running? (unknown in demo / no switch)
+  _areaOn(a) {
+    if (!a || !a.switch || !this._hass) return false;
+    const e = this._hass.states[a.switch];
+    return !!e && e.state === "on";
+  }
+
+  _areaSelect(accent) {
+    const dd = document.createElement("div");
+    dd.className = "hue-area-dd" + (this._areaMenuOpen ? " open" : "");
+    const multi = this._areas.length > 1;
+    const sel = this._areas[this._areaIndex] || {};
+    const selOn = this._areaOn(sel);
+
+    // Trigger: shows the area being viewed, and whether it's the one syncing.
+    const trigger = document.createElement("button");
+    trigger.className = "hue-area-trigger" + (multi ? "" : " static");
+    const dot = document.createElement("span");
+    dot.className = "hue-area-dot";
+    dot.style.background = selOn ? accent : "#5a5f78";
+    dot.style.boxShadow = selOn ? `0 0 8px ${accent}` : "none";
+    const name = document.createElement("span");
+    name.className = "hue-area-name";
+    name.textContent = sel.name || "Area";
+    trigger.append(dot, name);
+    if (selOn) {
+      const badge = document.createElement("span");
+      badge.className = "hue-area-badge";
+      badge.textContent = "On";
+      badge.style.color = accent;
+      trigger.appendChild(badge);
+    }
+    if (multi) {
+      const caret = document.createElement("span");
+      caret.className = "hue-area-caret";
+      caret.textContent = "▼";
+      trigger.appendChild(caret);
+      trigger.setAttribute("aria-haspopup", "listbox");
+      trigger.setAttribute("aria-expanded", this._areaMenuOpen ? "true" : "false");
+      trigger.addEventListener("click", () => {
+        this._areaMenuOpen = !this._areaMenuOpen;
         this._render();
       });
-      wrap.appendChild(chip);
-    });
-    return wrap;
+    }
+    dd.appendChild(trigger);
+
+    if (multi && this._areaMenuOpen) {
+      const menu = document.createElement("div");
+      menu.className = "hue-area-menu";
+      menu.setAttribute("role", "listbox");
+      this._areas.forEach((a, i) => {
+        const isSel = i === this._areaIndex;
+        const on = this._areaOn(a);
+        const row = document.createElement("button");
+        row.className = "hue-area-row" + (isSel ? " sel" : "");
+        row.setAttribute("role", "option");
+        row.setAttribute("aria-selected", isSel ? "true" : "false");
+        const rdot = document.createElement("span");
+        rdot.className = "hue-area-dot";
+        rdot.style.background = on ? accent : "#5a5f78";
+        rdot.style.boxShadow = on ? `0 0 8px ${accent}` : "none";
+        const rname = document.createElement("span");
+        rname.className = "hue-area-row-name";
+        rname.textContent = a.name;
+        row.append(rdot, rname);
+        if (on) {
+          const rb = document.createElement("span");
+          rb.className = "hue-area-badge";
+          rb.textContent = "On";
+          rb.style.color = accent;
+          row.appendChild(rb);
+        }
+        const check = document.createElement("span");
+        check.className = "hue-area-check";
+        check.textContent = isSel ? "✓" : "";
+        check.style.color = accent;
+        row.appendChild(check);
+        row.addEventListener("click", () => {
+          this._areaIndex = i;
+          this._areaMenuOpen = false;
+          this._areaAutoDone = true; // a manual pick pins the view
+          this._render();
+        });
+        menu.appendChild(row);
+      });
+      dd.appendChild(menu);
+    }
+    return dd;
   }
 
   _label(text, value) {
