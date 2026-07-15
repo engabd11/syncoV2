@@ -13,7 +13,7 @@
 // Cosmetic version (shown in the console banner). The browser cache-bust no
 // longer depends on this: the integration appends ?v=<content-hash> derived from
 // this file's bytes, so any edit is picked up without a manual hard refresh.
-const VERSION = "1.17.3";
+const VERSION = "1.17.4";
 
 /* ------------------------- Palette data ------------------------- */
 // Colour schemes from the integration, each a small gradient swatch.
@@ -2221,28 +2221,71 @@ if (!window.customCards.some((c) => c.type === "hue-music-sync-card")) {
 // Late-load self-heal. If a dashboard rendered BEFORE this module executed
 // (slow resource import, stale app shell), Lovelace shows "Custom element
 // doesn't exist" error cards. Modern HA rebuilds those itself via
-// customElements.whenDefined -> ll-rebuild, but some frontend versions/paths
-// miss it and the error card then sticks until a lucky reload. Once we are
-// registered, nudge every error card to rebuild - the ll-rebuild event must
-// be fired on the error element itself, which lives behind nested shadow
-// roots, hence the deep walk. Rebuilding an unrelated error card is a no-op
-// (it just re-renders as the same error). Retried a few times because the
-// dashboard may finish rendering after us.
+// customElements.whenDefined -> ll-rebuild, but that only helps the realm the
+// module actually ran in: a dashboard rendered inside a same-origin FRAME
+// (an embedded dashboard page, a wall-panel wrapper, a cast view) has its own
+// element registry, and if its page never imported this module the error card
+// there sticks forever while the top window looks perfectly healthy. So the
+// heal walks every reachable same-origin frame: it injects this module into
+// frames that show our error without having the element, and fires
+// ll-rebuild on every error card (the event must be dispatched on the error
+// element itself, which lives behind nested shadow roots, hence the deep
+// walk; rebuilding an unrelated error card is a harmless no-op). Retried a
+// few times because dashboards may finish rendering after us; logs a report
+// only when it finds something wrong, so a healthy page stays quiet.
 const healLateLoad = () => {
-  const errors = [];
-  const walk = (root) => {
-    for (const el of root.querySelectorAll("*")) {
-      if (el.localName === "hui-error-card") errors.push(el);
-      if (el.shadowRoot) walk(el.shadowRoot);
+  const contexts = [];
+  const collect = (win) => {
+    try {
+      if (win.document) contexts.push([win, win.document]);
+    } catch (e) {
+      return; // cross-origin frame: not ours to touch
     }
+    for (let i = 0; i < win.frames.length; i += 1) collect(win.frames[i]);
   };
+  let root = window;
   try {
-    walk(document);
-    for (const el of errors) {
-      el.dispatchEvent(new Event("ll-rebuild", { bubbles: true, composed: true }));
-    }
+    if (window.top && window.top.document) root = window.top;
   } catch (e) {
-    console.warn("hue-music-sync-card: error-card heal failed", e);
+    /* HA itself embedded cross-origin: heal our own tree only */
+  }
+  collect(root);
+  const report = [];
+  for (const [win, doc] of contexts) {
+    try {
+      const errors = [];
+      const walk = (node) => {
+        for (const el of node.querySelectorAll("*")) {
+          if (el.localName === "hui-error-card") errors.push(el);
+          if (el.shadowRoot) walk(el.shadowRoot);
+        }
+      };
+      walk(doc);
+      const defined = !!win.customElements.get("hue-music-sync-card");
+      if (!defined && errors.length && !doc.querySelector("script[data-hue-music-sync]")) {
+        // A dashboard-rendering frame that never imported this module:
+        // load it there so the element exists in that realm too.
+        const s = doc.createElement("script");
+        s.type = "module";
+        s.src = import.meta.url;
+        s.dataset.hueMusicSync = "1";
+        (doc.head || doc.documentElement).appendChild(s);
+      }
+      for (const el of errors) {
+        el.dispatchEvent(new Event("ll-rebuild", { bubbles: true, composed: true }));
+      }
+      if (errors.length || !defined) {
+        report.push(
+          `${doc === document ? "self" : "frame " + (win.location && win.location.pathname)}: ` +
+          `error-cards=${errors.length} defined=${defined}`
+        );
+      }
+    } catch (e) {
+      report.push(`walk failed: ${e && e.message}`);
+    }
+  }
+  if (report.length) {
+    console.info(`hue-music-sync-card heal: ${report.join(" | ")}`);
   }
 };
 for (const delay of [800, 3000, 8000]) setTimeout(healLateLoad, delay);
