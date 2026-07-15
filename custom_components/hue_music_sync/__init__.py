@@ -67,17 +67,23 @@ PREWARM_RESUME_DELAY_S = 120.0
 DATA_AREA_INDEX = "area_index"
 DATA_CARD_REGISTERED = "card_registered"
 
-# The bundled dashboard card. Rather than serve it from a custom integration
-# HTTP route (which proved flaky on some hosts — a wrong MIME or an unserved path
-# makes Lovelace show a generic "Configuration error"), the card is copied into
-# Home Assistant's own ``config/www`` and loaded via the standard ``/local/``
-# static handler, the same rock-solid path a manually-installed card uses.
+# The bundled dashboard card is served straight from the integration's own
+# ``frontend/`` directory: the file is guaranteed to exist on every install.
+# (An earlier build staged a copy into ``config/www`` and loaded it via
+# ``/local/`` — but that 404s wherever HA never routed /local (no www folder
+# when the frontend loaded) or the copy failed, and it failed SILENTLY: the
+# dashboard showed "Custom element doesn't exist" whenever the browser cache
+# was cold, and worked whenever a cached copy survived. Serving our own
+# directory removes the copy step and the /local dependency entirely; the
+# historical MIME concern with integration routes is handled by the
+# ``mimetypes.add_type`` pins at the top of this module.)
 CARD_FILENAME = "hue-music-sync-card.js"
-LOCAL_CARD_URL = f"/local/{CARD_FILENAME}"
-# Legacy custom route used by older builds; cleaned up from the dashboard
-# resources on setup so its now-dead URL can't keep breaking the card.
 CARD_BASE_URL = "/hue_music_sync"
 CARD_URL = f"{CARD_BASE_URL}/{CARD_FILENAME}"
+# The /local URL used by older builds; dashboard-resource entries pointing at
+# it are migrated on setup so a stale (potentially 404ing) reference can't
+# keep breaking the card.
+LOCAL_CARD_URL = f"/local/{CARD_FILENAME}"
 
 
 def _build_ssl_context() -> ssl.SSLContext:
@@ -97,44 +103,18 @@ def _ffmpeg_binary(hass: HomeAssistant) -> str:
         return "ffmpeg"
 
 
-def _install_card_to_www(hass: HomeAssistant, card_file: "Path") -> str | None:
-    """Copy the bundled card into ``config/www`` so it serves via ``/local/``.
+def _card_cache_token(card_file: "Path") -> str | None:
+    """Content-hash cache-bust token for the card (blocking; run in executor).
 
-    Blocking (runs in an executor). Returns a content-hash cache-bust token, or
-    None if the file can't be staged. Only rewrites the destination when the
-    bytes differ, so a restart doesn't needlessly churn the file. A content hash
-    (not the manifest version) means any card edit invalidates the browser cache,
-    so users never have to hard-refresh to pick up a new build.
+    A content hash (not the manifest version) means any card edit invalidates
+    the browser cache, so users never have to hard-refresh a new build.
     """
     import hashlib
-    import os
-    import shutil
 
     try:
-        data = card_file.read_bytes()
+        return hashlib.sha256(card_file.read_bytes()).hexdigest()[:12]
     except OSError:
         return None
-    token = hashlib.sha256(data).hexdigest()[:12]
-    www = hass.config.path("www")
-    dest = os.path.join(www, CARD_FILENAME)
-    try:
-        os.makedirs(www, exist_ok=True)
-        current = None
-        if os.path.exists(dest):
-            with open(dest, "rb") as fh:
-                current = hashlib.sha256(fh.read()).hexdigest()[:12]
-        if current != token:
-            # Stage via a temp file + atomic rename: a dashboard fetching the
-            # card mid-copy must never be served a truncated module (which
-            # parses as a broken script and leaves the card unregistered until
-            # the next full reload).
-            tmp = dest + ".tmp"
-            shutil.copyfile(card_file, tmp)
-            os.replace(tmp, dest)
-    except OSError as err:
-        _LOGGER.warning("Could not stage the Hue Synco card into www/: %s", err)
-        return None
-    return token
 
 
 async def _register_frontend_card(hass: HomeAssistant) -> None:
@@ -161,30 +141,28 @@ async def _register_frontend_card(hass: HomeAssistant) -> None:
     try:
         from homeassistant.components.frontend import add_extra_js_url
 
-        # Stage the card into config/www so Home Assistant serves it through its
-        # standard /local/ static handler (correct MIME, always reachable) — the
-        # same proven path a manually-installed card uses. No custom HTTP route.
-        token = await hass.async_add_executor_job(
-            _install_card_to_www, hass, card_file
-        )
+        token = await hass.async_add_executor_job(_card_cache_token, card_file)
         if token is None:
-            raise RuntimeError("could not stage the card into www/")
-        url = f"{LOCAL_CARD_URL}?v={token}"
+            raise RuntimeError(f"could not read {card_file}")
 
-        # HA only wires up /local -> config/www when that folder exists as the
-        # http component loads. If we just created www, register it now so the
-        # card serves on this boot (no second restart needed); a duplicate
-        # registration (www already existed) raises and is safely ignored.
+        # Serve the integration's own frontend/ directory. The file is
+        # guaranteed to exist (it ships with the integration) — unlike the old
+        # approach of staging a copy into config/www, which 404'd on installs
+        # where /local was never routed or the copy failed, and did so
+        # SILENTLY: the card then only rendered when a browser happened to
+        # have a cached copy, and a cache reset produced "Custom element
+        # doesn't exist". If serving fails here, the whole registration fails
+        # LOUDLY (the except below) instead of leaving a dead resource URL.
         try:
             from homeassistant.components.http import StaticPathConfig
 
             await hass.http.async_register_static_paths(
-                [StaticPathConfig("/local", hass.config.path("www"), True)]
+                [StaticPathConfig(CARD_BASE_URL, str(frontend_dir), True)]
             )
-        except Exception:  # noqa: BLE001 - already served by core, or older API
-            _LOGGER.debug(
-                "/local already served (or static-path API differs)", exc_info=True
-            )
+        except (ImportError, AttributeError):
+            # Older cores without the async API: the classic sync form.
+            hass.http.register_static_path(CARD_BASE_URL, str(frontend_dir), True)
+        url = f"{CARD_URL}?v={token}"
 
         # Two ways to load the card, so it works regardless of dashboard mode and
         # browser/app-shell caching:
@@ -226,7 +204,7 @@ async def _register_frontend_card(hass: HomeAssistant) -> None:
         _LOGGER.warning(
             "Could not auto-register the Hue Synco dashboard card; add it manually "
             "as a dashboard resource pointing at %s (JavaScript Module).",
-            LOCAL_CARD_URL, exc_info=True,
+            CARD_URL, exc_info=True,
         )
 
 
@@ -243,7 +221,10 @@ async def _register_lovelace_resource(hass: HomeAssistant, url: str) -> bool:
     try:
         await resources.async_get_info()  # ensure the collection is loaded
         base = url.split("?")[0]
-        legacy_base = CARD_URL.split("?")[0]  # old custom-route URL to remove
+        # Older builds staged the card into config/www and registered it at
+        # /local/... — on installs where that never actually served, the entry
+        # 404s forever; migrate it away instead of leaving it to break the card.
+        legacy_base = LOCAL_CARD_URL
         found = False
         for item in list(resources.async_items()):
             item_base = str(item.get("url", "")).split("?")[0]
@@ -252,8 +233,6 @@ async def _register_lovelace_resource(hass: HomeAssistant, url: str) -> bool:
                 if item.get("url") != url:  # version changed: refresh it
                     await resources.async_update_item(item["id"], {"url": url})
             elif item_base == legacy_base:
-                # A leftover resource pointing at the removed custom route would
-                # 404 forever; drop it so it can't keep breaking the card.
                 try:
                     await resources.async_delete_item(item["id"])
                     _LOGGER.info("Removed stale Hue Synco card resource %s", item_base)
