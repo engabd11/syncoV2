@@ -56,6 +56,9 @@ jobs:
         with:
           python-version: "3.13"
       - name: Install test harness
-        run: pip install pytest pytest-homeassistant-custom-component numpy
+        # ha-ffmpeg + home-assistant-frontend: the integration hard-depends on
+        # the ffmpeg and frontend components, so loading it in the harness
+        # needs their requirements importable.
+        run: pip install pytest pytest-homeassistant-custom-component numpy ha-ffmpeg home-assistant-frontend
       - name: Run HA-harness tests
         run: pytest tests_ha/ -v
