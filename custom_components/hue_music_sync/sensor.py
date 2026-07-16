@@ -53,9 +53,18 @@ class HueSyncoPrewarmProgress(HueSyncoLibraryEntity, SensorEntity):
                         "total": int(persisted.get("total", 0) or 0),
                         "done": int(persisted.get("total", 0) or 0) if done else 0,
                         "analysed": int(persisted.get("analysed", 0) or 0),
+                        "ambient": int(persisted.get("ambient", 0) or 0),
                         "failed": int(persisted.get("failed", 0) or 0),
+                        "last_run": persisted.get("finished_at"),
                     }
                 )
+                # The persistent index carries the labelled failure list, so
+                # "which songs failed" survives a restart too.
+                from .coordinator import get_track_index
+
+                index = get_track_index(self.hass)
+                await index.ensure_loaded()
+                status["failed_tracks"] = index.failed_entries(25)
         self.async_on_remove(
             async_dispatcher_connect(self.hass, SIGNAL_PREWARM, self._updated)
         )
@@ -82,6 +91,15 @@ class HueSyncoPrewarmProgress(HueSyncoLibraryEntity, SensorEntity):
             "tracks_total": total,
             "tracks_checked": status.get("done", 0),
             "newly_analysed": status.get("analysed", 0),
+            # Ambient tier: decodable, full continuous show, but no reliable
+            # offline beat grid (the live tracker follows the replayed onsets).
+            "newly_ambient": status.get("ambient", 0),
             "failed": status.get("failed", 0),
+            # Tracks enumerated but not yet analysed (new since the last run).
+            "pending": status.get("pending"),
+            "last_run": status.get("last_run"),
             "last_error": status.get("last_error"),
+            # Capped labelled list; the full report is written next to the
+            # cache as analysis_report.json after each sweep.
+            "failed_tracks": status.get("failed_tracks", []),
         }

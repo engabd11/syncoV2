@@ -81,12 +81,32 @@ def test_track_map_save_load_round_trips(map_120: TrackMap, tmp_path):
     assert a.beat == b.beat and a.beat_strength == pytest.approx(b.beat_strength)
 
 
-def test_load_rejects_a_stale_format(map_120: TrackMap, tmp_path, monkeypatch):
-    import hue_music_sync.audio.trackmap as tmmod
-    path = tmp_path / "m.npz"
-    map_120.save(path)
-    monkeypatch.setattr(tmmod, "_CACHE_FORMAT", tmmod._CACHE_FORMAT + 1)
-    assert TrackMap.load(path) is None  # version mismatch → ignored, not mis-read
+def _rewrite_format(src, dst, fmt: float, drop: tuple = ()):
+    """Re-write a saved map as an older/other on-disk format for compat tests."""
+    with np.load(src) as z:
+        data = {k: z[k] for k in z.files if k not in drop}
+    data["meta"] = data["meta"].copy()
+    data["meta"][4] = fmt
+    np.savez_compressed(dst, **data)
+
+
+def test_load_accepts_v2_and_rejects_unknown_formats(map_120: TrackMap, tmp_path):
+    # The explicit compat policy: v2 files (pre-ambient-tier, no onsets/diag
+    # rows) still load — a format bump must NOT silently un-warm a
+    # pre-analysed library — while an unknown (newer) format is ignored
+    # rather than mis-read.
+    src = tmp_path / "m.npz"
+    map_120.save(src)
+
+    v2 = tmp_path / "v2.npz"
+    _rewrite_format(src, v2, 2.0, drop=("onsets", "onset_accents", "diag"))
+    back = TrackMap.load(v2)
+    assert back is not None and back.usable  # v2 accepted
+    assert back.diag.shape == (6,)  # missing v3 rows default safely
+
+    unknown = tmp_path / "v99.npz"
+    _rewrite_format(src, unknown, 99.0)
+    assert TrackMap.load(unknown) is None  # unknown version → ignored
 
 
 def test_load_handles_a_corrupt_file(tmp_path):
@@ -132,25 +152,29 @@ def test_prewarm_analyses_and_caches_then_skips_on_rerun(map_120: TrackMap, tmp_
         return MapResult(track_map=map_120, decoded=True)
 
     monkeypatch.setattr(tmmod, "build_track_map", fake_build)
-    items = [("artist|a|1", "http://lib/1"), ("artist|b|2", "http://lib/2")]
+    items = [
+        ("artist|a|1", "http://lib/1", "Artist - A"),
+        ("artist|b|2", "http://lib/2", "Artist - B"),
+    ]
 
     mapper = TrackMapper("ffmpeg", cache_dir=tmp_path)
-    analysed, considered, failures = asyncio.run(mapper.prewarm(items, delay_s=0))
-    assert (analysed, considered, failures) == (2, 2, [])
+    res = asyncio.run(mapper.prewarm(items, delay_s=0))
+    assert (res.analysed, res.considered, res.failures) == (2, 2, [])
     assert mapper.has_disk("artist|a|1") and mapper.has_disk("artist|b|2")
     assert seen == ["http://lib/1", "http://lib/2"]
 
     # A fresh mapper over the same library: everything is already on disk.
     seen.clear()
     mapper2 = TrackMapper("ffmpeg", cache_dir=tmp_path)
-    analysed2, considered2, failures2 = asyncio.run(mapper2.prewarm(items, delay_s=0))
-    assert (analysed2, considered2, failures2) == (0, 2, [])
+    res2 = asyncio.run(mapper2.prewarm(items, delay_s=0))
+    assert (res2.analysed, res2.considered, res2.failures) == (0, 2, [])
     assert seen == []  # nothing re-analysed
 
 
 def test_prewarm_reports_failures(map_120: TrackMap, tmp_path, monkeypatch):
     # A systematically failing library (bad login, wrong URL) must be VISIBLE:
-    # prewarm returns (url, error) samples instead of failing silently.
+    # prewarm returns labelled (label, url, error) samples instead of failing
+    # silently — the user needs to see WHICH songs failed.
     import asyncio
 
     import hue_music_sync.audio.trackmap as tmmod
@@ -161,11 +185,14 @@ def test_prewarm_reports_failures(map_120: TrackMap, tmp_path, monkeypatch):
         return MapResult(track_map=map_120, decoded=True)
 
     monkeypatch.setattr(tmmod, "build_track_map", fake_build)
-    items = [("t|good|1", "http://lib/good"), ("t|bad|2", "http://lib/bad")]
+    items = [
+        ("t|good|1", "http://lib/good", "T - Good"),
+        ("t|bad|2", "http://lib/bad", "T - Bad"),
+    ]
     mapper = TrackMapper("ffmpeg", cache_dir=tmp_path)
-    analysed, considered, failures = asyncio.run(mapper.prewarm(items, delay_s=0))
-    assert (analysed, considered) == (1, 2)
-    assert failures == [("http://lib/bad", "HTTP 401")]
+    res = asyncio.run(mapper.prewarm(items, delay_s=0))
+    assert (res.analysed, res.considered, res.failed) == (1, 2, 1)
+    assert res.failures == [("T - Bad", "http://lib/bad", "HTTP 401")]
 
 
 def test_ensure_loads_from_disk_even_without_a_url(map_120: TrackMap, tmp_path):
@@ -424,9 +451,20 @@ def test_transient_failure_is_retried_then_permanent():
 
 def test_decoded_but_unusable_is_permanent_immediately():
     m = TrackMapper("ffmpeg")
-    # Audio decoded fine but no usable beat map: re-analysis won't help.
-    m._record_result("t", "u", MapResult(None, decoded=True))
+    # Audio decoded fine (whole stream, cleanly) but nothing servable came out
+    # (silence / far too short): re-analysis won't help.
+    m._record_result("t", "u", MapResult(None, decoded=True, complete=True))
     assert m.failed("t")
+
+
+def test_partial_decode_is_transient():
+    # A decode that produced >5 s of audio but did NOT reach a clean end of
+    # stream (network drop, server hiccup) may analyse fine next time — it
+    # must be retried, not permanently failed.
+    m = TrackMapper("ffmpeg")
+    m._record_result("t", "u", MapResult(None, decoded=True, complete=False))
+    assert not m.failed("t")
+    assert m._failures["t"].attempts == 1 and not m._failures["t"].permanent
 
 
 def test_success_caches_map_and_clears_prior_failure():
@@ -505,3 +543,190 @@ def test_width_filter_drops_narrowband_picks():
     t2, a2 = _width_filter(times, accents, width)
     np.testing.assert_allclose(t2, times[:2])
     np.testing.assert_allclose(a2, accents[:2])
+
+
+# --- ambient (features-only) tier: a decodable track never falls to metadata --
+
+def _gridless(map_120: TrackMap) -> TrackMap:
+    """A copy of a real map with the grid rejected (the ambient tier)."""
+    from dataclasses import replace
+
+    return replace(
+        map_120,
+        confidence=0.10,  # below MIN_MAP_CONFIDENCE -> grid_usable False
+        onsets=map_120.beats.copy(),  # detected onsets stand in for the grid
+        onset_accents=map_120.accents.copy(),
+    )
+
+
+def test_gridless_map_is_servable_but_grid_at_is_none(map_120: TrackMap):
+    amb = _gridless(map_120)
+    assert not amb.grid_usable and amb.features_usable and amb.servable
+    assert amb.grid_at(10.0) is None  # never claims a schedule
+    fr = amb.frame_at(12.0)
+    assert fr is not None
+    assert fr.tempo_bpm == 0.0  # no trusted tempo reported
+    # ...but the continuous show is fully fed (the fixture is sparse kicks, so
+    # sample across a window rather than one frame).
+    peak = max(
+        f.energy for p in np.arange(10.0, 12.0, 0.02)
+        if (f := amb.frame_at(float(p))) is not None
+    )
+    assert peak > 0.5
+
+
+def test_gridless_map_replays_detected_onsets(map_120: TrackMap):
+    # The ambient tier fires its DETECTED onsets (honest events) so the
+    # engine's unlocked flash path works and the causal tracker gets phase
+    # anchors — exactly once each, like the scheduled path.
+    amb = _gridless(map_120)
+    expect = np.sum((amb.onsets >= 10.0) & (amb.onsets < 14.0))
+    fired = 0
+    prev = 10.0
+    for pos in np.arange(10.0, 14.0, 0.02):
+        fr = amb.frame_at(float(pos), prev)
+        prev = float(pos)
+        assert fr is not None
+        if fr.beat:
+            fired += 1
+            assert fr.beat_strength >= 1.0
+    assert fired == expect > 0
+
+
+def test_ambient_map_round_trips_via_disk(map_120: TrackMap, tmp_path):
+    amb = _gridless(map_120)
+    path = tmp_path / "amb.npz"
+    amb.save(path)
+    back = TrackMap.load(path)
+    assert back is not None and back.servable and not back.grid_usable
+    np.testing.assert_allclose(back.onsets, amb.onsets)
+    np.testing.assert_allclose(back.diag, amb.diag)
+
+
+def test_ambient_map_is_served_not_failed(map_120: TrackMap, tmp_path):
+    # THE headline fix: decoded-but-gridless used to be a permanent failure
+    # (metadata animation forever). Now it is cached, persisted and served.
+    amb = _gridless(map_120)
+    m = TrackMapper("ffmpeg", cache_dir=tmp_path)
+    m._record_result("t", "u", MapResult(amb, decoded=True, complete=True))
+    assert not m.failed("t")
+    assert m.get("t") is amb
+
+
+def test_long_noise_lands_in_ambient_tier_not_unusable():
+    # 45 s of noise: no trustworthy grid (contrast gate), but the features are
+    # honest — the lights follow the audio instead of a dead animation.
+    from hue_music_sync.audio.trackmap import analyze_pcm_diag
+
+    rng = np.random.default_rng(7)
+    noise = (rng.standard_normal(_SR * 45) * 0.3).astype(np.float32)
+    tm, diag = analyze_pcm_diag(noise)
+    assert tm is not None and not tm.grid_usable and tm.servable
+    assert diag.tier == "ambient" and diag.reason
+
+
+def test_short_gridless_audio_is_unusable():
+    from hue_music_sync.audio.trackmap import analyze_pcm_diag
+
+    rng = np.random.default_rng(7)
+    noise = (rng.standard_normal(int(_SR * 10)) * 0.3).astype(np.float32)
+    tm, diag = analyze_pcm_diag(noise)
+    assert tm is None or not tm.servable
+    if tm is None:
+        assert diag.reason
+
+
+# --- local tempo path: drifting drummers and mid-song tempo changes ---------
+
+def _drifting_song(
+    seconds: float = 60.0,
+    bpm: float = 120.0,
+    drift: float = 0.05,
+    quiet_until: float | None = None,
+    amp_quiet: float = 0.3,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Kicks whose period breathes ±drift (a live drummer). Returns (sig, times)."""
+    sig = np.zeros(int(_SR * seconds), dtype=np.float32)
+    kick = _kick(int(0.1 * _SR))
+    times = []
+    t = 0.30
+    while t < seconds:
+        times.append(t)
+        i = int(t * _SR)
+        amp = amp_quiet if (quiet_until is not None and t < quiet_until) else 1.0
+        seg = kick[: len(sig) - i] * amp
+        sig[i : i + len(seg)] += seg
+        period = 60.0 / bpm * (1.0 + drift * np.sin(2 * np.pi * t / 20.0))
+        t += period
+    peak = np.max(np.abs(sig))
+    return (sig / peak * 0.9 if peak else sig), np.array(times)
+
+
+def test_drifting_tempo_is_tracked():
+    # ±5% period modulation = a human drummer. The old global-period MAD gate
+    # (0.12) rejected this class outright; the tempogram path must ride it.
+    sig, true = _drifting_song(seconds=60.0, bpm=120.0, drift=0.05)
+    tm = analyze_pcm(sig)
+    assert tm is not None and tm.grid_usable, (
+        f"drifting groove not usable: conf {0.0 if tm is None else tm.confidence:.2f}"
+    )
+    close = checked = 0
+    for b in tm.beats:
+        if b < 2.0 or b > 58.0:
+            continue
+        checked += 1
+        if np.min(np.abs(true - b)) < 0.06:
+            close += 1
+    assert checked > 60 and close / checked >= 0.8
+
+
+def test_mid_song_tempo_change_is_tracked():
+    # 100 BPM verse into a 140 BPM chorus: one global tempo cannot fit both;
+    # the Viterbi path must switch and the DP tracker must follow.
+    seconds = 60.0
+    sig = np.zeros(int(_SR * seconds), dtype=np.float32)
+    kick = _kick(int(0.1 * _SR))
+    times = []
+    t = 0.30
+    while t < seconds:
+        times.append(t)
+        i = int(t * _SR)
+        seg = kick[: len(sig) - i]
+        sig[i : i + len(seg)] += seg
+        t += 60.0 / (100.0 if t < 30.0 else 140.0)
+    sig = sig / np.max(np.abs(sig)) * 0.9
+    tm = analyze_pcm(sig)
+    assert tm is not None and tm.grid_usable
+    first = np.diff(tm.beats[(tm.beats > 4.0) & (tm.beats < 26.0)])
+    second = np.diff(tm.beats[(tm.beats > 36.0) & (tm.beats < 56.0)])
+    assert abs(np.median(first) - 0.600) < 0.03  # 100 BPM half
+    assert abs(np.median(second) - 0.4286) < 0.03  # 140 BPM half
+
+
+def test_dynamics_plus_drift_grid_usable():
+    # The synthetic Hirudava: quiet verse (0.3 amp) + live-drum drift. On the
+    # old analysis BOTH gates failed (diluted autocorrelation + wobbly-vs-
+    # global-period MAD) and the song fell to the metadata animation.
+    sig, _ = _drifting_song(
+        seconds=60.0, bpm=110.0, drift=0.04, quiet_until=25.0, amp_quiet=0.3
+    )
+    tm = analyze_pcm(sig)
+    assert tm is not None and tm.grid_usable, (
+        f"Hirudava-class groove not usable: conf "
+        f"{0.0 if tm is None else tm.confidence:.2f}"
+    )
+
+
+def test_tempogram_path_is_cheap():
+    # The O() promise: tempogram + Viterbi on a 12-minute envelope must be
+    # far below the decode time it rides on.
+    from hue_music_sync.audio.trackmap import _tempo_path, _tempogram
+
+    rng = np.random.default_rng(3)
+    env = np.abs(rng.standard_normal(36_000))  # 12 min at 50 fps
+    t0 = time.perf_counter()
+    tg = _tempogram(env)
+    assert tg is not None
+    sal, lags, _centres, lag_refined = tg
+    _path, _stab = _tempo_path(sal, lags, lag_refined)
+    assert time.perf_counter() - t0 < 5.0  # generous CI bound; ~0.1 s locally

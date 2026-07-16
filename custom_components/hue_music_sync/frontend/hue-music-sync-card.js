@@ -13,7 +13,7 @@
 // Cosmetic version (shown in the console banner). The browser cache-bust no
 // longer depends on this: the integration appends ?v=<content-hash> derived from
 // this file's bytes, so any edit is picked up without a manual hard refresh.
-const VERSION = "1.20.1";
+const VERSION = "1.21.0";
 
 /* ------------------------- Palette data ------------------------- */
 // Colour schemes from the integration, each a small gradient swatch.
@@ -2828,7 +2828,7 @@ class HueMusicSyncTabletCard extends HueMusicSyncCard {
     }
     right.appendChild(selects);
 
-    // Intensity — landscape equalizer picker.
+    // Intensity - landscape equalizer picker.
     const intField = document.createElement("div");
     intField.className = "hue-field";
     const intHint = m.intensity.autoMode
@@ -2838,7 +2838,7 @@ class HueMusicSyncTabletCard extends HueMusicSyncCard {
     intField.appendChild(this._intensityPicker(m, accent));
     right.appendChild(intField);
 
-    // Effect — shared segmented control.
+    // Effect - shared segmented control.
     const effLabel = m.effect.options.find((o) => o.value === m.effect.value);
     const effField = document.createElement("div");
     effField.className = "hue-field";
@@ -2849,7 +2849,7 @@ class HueMusicSyncTabletCard extends HueMusicSyncCard {
     }));
     right.appendChild(effField);
 
-    // Colour — shared palette dots.
+    // Colour - shared palette dots.
     const colField = document.createElement("div");
     colField.className = "hue-field";
     colField.appendChild(this._label("Colour", pal.name));

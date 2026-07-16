@@ -321,14 +321,23 @@ async def _iter_library_tracks(music, page: int = 500):
         offset += len(items)
 
 
+def track_label(artist: str | None, title: str | None) -> str:
+    """A human "Artist - Title" label for failure reports and diagnostics."""
+    if artist and title:
+        return f"{artist} - {title}"
+    return title or artist or "?"
+
+
 async def library_prewarm_items(
     hass: HomeAssistant, subsonic: SubsonicCfg = None
-) -> list[tuple[str, str]]:
-    """``(track_signature, url)`` for every analysable track in the MA library.
+) -> list[tuple[str, str, str]]:
+    """``(track_signature, url, label)`` for every analysable MA library track.
 
     Keyed by the SAME :func:`track_signature` the live player reports at
     playback (uri | artist | title), so a pre-warmed map is found when the track
-    is later played — exactly as the next-track prefetch already relies on.
+    is later played — exactly as the next-track prefetch already relies on. The
+    label ("Artist - Title") names the track in failure records, so the user
+    can finally see WHICH songs failed the analysis instead of a bare URL.
     """
     mass = _find_mass_client(hass)
     music = getattr(mass, "music", None) if mass is not None else None
@@ -338,22 +347,20 @@ async def library_prewarm_items(
             "(no music controller); nothing to pre-analyse"
         )
         return []
-    out: list[tuple[str, str]] = []
+    out: list[tuple[str, str, str]] = []
     seen: set[str] = set()
     async for track in _iter_library_tracks(music):
         try:
-            sig = track_signature(
-                getattr(track, "uri", None),
-                _media_item_artist(track),
-                getattr(track, "name", None),
-            )
+            artist = _media_item_artist(track)
+            title = getattr(track, "name", None)
+            sig = track_signature(getattr(track, "uri", None), artist, title)
             if not sig or sig in seen:
                 continue
             url = library_track_url(track, subsonic)
             if not url:
                 continue
             seen.add(sig)
-            out.append((sig, url))
+            out.append((sig, url, track_label(artist, title)))
         except Exception:  # noqa: BLE001 - skip any malformed item
             _LOGGER.debug("Library pre-warm: skipping a malformed track", exc_info=True)
     return out

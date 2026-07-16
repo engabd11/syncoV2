@@ -33,9 +33,11 @@ from .audio.source import (
     ma_player_provider,
     resolve_map_url,
     resolve_next_map,
+    track_label,
 )
 from .audio.structure import StructureTracker
 from .audio.tempo import BeatGrid, TempoTracker
+from .audio.track_index import TrackIndex
 from .audio.trackmap import Section, TrackMapper
 from .color.album_art import extract_palette
 from .color.palette import Palette
@@ -123,6 +125,28 @@ _ART_RETRY_S = 10.0
 def trackmap_cache_dir(hass) -> str:
     """The shared on-disk track-map cache directory (coordinator + pre-warm)."""
     return hass.config.path("hue_music_sync", "trackmaps")
+
+
+DATA_TRACK_INDEX = "track_index"
+
+
+def get_track_index(hass) -> TrackIndex:
+    """The one shared per-track analysis-outcome index for this HA instance.
+
+    Creation is IO-free; the file loads lazily (executor-side) on first async
+    use, so this is safe to call from sync constructors. Sharing one instance
+    between every area's mapper and the library pre-warm is the point: a track
+    the sweep proved undecodable is not re-decoded at playback, failures
+    survive restarts, and both sides agree on the disk-cache budget.
+    """
+    data = hass.data.setdefault(DOMAIN, {})
+    idx = data.get(DATA_TRACK_INDEX)
+    if idx is None:
+        from pathlib import Path
+
+        idx = TrackIndex(Path(trackmap_cache_dir(hass)) / "track_index.json")
+        data[DATA_TRACK_INDEX] = idx
+    return idx
 
 
 def is_ma_player(hass: HomeAssistant, entity_id: str) -> bool:
@@ -250,6 +274,9 @@ class SyncSession:
             # Persist analyzed maps under HA's config dir so a track plays
             # instantly the second time (and after a library pre-warm).
             cache_dir=trackmap_cache_dir(hass),
+            # Shared with the library pre-warm: persistent failure verdicts +
+            # a library-sized disk budget (no more eviction churn at 512).
+            track_index=get_track_index(hass),
         )
         self._map_track: str | None = None  # last track a map URL was resolved for
         self._map_check = 0.0
@@ -595,8 +622,12 @@ class SyncSession:
                     )
                 else:
                     reason = (
-                        "offline analysis has not produced a usable track map "
-                        "(failed or still pending); see earlier log entries"
+                        "offline analysis has not produced a servable track map. "
+                        "Decodable tracks now always get at least the ambient "
+                        "tier, so landing here means the audio could not be "
+                        "fetched/decoded (or analysis is still pending) — "
+                        "diagnose it with the hue_music_sync.analyze_track "
+                        "service; see earlier log entries"
                     )
                 _LOGGER.warning(
                     "%s: track %r is using the generic metadata animation — %s",
@@ -1039,7 +1070,12 @@ class SyncSession:
         self._map_track = track
         self._map_prev_pos = None
         self._map_section = None
-        self._mapper.ensure(track, url)
+        st = self._hass.states.get(src.entity_id)
+        label = track_label(
+            st.attributes.get("media_artist") if st else None,
+            st.attributes.get("media_title") if st else None,
+        )
+        self._mapper.ensure(track, url, label)
 
     def _maybe_prefetch_next(self) -> None:
         """Pre-analyse the *next* queue item so a gapless change is instant.

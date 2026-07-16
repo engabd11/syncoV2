@@ -158,6 +158,62 @@ prewarm_library:
     Analyse your whole Music Assistant library in the background and cache the
     results to disk, so every track plays instantly with full beat-accurate
     (offline track-map) reaction the first time too - not just on a repeat or in
-    a queue. Gentle and resumable: it analyses one track at a time, yields to
-    live playback, and skips tracks already cached. For a Navidrome / OpenSubsonic
-    library, set the library URL and login in the integration options first.
+    a queue. Gentle, resumable and incremental: it analyses one track at a time,
+    yields to live playback, and skips tracks already cached - so a re-run also
+    picks up newly added tracks cheaply. For a Navidrome / OpenSubsonic library,
+    set the library URL and login in the integration options first.
+  fields:
+    retry_failed:
+      name: Retry failed tracks
+      description: >-
+        Clear the recorded per-track failure verdicts (and ambient-only maps)
+        first, so every previously failed or beat-grid-less track is analysed
+        again. Use after an integration update that improves the analysis.
+      required: false
+      default: false
+      selector:
+        boolean:
+
+analyze_track:
+  name: Analyse one track
+  description: >-
+    Diagnose (and re-analyse) a single song right away, and post the full
+    analysis verdict as a notification: tier (full beat grid / ambient),
+    tempo, confidence, and the exact reason when the beat grid was not
+    trustworthy. Give a direct stream URL, an artist + title to look up in the
+    Music Assistant library, or a media player that is currently playing.
+  fields:
+    url:
+      name: Stream URL
+      description: Direct URL of the audio to analyse (anything ffmpeg can open).
+      required: false
+      selector:
+        text:
+    artist:
+      name: Artist
+      description: Artist name, matched against the Music Assistant library.
+      required: false
+      selector:
+        text:
+    title:
+      name: Title
+      description: Track title, matched against the Music Assistant library.
+      required: false
+      selector:
+        text:
+    media_player:
+      name: Media player
+      description: Analyse whatever this player is playing right now.
+      required: false
+      selector:
+        entity:
+          domain: media_player
+    force:
+      name: Force re-analysis
+      description: >-
+        Clear any cached map / failure verdict for the track and analyse it
+        fresh (default on).
+      required: false
+      default: true
+      selector:
+        boolean:

@@ -33,7 +33,13 @@ from homeassistant.util import dt as dt_util
 from ..const import ANALYSIS_HOP, ANALYSIS_SAMPLE_RATE, BANDS, LIGHT_PIPELINE_MS, TIMING_BUFFER_MS
 from .analyzer import AnalysisFrame
 from .library_match import LibraryEntry
-from .source import ha_track_query, library_index, resolve_map_url, track_signature
+from .source import (
+    ha_track_query,
+    library_index,
+    resolve_map_url,
+    track_label,
+    track_signature,
+)
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -72,6 +78,7 @@ class TrackMapSource:
         # (see _apply_library_match), else the player's own signature.
         self._track_id: str | None = None
         self._ha_track: str | None = None  # what the player itself reports
+        self._label: str | None = None  # "Artist - Title" for failure records
         self._native_url: str | None = None  # per-track URL from MA, if it has one
         self._album_art_url: str | None = None
         self._pos = 0.0  # smoothed audible position (PLL clock)
@@ -139,6 +146,9 @@ class TrackMapSource:
         if track != self._ha_track:
             self._ha_track = track
             self._track_id = track
+            self._label = track_label(
+                attrs.get("media_artist"), attrs.get("media_title")
+            )
             self._prev_query = None
             # Re-anchor the replay clock to the new song immediately (it starts
             # near 0) so we don't replay the previous track's position into it.
@@ -151,7 +161,7 @@ class TrackMapSource:
             # pay for that lookup are the ones that actually need it.
             self._native_url = resolve_map_url(self._hass, self._entity_id, self._subsonic)
             if self._native_url:
-                self._mapper.ensure(self._track_id, self._native_url)
+                self._mapper.ensure(self._track_id, self._native_url, self._label)
         if self._native_url is None and self._track_id == self._ha_track:
             # Not (yet) keyed to a library track: the background match may have
             # landed since the last poll, and this is only a dict lookup.
@@ -180,7 +190,7 @@ class TrackMapSource:
         entry = self._lib.lookup_soon(ha_track_query(self._hass, self._entity_id))
         if entry is not None:
             self._track_id = entry.signature
-            self._mapper.ensure(entry.signature, entry.url)
+            self._mapper.ensure(entry.signature, entry.url, self._label)
         return entry
 
     # -- source interface ----------------------------------------------------
@@ -221,7 +231,7 @@ class TrackMapSource:
             # playback as a *single* track too (no queue / no fresh per-track URL
             # needed). Only give up when there is neither a cached map nor
             # anything analysable.
-            tm = await self._mapper.ensure_ready(self._track_id, url)
+            tm = await self._mapper.ensure_ready(self._track_id, url, self._label)
             if tm is None and url is None:
                 return False  # radio/flow & never analysed: nothing to play
         pos = self._reported_position()

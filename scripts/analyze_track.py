@@ -33,14 +33,27 @@ def main() -> int:
     url = sys.argv[1]
     result = _decode_and_analyze("ffmpeg", url, max_seconds=720)
     tm = result.track_map
+    d = result.diagnostics
     if tm is None:
         reason = result.error or "track too short/quiet"
-        print(f"analysis failed ({'decoded but unanalysable' if result.decoded else reason})")
+        print(f"analysis failed ({reason}; "
+              f"{'stream decoded' if result.decoded else 'fetch/decode failed'})")
         return 1
+    tier = d.tier if d else ("full" if tm.grid_usable else "ambient")
+    print(f"tier       : {tier.upper()}  "
+          f"({'scheduled beat grid' if tm.grid_usable else 'features/onsets only -> live tracker follows'})")
+    if d is not None:
+        print(f"diagnostics: autocorr {d.autocorr_conf:.2f}  contrast {d.contrast:.1f} "
+              f"(noise ~2.9)  interval MAD {d.mad_local:.3f}  coverage {d.coverage:.0%}  "
+              f"tempo stability {d.tempo_stability:.0%}")
+        if d.reason:
+            print(f"reason     : {d.reason}")
     print(f"duration   : {tm.duration:8.1f} s")
     print(f"tempo      : {tm.bpm:8.1f} BPM  (confidence {tm.confidence:.2f}, "
-          f"{'USABLE' if tm.usable else 'not usable -> live fallback'})")
+          f"{'USABLE grid' if tm.grid_usable else 'no trusted grid'})")
     print(f"beats      : {tm.beats.size}  (downbeat offset {tm.downbeat})")
+    if tm.onsets.size:
+        print(f"onsets     : {tm.onsets.size}  (ambient-tier detected events)")
     print(f"mid onsets : {tm.mid_beats.size}  (guitar/snare stream)")
     if tm.beats.size > 8:
         ivals = tm.beats[1:] - tm.beats[:-1]

@@ -154,7 +154,39 @@
     },
     "prewarm_library": {
       "name": "Pre-analyse music library",
-      "description": "Analyse your whole Music Assistant library in the background and cache the results to disk, so every track plays instantly with full offline track-map reaction the first time too. Gentle and resumable. For a Navidrome / OpenSubsonic library, set the library URL and login in the integration options first."
+      "description": "Analyse your whole Music Assistant library in the background and cache the results to disk, so every track plays instantly with full offline track-map reaction the first time too. Gentle, resumable and incremental (a re-run picks up newly added tracks). For a Navidrome / OpenSubsonic library, set the library URL and login in the integration options first.",
+      "fields": {
+        "retry_failed": {
+          "name": "Retry failed tracks",
+          "description": "Clear the recorded per-track failure verdicts (and ambient-only maps) first, so every previously failed track is analysed again."
+        }
+      }
+    },
+    "analyze_track": {
+      "name": "Analyse one track",
+      "description": "Diagnose (and re-analyse) a single song right away and post the full analysis verdict as a notification. Give a direct stream URL, an artist + title to look up in the Music Assistant library, or a media player that is currently playing.",
+      "fields": {
+        "url": {
+          "name": "Stream URL",
+          "description": "Direct URL of the audio to analyse (anything ffmpeg can open)."
+        },
+        "artist": {
+          "name": "Artist",
+          "description": "Artist name, matched against the Music Assistant library."
+        },
+        "title": {
+          "name": "Title",
+          "description": "Track title, matched against the Music Assistant library."
+        },
+        "media_player": {
+          "name": "Media player",
+          "description": "Analyse whatever this player is playing right now."
+        },
+        "force": {
+          "name": "Force re-analysis",
+          "description": "Clear any cached map / failure verdict for the track and analyse it fresh (default on)."
+        }
+      }
     }
   }
 }

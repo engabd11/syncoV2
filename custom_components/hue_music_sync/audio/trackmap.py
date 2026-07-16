@@ -62,6 +62,7 @@ from .analyzer import (
 )
 from .filters import ExpFilter
 from .tempo import BeatGrid
+from .track_index import TrackIndex, track_key
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -82,13 +83,31 @@ _BLOCK_S = 0.75  # block size for self-similarity features
 _KERNEL_BLOCKS = 8  # checkerboard kernel half-size (~6 s context)
 _MIN_SECTION_S = 8.0
 
-# Use a track map only when the analysis was confident enough to trust.
+# Use a track map's BEAT GRID only when the analysis was confident enough to
+# trust. Below this the map is still served (features/sections/colours — the
+# "ambient" tier), it just doesn't claim scheduled beats.
 MIN_MAP_CONFIDENCE = 0.30
+
+# Features are worth serving on their own once this much audio was analysed:
+# anything shorter is almost certainly a truncated fetch, and a jingle that
+# short loses little by falling back to live/metadata sync.
+_MIN_FEATURES_S = 30.0
+
+# 95th-percentile RMS below this is digital silence — a "track" of nothing must
+# stay unanalysable rather than becoming an all-dark ambient map.
+_MIN_AUDIO_RMS = 1e-4
 
 # On-disk cache format version: bump when the serialised layout changes so stale
 # files are ignored rather than mis-read. Stored in each .npz's ``meta`` row.
 # v2: per-frame onset width (``f_width``) + long-horizon floor on mid picks.
-_CACHE_FORMAT = 2
+# v3: detected-onset arrays for gridless (ambient) maps + the ``diag`` row.
+# v2 files load fine (their layout is a strict subset and every v2 map was
+# grid-usable by construction), so a format bump does NOT silently un-warm the
+# library. Any FUTURE incompatible bump must either extend _COMPAT_FORMATS or
+# add a one-time format scan to the pre-warm — has_disk() deliberately never
+# opens files, so it cannot tell a stale format from a fresh one.
+_CACHE_FORMAT = 3
+_COMPAT_FORMATS = frozenset({2, 3})
 
 # Offline mid picks narrower than this across the SuperFlux filterbank are
 # dropped as vocal/tonal (see AnalysisFrame.onset_width). Deliberately at the
@@ -112,18 +131,65 @@ _RETRY_MAX_S = 120.0
 
 
 @dataclass(slots=True)
+class MapDiagnostics:
+    """Structured account of one analysis: what was measured and why it landed
+    in its tier. This is what the ``analyze_track`` service and the pre-warm
+    failure report surface to the user, so a song that "doesn't react" has an
+    inspectable reason instead of a vanished log line.
+    """
+
+    analysed_s: float = 0.0
+    bpm: float = 0.0
+    confidence: float = 0.0
+    autocorr_conf: float = 0.0  # raw global-autocorrelation confidence
+    contrast: float = 0.0  # beats-on-peaks envelope contrast (noise ~2.9)
+    mad_local: float = 0.0  # median |interval/local_period - 1|
+    coverage: float = 0.0  # (beats[-1]-beats[0]) / duration
+    tempo_stability: float = 0.0  # fraction of stable tempo-path transitions
+    beats: int = 0
+    sections: int = 0
+    tier: str = "unusable"  # "full" | "ambient" | "unusable"
+    reason: str = ""  # human sentence when tier != "full"
+
+    def as_array(self) -> np.ndarray:
+        """The numeric core, persisted in the .npz ``diag`` row."""
+        return np.array(
+            [self.autocorr_conf, self.contrast, self.mad_local,
+             self.coverage, self.tempo_stability, self.analysed_s],
+            dtype=np.float64,
+        )
+
+
+@dataclass(slots=True)
 class MapResult:
     """Outcome of one analysis attempt.
 
     ``decoded`` distinguishes "we got the audio but couldn't build a usable map"
-    (permanent — re-running won't help) from "we couldn't get the audio"
-    (transient — retry), so a slow/busy Navidrome doesn't permanently disable a
-    track. ``error`` carries the ffmpeg diagnostic for the log.
+    from "we couldn't get the audio" (transient — retry), so a slow/busy
+    Navidrome doesn't permanently disable a track. ``complete`` means ffmpeg
+    reached the end of the stream cleanly — only then is an unusable result
+    treated as permanent (a partial decode may analyse fine next time).
+    ``error`` carries the ffmpeg/analysis diagnostic for the log.
     """
 
     track_map: "TrackMap | None"
     decoded: bool
     error: str = ""
+    complete: bool = False
+    diagnostics: MapDiagnostics | None = None
+
+
+@dataclass(slots=True)
+class PrewarmResult:
+    """Outcome of one library pre-warm sweep."""
+
+    analysed: int = 0  # full-tier maps newly written
+    ambient: int = 0  # features-only (ambient) maps newly written
+    considered: int = 0
+    failed: int = 0
+    # (label, url, reason) samples, capped at 20; the full list lives in the
+    # shared TrackIndex / analysis report.
+    failures: list[tuple[str, str, str]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -178,10 +244,35 @@ class TrackMap:
     # Guitar/snare onsets (timestamps + 0..1 accents) for the mid-role lights.
     mid_beats: np.ndarray = field(default_factory=lambda: np.zeros(0))
     mid_accents: np.ndarray = field(default_factory=lambda: np.zeros(0))
+    # Detected (peak-picked) onsets for gridless playback: honest per-event
+    # detections, NOT the rejected beat grid. An ambient-tier map replays these
+    # so the engine's unlocked flash path fires and the causal tempo tracker
+    # gets phase anchors — the room stays alive without claiming a schedule.
+    onsets: np.ndarray = field(default_factory=lambda: np.zeros(0))
+    onset_accents: np.ndarray = field(default_factory=lambda: np.zeros(0))
+    # Numeric diagnostics core (MapDiagnostics.as_array layout); zeros on maps
+    # loaded from pre-v3 cache files.
+    diag: np.ndarray = field(default_factory=lambda: np.zeros(6))
 
     @property
-    def usable(self) -> bool:
+    def grid_usable(self) -> bool:
+        """The beat grid is trustworthy enough to schedule the show against."""
         return self.confidence >= MIN_MAP_CONFIDENCE and self.beats.size >= 8
+
+    @property
+    def features_usable(self) -> bool:
+        """Enough per-frame features to drive the continuous show on their own."""
+        return self.features is not None and self.duration >= _MIN_FEATURES_S
+
+    @property
+    def servable(self) -> bool:
+        """Worth caching + playing back at all (full tier or ambient tier)."""
+        return self.grid_usable or self.features_usable
+
+    # Historical alias (tests/scripts read map.usable for the grid gate).
+    @property
+    def usable(self) -> bool:
+        return self.grid_usable
 
     def save(self, path: str | Path) -> None:
         """Serialise to a compact ``.npz`` (no pickle) for the persistent cache.
@@ -209,6 +300,9 @@ class TrackMap:
             "sec_energy": np.array([s.energy for s in self.sections], dtype=np.float32),
             "pal_rgb": pal_rgb,
             "pal_counts": pal_counts,
+            "onsets": self.onsets.astype(np.float64),
+            "onset_accents": self.onset_accents.astype(np.float32),
+            "diag": np.asarray(self.diag, dtype=np.float64),
         }
         if f is not None:
             data.update({
@@ -228,7 +322,7 @@ class TrackMap:
         try:
             with np.load(path, allow_pickle=False) as z:
                 meta = z["meta"]
-                if int(round(float(meta[4]))) != _CACHE_FORMAT:
+                if int(round(float(meta[4]))) not in _COMPAT_FORMATS:
                     return None
                 pal_rgb = z["pal_rgb"]
                 pal_counts = z["pal_counts"]
@@ -253,7 +347,14 @@ class TrackMap:
                     confidence=float(meta[2]), beats=z["beats"],
                     accents=z["accents"], downbeat=int(round(float(meta[3]))),
                     sections=sections, features=features,
-                    mid_beats=z["mid_beats"], mid_accents=z["mid_accents"])
+                    mid_beats=z["mid_beats"], mid_accents=z["mid_accents"],
+                    # v2 files predate these rows; every v2 map was grid-usable
+                    # so the missing onsets are never queried.
+                    onsets=z["onsets"] if "onsets" in z else np.zeros(0),
+                    onset_accents=(
+                        z["onset_accents"] if "onset_accents" in z else np.zeros(0)
+                    ),
+                    diag=z["diag"] if "diag" in z else np.zeros(6))
         except (OSError, KeyError, ValueError, IndexError):
             return None
 
@@ -272,13 +373,25 @@ class TrackMap:
             return None
         # A beat fires when one of the scheduled beat times falls inside
         # (prev_pos, pos] — exactly once per beat as the clock sweeps past it.
+        # A gridless (ambient) map replays its *detected* onsets instead: honest
+        # per-event detections that drive the engine's unlocked flash path and
+        # give the causal tempo tracker phase anchors, without pretending the
+        # rejected grid is a schedule.
         lo = prev_pos if prev_pos is not None and prev_pos < pos else pos - _FRAME_PERIOD
-        j0 = int(np.searchsorted(self.beats, lo, side="right"))
-        j1 = int(np.searchsorted(self.beats, pos, side="right"))
+        if self.grid_usable:
+            events, ev_accents = self.beats, self.accents
+        else:
+            events, ev_accents = self.onsets, self.onset_accents
+        j0 = int(np.searchsorted(events, lo, side="right"))
+        j1 = int(np.searchsorted(events, pos, side="right"))
         beat = j1 > j0
         # Accent-weighted strength on the live detector's ~1..3 scale, so the
         # per-mode beat_threshold gates behave exactly like the live path.
-        strength = 1.0 + 2.0 * float(self.accents[j1 - 1]) if beat else 0.0
+        strength = (
+            1.0 + 2.0 * float(ev_accents[j1 - 1])
+            if beat and ev_accents.size >= j1
+            else (1.0 if beat else 0.0)
+        )
         # Scheduled guitar/snare onsets for the mid-role lights.
         m0 = int(np.searchsorted(self.mid_beats, lo, side="right"))
         m1 = int(np.searchsorted(self.mid_beats, pos, side="right"))
@@ -291,7 +404,9 @@ class TrackMap:
             energy=float(f.energy[i]),
             beat=beat,
             beat_strength=strength,
-            tempo_bpm=self.bpm,
+            # An ambient map has no trustworthy tempo: report none so nothing
+            # downstream schedules against it (the causal tracker finds its own).
+            tempo_bpm=self.bpm if self.grid_usable else 0.0,
             flux=float(f.flux[i]),
             t_audio=pos,
             centroid=float(f.centroid[i]),
@@ -313,8 +428,12 @@ class TrackMap:
         """The authoritative beat grid at playback position ``pos`` (seconds).
 
         ``prev_pos`` (the previous query) makes ``predicted_beat`` fire exactly
-        once per crossed beat. Returns None outside the analysed span.
+        once per crossed beat. Returns None outside the analysed span, and for
+        an ambient-tier map (no trustworthy grid) — the coordinator then stays
+        on its causal tracker, which locks onto the replayed onsets live.
         """
+        if not self.grid_usable:
+            return None
         beats = self.beats
         if beats.size < 2:
             return None
@@ -557,70 +676,213 @@ def _estimate_tempo(env: np.ndarray) -> tuple[float, float]:
 
 
 # Beats-on-peaks contrast below this reads as noise (measured: white noise
-# ~2.9, real steady grooves 4.2-5.7); the rescue scales in over the next 1.6.
-_RESCUE_CONTRAST_FLOOR = 3.4
-_RESCUE_CONF_CAP = 0.60
+# ~2.9, real steady grooves 4.2-5.7); credit scales in over the next 1.6.
+_CONTRAST_FLOOR = 3.4
+_CONTRAST_RANGE = 1.6
+
+# Local-tempo path (tempogram + Viterbi): sees a drifting live drummer as a
+# sequence of locally-steady tempi instead of one smeared global peak.
+_TG_WIN_S = 10.0  # tempogram analysis window
+_TG_HOP_S = 1.0  # tempogram hop
+_TG_WHITEN_S = 0.5  # rolling-mean subtraction before autocorrelation
+_TEMPO_TRANS_PENALTY = 40.0  # Viterbi log2(lag ratio) transition weight
+_PATH_STABLE_TOL = 0.04  # adjacent-window |dlog bpm| counted as stable
+
+# Grid-quality confidence (the old "rescue" promoted to primary evidence).
+_GRID_CONF_CAP = 0.85
+_TIGHT_MAD_FULL = 0.05  # residual MAD vs the LOCAL grid <= this: full credit
+_TIGHT_MAD_ZERO = 0.25  # >= this: no tightness credit
 
 
-def _rescue_confidence(
-    conf: float,
+# Autocorrelation upsampling factor: the beat period is fractional in frames
+# (140 BPM = 21.43 frames) while spiky onset envelopes make the true peak
+# sharper than the frame grid — sampled at integer lags, the true period can
+# score LOWER than its double (42.86 ~ 43 aligns; 21.43 splits between 21 and
+# 22), a guaranteed octave error. Band-limited upsampling (zero-padded inverse
+# FFT) recovers the fractional-lag peaks before any lag is scored.
+_TG_UPSAMPLE = 4
+
+
+def _tempogram(
+    env: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
+    """Sliding-window autocorrelation tempogram of the onset envelope.
+
+    Returns ``(salience[n_win, n_lag], lags, window_centre_frames,
+    lag_refined[n_win, n_lag])`` with the same log-Gaussian tempo prior and
+    harmonic-comb support as the global estimator, applied per window — or
+    None when the track is too short. Each window is "whitened" (short rolling
+    mean subtracted) first, so long quiet passages and slow dynamics can't
+    dilute the local peaks the way they dilute the global autocorrelation.
+    ``lag_refined`` carries each candidate's fractional-lag peak position from
+    the upsampled autocorrelation (see ``_TG_UPSAMPLE``).
+    """
+    n = env.size
+    win = int(round(_TG_WIN_S / _FRAME_PERIOD))
+    hop = int(round(_TG_HOP_S / _FRAME_PERIOD))
+    min_lag = max(1, int(round(60.0 / _MAX_BPM / _FRAME_PERIOD)))
+    max_lag = int(round(60.0 / _MIN_BPM / _FRAME_PERIOD))
+    if n < win or max_lag * 3 >= win:
+        return None
+    k = max(1, int(round(_TG_WHITEN_S / _FRAME_PERIOD)))
+    white = env - np.convolve(env, np.ones(k) / k, mode="same")
+    n_win = 1 + (n - win) // hop
+    frames = np.lib.stride_tricks.sliding_window_view(white, win)[::hop][:n_win]
+    frames = frames * np.hanning(win)
+    # Batch autocorrelation via one FFT (zero-padded to avoid circular wrap),
+    # band-limited-upsampled ``_TG_UPSAMPLE``x so fractional-lag peaks exist.
+    u = _TG_UPSAMPLE
+    nfft = 1 << int(np.ceil(np.log2(2 * win)))
+    spec = np.fft.rfft(frames, nfft, axis=1)
+    power = (spec * np.conj(spec)).real
+    ac = np.fft.irfft(power, u * nfft, axis=1)[:, : u * win]
+    zero = np.maximum(ac[:, :1], 1e-12)
+    acn = ac / zero
+    lags = np.arange(min_lag, max_lag + 1)
+
+    half = u // 2  # +-half a frame around each integer lag on the fine grid
+
+    def _peak(mult: int) -> tuple[np.ndarray, np.ndarray]:
+        """(peak value, fractional lag/mult) around each candidate*mult."""
+        centres_f = u * mult * lags
+        offs = np.arange(-half * mult, half * mult + 1)
+        idx = centres_f[None, :, None] + offs[None, None, :]
+        vals = acn[:, np.clip(idx[0], 0, acn.shape[1] - 1)]
+        best = np.argmax(vals, axis=2)
+        peak = np.take_along_axis(vals, best[:, :, None], axis=2)[:, :, 0]
+        frac = (centres_f[None, :] + offs[best]) / (u * mult)
+        return peak, frac
+
+    base, lag_refined = _peak(1)
+    h2, _ = _peak(2)
+    h3, _ = _peak(3)
+    # Harmonic-comb support: a true beat period shows autocorrelation energy at
+    # its multiples too, which an eighth-note false peak lacks.
+    sal = base + 0.5 * h2 + 0.34 * h3
+    cand_bpm = 60.0 / (lags * _FRAME_PERIOD)
+    prior = np.exp(-0.5 * (np.log(cand_bpm / _PRIOR_CENTER_BPM) / _PRIOR_WIDTH) ** 2)
+    sal = np.maximum(sal, 0.0) * prior[None, :]
+    centres = (win // 2) + hop * np.arange(n_win)
+    return sal, lags, centres, lag_refined
+
+
+def _tempo_path(
+    sal: np.ndarray, lags: np.ndarray, lag_refined: np.ndarray | None = None
+) -> tuple[np.ndarray, float]:
+    """Viterbi-decode the most likely tempo trajectory through the tempogram.
+
+    Transitions pay ``-_TEMPO_TRANS_PENALTY * log2(lag_i/lag_j)`` so the path
+    rides genuine drift and real tempo changes but cannot flap between octave
+    candidates window-to-window. Returns ``(lag_per_window_float, stability)``
+    where the fractional lags come from the upsampled-autocorrelation peaks
+    (``lag_refined``) and stability is the fraction of adjacent transitions
+    below ``_PATH_STABLE_TOL``.
+    """
+    n_win, n_lag = sal.shape
+    obs = np.log(sal + 1e-6)
+    ll = np.log(lags.astype(np.float64))
+    trans = -_TEMPO_TRANS_PENALTY * (ll[:, None] - ll[None, :]) ** 2  # [to, from]
+    score = obs[0].copy()
+    back = np.zeros((n_win, n_lag), dtype=np.int64)
+    for t in range(1, n_win):
+        cand = trans + score[None, :]
+        back[t] = np.argmax(cand, axis=1)
+        score = cand[np.arange(n_lag), back[t]] + obs[t]
+    path = np.empty(n_win, dtype=np.int64)
+    path[-1] = int(np.argmax(score))
+    for t in range(n_win - 1, 0, -1):
+        path[t - 1] = back[t, path[t]]
+    if lag_refined is not None:
+        lag_f = lag_refined[np.arange(n_win), path].astype(np.float64)
+    else:
+        lag_f = lags[path].astype(np.float64)
+    dlog = np.abs(np.diff(np.log(lag_f)))
+    stability = float(np.mean(dlog < _PATH_STABLE_TOL)) if dlog.size else 1.0
+    return lag_f, stability
+
+
+def _grid_confidence(
     env: np.ndarray,
     beat_frames: np.ndarray,
     beats: np.ndarray,
+    period_frames: np.ndarray,
+    stability: float,
     duration: float,
-) -> float:
-    """Lift a diluted tempo confidence using the tracked beat grid itself.
+    autocorr_conf: float,
+) -> tuple[float, float, float, float]:
+    """Grid-quality-first confidence: ``(confidence, mad_local, contrast, coverage)``.
 
-    Only when the grid looks like a real steady groove: enough beats, a
-    musically-plausible and tight median interval, coverage of most of the
-    track, and — the discriminator the DP tracker's regularising bias cannot
-    fake — beats landing on onset-envelope peaks far above the track mean.
-    Returns the (possibly lifted) confidence; never lowers it.
+    The global autocorrelation dilutes on dynamics and smears on drift, so the
+    tracked grid itself is the primary evidence: beats-on-peaks CONTRAST (the
+    one thing the DP tracker's regularising bias cannot fake — it is a hard
+    multiplier, so noise scores zero), tightness of the intervals against the
+    LOCAL tempo path (honest under drift, unlike a global-period MAD), coverage
+    of the track, and the tempo path's own stability. The best of this and the
+    raw autocorrelation confidence wins; a perfect global lock still tops the
+    ``_GRID_CONF_CAP``.
     """
     if beats.size < 16 or duration < 10.0:
-        return conf
+        return autocorr_conf, 0.0, 0.0, 0.0
     intervals = np.diff(beats)
     med = float(np.median(intervals))
     if med <= 0 or not (60.0 / _MAX_BPM <= med <= 60.0 / _MIN_BPM):
-        return conf
-    mad = float(np.median(np.abs(intervals - med)))
-    if mad / med > 0.12:
-        return conf  # wobbly grid: not a steady groove
-    if (beats[-1] - beats[0]) < 0.6 * duration:
-        return conf  # beats cover too little of the track
+        return autocorr_conf, 0.0, 0.0, 0.0
     mean = float(env.mean())
     if mean <= 1e-9:
-        return conf
+        return autocorr_conf, 0.0, 0.0, 0.0
+    mid_idx = np.clip(
+        (beat_frames[:-1] + beat_frames[1:]) // 2, 0, period_frames.size - 1
+    )
+    local_p = period_frames[mid_idx] * _FRAME_PERIOD
+    mad_local = float(np.median(np.abs(intervals / np.maximum(local_p, 1e-6) - 1.0)))
+    coverage = float((beats[-1] - beats[0]) / max(duration, 1e-6))
     idx = np.minimum(beat_frames, env.size - 1)
     contrast = float(env[idx].mean()) / mean
-    rescue = 0.55 * min(1.0, max(0.0, (contrast - _RESCUE_CONTRAST_FLOOR) / 1.6))
-    if rescue <= 0.0:
-        return conf
-    return max(conf, min(_RESCUE_CONF_CAP, conf + rescue))
+    contrast_s = float(np.clip((contrast - _CONTRAST_FLOOR) / _CONTRAST_RANGE, 0.0, 1.0))
+    tight_s = float(np.clip(
+        (_TIGHT_MAD_ZERO - mad_local) / (_TIGHT_MAD_ZERO - _TIGHT_MAD_FULL), 0.0, 1.0
+    ))
+    cov_s = float(np.clip((coverage - 0.5) / 0.4, 0.0, 1.0))
+    grid_conf = min(
+        _GRID_CONF_CAP,
+        contrast_s * (0.55 + 0.20 * tight_s + 0.15 * cov_s + 0.10 * stability),
+    )
+    return max(autocorr_conf, grid_conf), mad_local, contrast, coverage
 
 
 def _track_beats(env: np.ndarray, bpm: float) -> np.ndarray:
-    """Ellis dynamic-programming beat tracker; returns beat frame indices.
-
-    Maximises sum(onset strength at beats) − tightness·Σ log²(interval/period):
-    the globally optimal beat sequence for the (constant) tempo estimate, with
-    enough flex to ride small tempo drift.
-    """
+    """Ellis DP beat tracker with a constant tempo; returns beat frame indices."""
     if bpm <= 0 or env.size < 16:
         return np.zeros(0, dtype=np.int64)
     period = 60.0 / bpm / _FRAME_PERIOD  # frames per beat
+    return _track_beats_local(env, np.full(env.size, period))
+
+
+def _track_beats_local(env: np.ndarray, period: np.ndarray) -> np.ndarray:
+    """Ellis dynamic-programming beat tracker with a per-frame tempo period.
+
+    Maximises sum(onset strength at beats) − tightness·Σ log²(interval/period):
+    the globally optimal beat sequence for the tempo estimate. ``period`` is
+    frames-per-beat per frame — a constant array reproduces the classic
+    tracker, a tempogram-derived path lets the same DP ride a drifting drummer
+    or a genuine mid-song tempo change without losing its regularising bias.
+    """
+    if env.size < 16 or period.size != env.size or float(period.min()) <= 0:
+        return np.zeros(0, dtype=np.int64)
     # Normalise the onset envelope to unit std so _TIGHTNESS is scale-free.
     std = env.std()
     local = env / std if std > 1e-9 else env
     n = local.size
-    lo = -int(round(2.0 * period))
-    hi = -max(1, int(round(period / 2.0)))
+    lo = -int(round(2.0 * float(period.max())))
+    hi = -max(1, int(round(float(period.min()) / 2.0)))
     prange = np.arange(lo, hi + 1)
-    txwt = -_TIGHTNESS * (np.log(-prange / period) ** 2)
+    log_neg = np.log(-prange.astype(np.float64))
+    log_period = np.log(period)
     cumscore = local.copy()
     backlink = np.full(n, -1, dtype=np.int64)
     first_beat = True
     for i in range(max(1, -lo), n):
+        txwt = -_TIGHTNESS * (log_neg - log_period[i]) ** 2
         candidates = txwt + cumscore[i + prange]
         best = int(np.argmax(candidates))
         score = float(candidates[best])
@@ -634,7 +896,7 @@ def _track_beats(env: np.ndarray, bpm: float) -> np.ndarray:
             cumscore[i] = local[i] + score
             backlink[i] = i + prange[best]
     # Backtrace from the best score in the final beat period.
-    tail_start = max(0, n - int(round(period)))
+    tail_start = max(0, n - int(round(float(period[-1]))))
     last = tail_start + int(np.argmax(cumscore[tail_start:]))
     beats = [last]
     while backlink[beats[-1]] >= 0:
@@ -867,6 +1129,13 @@ def _segment_sections(
 
 def analyze_pcm(pcm: np.ndarray, sample_rate: int = ANALYSIS_SAMPLE_RATE) -> TrackMap | None:
     """Build a TrackMap from decoded mono float32 PCM (synchronous, CPU-bound)."""
+    return analyze_pcm_diag(pcm, sample_rate)[0]
+
+
+def analyze_pcm_diag(
+    pcm: np.ndarray, sample_rate: int = ANALYSIS_SAMPLE_RATE
+) -> tuple[TrackMap | None, MapDiagnostics]:
+    """:func:`analyze_pcm` plus the structured :class:`MapDiagnostics`."""
     ex = EnvelopeExtractor(sample_rate)
     # Feed in slices to bound the vectorised batch sizes.
     step = sample_rate * 30
@@ -875,44 +1144,82 @@ def analyze_pcm(pcm: np.ndarray, sample_rate: int = ANALYSIS_SAMPLE_RATE) -> Tra
     return _finish_analysis(ex)
 
 
-def _finish_analysis(ex: EnvelopeExtractor) -> TrackMap | None:
+def _finish_analysis(ex: EnvelopeExtractor) -> tuple[TrackMap | None, MapDiagnostics]:
+    diag = MapDiagnostics()
     env = np.asarray(ex.env, dtype=np.float64)
     if env.size < 200:  # < ~4 s of audio
-        return None
+        diag.reason = "less than ~4 s of audio analysed"
+        return None, diag
     bass_env = np.asarray(ex.bass_env, dtype=np.float64)
     rms = np.asarray(ex.rms, dtype=np.float64)
     bands = np.asarray(ex.bands, dtype=np.float32)
     duration = env.size * _FRAME_PERIOD
+    diag.analysed_s = duration
+    if float(np.percentile(rms, 95)) < _MIN_AUDIO_RMS:
+        diag.reason = "audio is silent"
+        return None, diag
 
-    bpm, confidence = _estimate_tempo(env)
-    beat_frames = _track_beats(env, bpm)
-    if beat_frames.size < 4:
-        return None
+    bpm, autocorr_conf = _estimate_tempo(env)
+    diag.autocorr_conf = autocorr_conf
+    # Local tempo path: on anything longer than two tempogram windows, decode
+    # the per-window tempo trajectory so a drifting drummer or a genuine
+    # mid-song tempo change reads as locally-steady tempo instead of one
+    # smeared global autocorrelation peak. Short tracks keep the scalar path.
+    stability = 1.0
+    period_frames: np.ndarray | None = None
+    if duration >= 2.0 * _TG_WIN_S:
+        tg = _tempogram(env)
+        if tg is not None:
+            sal, lags, centres, lag_refined = tg
+            lag_path, stability = _tempo_path(sal, lags, lag_refined)
+            period_frames = np.interp(
+                np.arange(env.size, dtype=np.float64), centres, lag_path
+            )
+    if period_frames is None and bpm > 0:
+        period_frames = np.full(env.size, 60.0 / bpm / _FRAME_PERIOD)
+    diag.tempo_stability = stability
+    beat_frames = (
+        _track_beats_local(env, period_frames)
+        if period_frames is not None
+        else np.zeros(0, dtype=np.int64)
+    )
     beats = beat_frames.astype(np.float64) * _FRAME_PERIOD
-    # Steady-groove rescue: the normalised autocorrelation dilutes on long
-    # quiet passages / big dynamics, failing perfectly steady grooves (a real
-    # funk track measured 0.29 against the 0.30 usability gate with only a 3%
-    # beat-interval wobble over 4 minutes). The tracked grid itself is better
-    # evidence: when the beats land on strong onset-envelope peaks (contrast
-    # well above the ~2.9 a noise floor produces) and the grid is tight and
-    # covers the track, lift the confidence — capped, so a rescued map never
-    # outranks a true autocorrelation lock.
-    confidence = _rescue_confidence(confidence, env, beat_frames, beats, duration)
-    idx = np.minimum(beat_frames, env.size - 1)
-    accents_raw = env[idx]
-    # Bass-weight each beat's accent (same formula as the live tracker:
-    # flux * (0.5 + 0.5*bass)): rhythmic "impact" is perceived almost entirely
-    # in the low end, so a treble stab shouldn't read as a big beat.
-    bass_at = bass_env[np.minimum(idx, bass_env.size - 1)]
-    bass_ref = float(np.percentile(bass_at, 95)) if bass_at.size else 0.0
-    if bass_ref > 1e-9:
-        accents_raw = accents_raw * (0.5 + 0.5 * np.clip(bass_at / bass_ref, 0.0, 1.0))
-    accents = _rolling_accents(accents_raw)
-    downbeat = _find_downbeat(bass_env, beat_frames)
-    # Refine the bpm from the actual tracked beats (more honest than the lag).
-    intervals = np.diff(beats)
-    if intervals.size:
-        bpm = float(60.0 / np.median(intervals))
+
+    # Grid-quality-first confidence: the tracked grid's own evidence (contrast,
+    # tightness vs the LOCAL tempo, coverage, path stability) is the primary
+    # measure; the raw autocorrelation confidence only wins when it is higher
+    # (a clean global lock). Noise cannot pass: contrast is a hard multiplier.
+    confidence = autocorr_conf
+    if beat_frames.size >= 2 and period_frames is not None:
+        confidence, diag.mad_local, diag.contrast, diag.coverage = _grid_confidence(
+            env, beat_frames, beats, period_frames, stability, duration, autocorr_conf
+        )
+
+    accents = np.zeros(0)
+    downbeat = 0
+    if beat_frames.size >= 4:
+        idx = np.minimum(beat_frames, env.size - 1)
+        accents_raw = env[idx]
+        # Bass-weight each beat's accent (same formula as the live tracker:
+        # flux * (0.5 + 0.5*bass)): rhythmic "impact" is perceived almost
+        # entirely in the low end, so a treble stab shouldn't read as a big beat.
+        bass_at = bass_env[np.minimum(idx, bass_env.size - 1)]
+        bass_ref = float(np.percentile(bass_at, 95)) if bass_at.size else 0.0
+        if bass_ref > 1e-9:
+            accents_raw = accents_raw * (
+                0.5 + 0.5 * np.clip(bass_at / bass_ref, 0.0, 1.0)
+            )
+        accents = _rolling_accents(accents_raw)
+        downbeat = _find_downbeat(bass_env, beat_frames)
+        # Refine the bpm from the tracked beats (more honest than the lag).
+        intervals = np.diff(beats)
+        if intervals.size:
+            bpm = float(60.0 / np.median(intervals))
+    else:
+        beats = np.zeros(0)
+        beat_frames = np.zeros(0, dtype=np.int64)
+
+    grid_ok = confidence >= MIN_MAP_CONFIDENCE and beats.size >= 8
     sections = _segment_sections(bands, rms, duration)
     _fill_section_palettes(sections, ex)
     mid_env = np.asarray(ex.mid_env, dtype=np.float64)
@@ -920,11 +1227,49 @@ def _finish_analysis(ex: EnvelopeExtractor) -> TrackMap | None:
     mid_beats, mid_accents = _pick_onsets(mid_env, allowed=mid_dom)
     mid_energy = bands[:, ex.n_bass : ex.n_mid].sum(axis=1).astype(np.float64)
     mid_beats, mid_accents = _percussive_filter(mid_beats, mid_accents, mid_energy)
-    mid_beats, mid_accents = _quantize_to_eighths(mid_beats, mid_accents, beats)
+    if grid_ok:
+        # Quantising to a rejected grid would be worse than no quantising.
+        mid_beats, mid_accents = _quantize_to_eighths(mid_beats, mid_accents, beats)
     mid_beats, mid_accents = _width_filter(
         mid_beats, mid_accents, np.asarray(ex.width, dtype=np.float64)
     )
-    return TrackMap(
+    # Gridless (ambient) playback events: honest detected onsets on the full
+    # envelope — the engine's unlocked flash path and the causal tempo tracker
+    # get real per-event evidence without a fake schedule.
+    onsets = np.zeros(0)
+    onset_accents = np.zeros(0)
+    if not grid_ok:
+        onsets, onset_accents = _pick_onsets(env)
+
+    diag.bpm = bpm
+    diag.confidence = confidence
+    diag.beats = int(beats.size)
+    diag.sections = len(sections)
+    if grid_ok:
+        diag.tier = "full"
+    elif duration < _MIN_FEATURES_S:
+        diag.tier = "unusable"
+        diag.reason = (
+            f"only {duration:.0f} s analysed (< {_MIN_FEATURES_S:.0f} s) "
+            "and no reliable beat grid"
+        )
+    else:
+        diag.tier = "ambient"
+        if beats.size < 8:
+            diag.reason = (
+                f"no beat structure found ({beats.size} beats tracked); "
+                "features kept for ambient playback"
+            )
+        else:
+            diag.reason = (
+                f"low grid confidence ({confidence:.2f} < {MIN_MAP_CONFIDENCE}): "
+                f"beats-on-peaks contrast {diag.contrast:.1f} "
+                f"(noise ~2.9, floor {_CONTRAST_FLOOR}), "
+                f"interval MAD {diag.mad_local:.2f} vs local tempo, "
+                f"coverage {diag.coverage:.0%}, "
+                f"tempo stability {stability:.0%}; features kept"
+            )
+    tm = TrackMap(
         duration=duration,
         bpm=bpm,
         confidence=confidence,
@@ -935,7 +1280,11 @@ def _finish_analysis(ex: EnvelopeExtractor) -> TrackMap | None:
         features=_build_features(ex, env, bass_env, mid_env, rms),
         mid_beats=mid_beats,
         mid_accents=mid_accents,
+        onsets=onsets,
+        onset_accents=onset_accents,
+        diag=diag.as_array(),
     )
+    return tm, diag
 
 
 def _fill_section_palettes(sections: list[Section], ex: EnvelopeExtractor) -> None:
@@ -1064,11 +1413,21 @@ def _decode_and_analyze(ffmpeg_bin: str, url: str, max_seconds: float) -> MapRes
         proc.kill()
         proc.wait()
     decoded = (n_bytes / 4 / ANALYSIS_SAMPLE_RATE) >= _MIN_DECODE_S  # 4 bytes/f32
-    tm = _finish_analysis(ex)
-    error = "" if (tm is not None or decoded) else (
-        err_txt.splitlines()[-1] if err_txt else "no audio decoded"
+    # "complete" = ffmpeg reached end-of-stream without complaining: only then
+    # is an unusable analysis a fact about the MUSIC rather than the fetch, so
+    # only then may the caller mark the track permanently failed.
+    complete = decoded and not err_txt
+    tm, diag = _finish_analysis(ex)
+    if tm is not None:
+        error = ""
+    elif decoded:
+        error = diag.reason or "decoded but unanalysable"
+    else:
+        error = err_txt.splitlines()[-1] if err_txt else "no audio decoded"
+    return MapResult(
+        track_map=tm, decoded=decoded, error=error,
+        complete=complete, diagnostics=diag,
     )
-    return MapResult(track_map=tm, decoded=decoded, error=error)
 
 
 async def build_track_map(
@@ -1130,22 +1489,30 @@ class TrackMapper:
         spawner: Callable[[Coroutine, str], asyncio.Task] | None = None,
         max_cache: int = 12,
         cache_dir: str | Path | None = None,
-        max_disk: int = 512,
+        max_disk: int | None = None,
+        track_index: TrackIndex | None = None,
     ) -> None:
         self._ffmpeg = ffmpeg_bin
         self._spawn = spawner or (lambda coro, name: asyncio.create_task(coro, name=name))
-        self._cache: OrderedDict[str, TrackMap] = OrderedDict()  # usable maps only
+        self._cache: OrderedDict[str, TrackMap] = OrderedDict()  # servable maps only
+        # In-memory retry bookkeeping for THIS instance's session. Permanence
+        # that must survive restarts / be visible across instances lives in the
+        # shared TrackIndex; this dict (LRU-bounded) only drives retry backoff.
         self._failures: OrderedDict[str, _Failure] = OrderedDict()
         self._ensuring: set[str] = set()  # track_ids with a disk probe in flight
         self._max_cache = max_cache
         self._task: asyncio.Task | None = None
         self._inflight: str | None = None
         self._stop_prewarm = False
+        # Shared persistent per-track outcome record (failures/ambient tiers,
+        # labels, the disk budget). Optional so unit tests and standalone use
+        # keep working without one.
+        self._index = track_index
         # Persistent on-disk cache: a played/prefetched/pre-warmed track's map is
         # written here and reloaded instantly on the next play, so the offline
         # route has no per-track analysis delay once a track has been seen.
         self._cache_dir = Path(cache_dir) if cache_dir else None
-        self._max_disk = max_disk
+        self._max_disk = max_disk  # None: follow the index's library-sized budget
         if self._cache_dir is not None:
             try:
                 self._cache_dir.mkdir(parents=True, exist_ok=True)
@@ -1164,7 +1531,7 @@ class TrackMapper:
         if p is None or not p.exists():
             return None
         tm = TrackMap.load(p)
-        return tm if tm is not None and tm.usable else None
+        return tm if tm is not None and tm.servable else None
 
     def _save_disk(self, track_id: str, tm: TrackMap) -> None:
         p = self._disk_path(track_id)
@@ -1177,15 +1544,29 @@ class TrackMapper:
             return
         self._prune_disk()
 
+    @property
+    def _disk_budget(self) -> int:
+        """The .npz cap: explicit override, else the index's library-sized budget.
+
+        The old fixed 512 silently un-warmed libraries bigger than that — the
+        prune evicted pre-warmed maps as fast as the sweep wrote new ones.
+        """
+        if self._max_disk is not None:
+            return self._max_disk
+        if self._index is not None:
+            return self._index.disk_budget
+        return 2048
+
     def _prune_disk(self) -> None:
-        """Keep the disk cache under ``max_disk`` files (evict oldest by mtime)."""
+        """Keep the disk cache under the budget (evict oldest by mtime)."""
         if self._cache_dir is None:
             return
+        budget = self._disk_budget
         try:
             files = sorted(self._cache_dir.glob("*.npz"), key=lambda f: f.stat().st_mtime)
         except OSError:
             return
-        for f in files[:-self._max_disk] if len(files) > self._max_disk else []:
+        for f in files[:-budget] if len(files) > budget else []:
             try:
                 f.unlink()
             except OSError:
@@ -1200,25 +1581,40 @@ class TrackMapper:
         if not track_id:
             return None
         tm = self._cache.get(track_id)
-        return tm if tm is not None and tm.usable else None
+        return tm if tm is not None and tm.servable else None
 
     def failed(self, track_id: str | None) -> bool:
         """True only when ``track_id`` has *permanently* failed analysis.
 
         While a transient failure is still within its retry budget this returns
         False, so the caller keeps the track-map source (placeholder frames)
-        instead of dropping to the metadata animation.
+        instead of dropping to the metadata animation. Consults this session's
+        bookkeeping first, then the shared persistent index — a track the
+        library sweep already proved undecodable is not re-decoded at playback,
+        and the verdict survives restarts (``retry_failed`` clears it).
         """
-        f = self._failures.get(track_id) if track_id else None
-        return bool(f and f.permanent)
+        if not track_id:
+            return False
+        f = self._failures.get(track_id)
+        if f is not None:
+            return f.permanent
+        if self._index is not None:
+            rec = self._index.get(track_key(track_id))
+            return bool(
+                rec and rec.get("status") == "failed" and rec.get("permanent")
+            )
+        return False
 
-    def ensure(self, track_id: str | None, url: str | None) -> None:
+    def ensure(
+        self, track_id: str | None, url: str | None, label: str | None = None
+    ) -> None:
         """Make a map available for ``track_id``: load from disk, else analyse.
 
         Called ~1 Hz from the event loop, so the disk read (numpy decompressing
         a cache file) runs in an executor — it must never block the loop. On a
         disk hit the map shows up in :meth:`get` on a later poll (typically the
         very next one); callers already poll, so nothing else changes.
+        ``label`` ("Artist - Title") names the track in failure records.
         """
         if not track_id or track_id in self._cache:
             return
@@ -1226,17 +1622,19 @@ class TrackMapper:
             return  # disk probe / analysis hand-off already underway
         self._ensuring.add(track_id)
         self._spawn(
-            self._ensure_task(track_id, url),
+            self._ensure_task(track_id, url, label),
             f"hue_music_sync_mapload_{track_id[:24]}",
         )
 
-    async def ensure_ready(self, track_id: str | None, url: str | None) -> "TrackMap | None":
+    async def ensure_ready(
+        self, track_id: str | None, url: str | None, label: str | None = None
+    ) -> "TrackMap | None":
         """Awaitable :meth:`ensure`: probe the disk cache *now* and return the map.
 
         For callers that need the answer in-line (``TrackMapSource.open`` deciding
         between track-map and metadata playback for a cached single track). Returns
-        the usable map when one is in memory or on disk; otherwise kicks background
-        analysis exactly like :meth:`ensure` and returns None.
+        the servable map when one is in memory or on disk; otherwise kicks
+        background analysis exactly like :meth:`ensure` and returns None.
         """
         if not track_id:
             return None
@@ -1246,18 +1644,24 @@ class TrackMapper:
         if track_id not in self._ensuring:
             self._ensuring.add(track_id)
             try:
-                await self._ensure_async(track_id, url)
+                await self._ensure_async(track_id, url, label)
             finally:
                 self._ensuring.discard(track_id)
         return self.get(track_id)
 
-    async def _ensure_task(self, track_id: str, url: str | None) -> None:
+    async def _ensure_task(
+        self, track_id: str, url: str | None, label: str | None = None
+    ) -> None:
         try:
-            await self._ensure_async(track_id, url)
+            await self._ensure_async(track_id, url, label)
         finally:
             self._ensuring.discard(track_id)
 
-    async def _ensure_async(self, track_id: str, url: str | None) -> None:
+    async def _ensure_async(
+        self, track_id: str, url: str | None, label: str | None = None
+    ) -> None:
+        if self._index is not None:
+            await self._index.ensure_loaded()
         disk = await asyncio.get_running_loop().run_in_executor(
             None, self._load_disk, track_id
         )
@@ -1270,20 +1674,23 @@ class TrackMapper:
             return
         if not url:
             return
+        if self.failed(track_id):
+            return  # permanently failed (this session or the persistent index)
         f = self._failures.get(track_id)
-        if f and (f.permanent or time.monotonic() < f.retry_at):
-            return  # permanently failed, or waiting out the retry backoff
+        if f and time.monotonic() < f.retry_at:
+            return  # waiting out the retry backoff
         if self._task is not None and not self._task.done():
             return  # one analysis at a time; retried on the next track poll
         self._inflight = track_id
         self._task = self._spawn(
-            self._analyze(track_id, url), f"hue_music_sync_trackmap_{track_id[:24]}"
+            self._analyze(track_id, url, label),
+            f"hue_music_sync_trackmap_{track_id[:24]}",
         )
 
     def _analysis_lock(self) -> "asyncio.Lock":
         return _global_analysis_lock()
 
-    async def _analyze(self, track_id: str, url: str) -> None:
+    async def _analyze(self, track_id: str, url: str, label: str | None = None) -> None:
         try:
             async with self._analysis_lock():  # yields to / blocks the pre-warm
                 result = await build_track_map(self._ffmpeg, url)
@@ -1292,11 +1699,13 @@ class TrackMapper:
             result = MapResult(None, decoded=False, error="analysis crashed")
         finally:
             self._inflight = None
-        self._record_result(track_id, url, result)
-        # Persist a good map so the next play is instant (write off the loop —
-        # a ~0.3 MB compressed save shouldn't stall the render frames).
+        self._record_result(track_id, url, result, label)
+        if self._index is not None:
+            await self._index.flush()
+        # Persist a servable map so the next play is instant (write off the
+        # loop — a ~0.3 MB compressed save shouldn't stall the render frames).
         tm = result.track_map
-        if tm is not None and tm.usable and self._cache_dir is not None:
+        if tm is not None and tm.servable and self._cache_dir is not None:
             try:
                 await asyncio.get_running_loop().run_in_executor(
                     None, self._save_disk, track_id, tm
@@ -1304,49 +1713,129 @@ class TrackMapper:
             except Exception:  # noqa: BLE001 - caching must never break sync
                 _LOGGER.debug("Track-map disk save failed for %s", track_id, exc_info=True)
 
-    def _record_result(self, track_id: str, url: str, result: MapResult) -> None:
+    def _record_result(
+        self, track_id: str, url: str, result: MapResult, label: str | None = None
+    ) -> None:
         tm = result.track_map
-        if tm is not None and tm.usable:
+        diag = result.diagnostics
+        if tm is not None and tm.servable:
             self._failures.pop(track_id, None)
             self._cache[track_id] = tm
             while len(self._cache) > self._max_cache:
                 self._cache.popitem(last=False)
-            _LOGGER.info(
-                "Track map ready: %.0f s, %.1f BPM (confidence %.2f), "
-                "%d beats, %d sections",
-                tm.duration, tm.bpm, tm.confidence, tm.beats.size, len(tm.sections),
-            )
+            if tm.grid_usable:
+                if self._index is not None:
+                    self._index.clear(track_key(track_id))
+                _LOGGER.info(
+                    "Track map ready: %.0f s, %.1f BPM (confidence %.2f), "
+                    "%d beats, %d sections",
+                    tm.duration, tm.bpm, tm.confidence, tm.beats.size, len(tm.sections),
+                )
+            else:
+                # Ambient tier: full continuous show (features/sections/
+                # colours + detected onsets), no scheduled beat grid.
+                if self._index is not None:
+                    self._index.record(
+                        track_key(track_id),
+                        label=label,
+                        status="ambient",
+                        reason=(diag.reason if diag else ""),
+                        bpm=tm.bpm,
+                        confidence=tm.confidence,
+                    )
+                _LOGGER.info(
+                    "Track map ready (ambient tier, no reliable beat grid): "
+                    "%.0f s, %d sections — %s",
+                    tm.duration, len(tm.sections),
+                    (diag.reason if diag else "low grid confidence"),
+                )
             return
 
         f = self._failures.get(track_id) or _Failure()
         f.attempts += 1
-        if result.decoded:
-            # Audio decoded but no usable beat map — re-analysing won't help.
+        err = result.error or "unknown error"
+        if result.decoded and result.complete:
+            # The whole stream decoded cleanly and still produced nothing
+            # servable (silence / far too short) — re-analysing won't help.
             # WARNING: this permanently disables track-map sync for the track,
             # which reads as "this song doesn't react" — it must be visible.
             f.permanent = True
             _LOGGER.warning(
-                "Track-map analysis produced no usable map for %s "
-                "(decoded but unanalysable); using live/fallback sync", redact_url(url)
+                "Track-map analysis produced no usable map for %s (%s); "
+                "using live/fallback sync", redact_url(url), err
             )
         elif f.attempts >= _MAX_ANALYSIS_ATTEMPTS:
             f.permanent = True
             _LOGGER.warning(
                 "Track-map analysis failed %d times for %s (%s); giving up for "
-                "this track", f.attempts, redact_url(url), result.error or "unknown error"
+                "this track", f.attempts, redact_url(url), err
             )
         else:
             delay = min(_RETRY_MAX_S, _RETRY_BASE_S * (2 ** (f.attempts - 1)))
             f.retry_at = time.monotonic() + delay
             _LOGGER.info(
                 "Track-map analysis failed for %s (%s); retry %d/%d in %.0fs",
-                redact_url(url), result.error or "unknown error",
-                f.attempts, _MAX_ANALYSIS_ATTEMPTS, delay,
+                redact_url(url), err, f.attempts, _MAX_ANALYSIS_ATTEMPTS, delay,
+            )
+        if self._index is not None:
+            self._index.record(
+                track_key(track_id),
+                label=label,
+                status="failed" if f.permanent else "retrying",
+                reason=err,
+                attempts=f.attempts,
+                permanent=f.permanent,
             )
         self._failures[track_id] = f
         self._failures.move_to_end(track_id)
         while len(self._failures) > self._max_cache * 2:
             self._failures.popitem(last=False)
+
+    async def analyze_now(
+        self,
+        track_id: str | None,
+        url: str,
+        label: str | None = None,
+        force: bool = True,
+    ) -> MapResult:
+        """One-shot, awaited analysis of a single track (the diagnose service).
+
+        ``force`` clears any failure verdict and re-analyses even when a map is
+        already cached — the per-track tool for "why doesn't this song react"
+        and for re-checking a track after an analysis upgrade. The result (and
+        its :class:`MapDiagnostics`) is returned for the caller to surface;
+        a servable map is cached/persisted exactly like any other analysis.
+        """
+        if self._index is not None:
+            await self._index.ensure_loaded()
+        if track_id and force:
+            self._failures.pop(track_id, None)
+            self._cache.pop(track_id, None)
+            if self._index is not None:
+                self._index.clear(track_key(track_id))
+        try:
+            async with self._analysis_lock():
+                result = await build_track_map(self._ffmpeg, url)
+        except Exception:  # noqa: BLE001 - diagnostics must never crash HA
+            _LOGGER.debug(
+                "One-shot analysis crashed for %s", redact_url(url), exc_info=True
+            )
+            result = MapResult(None, decoded=False, error="analysis crashed")
+        if track_id:
+            self._record_result(track_id, url, result, label)
+            tm = result.track_map
+            if tm is not None and tm.servable and self._cache_dir is not None:
+                try:
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, self._save_disk, track_id, tm
+                    )
+                except Exception:  # noqa: BLE001
+                    _LOGGER.debug(
+                        "One-shot disk save failed for %s", track_id, exc_info=True
+                    )
+            if self._index is not None:
+                await self._index.flush(force=True)
+        return result
 
     async def prewarm(
         self,
@@ -1354,26 +1843,31 @@ class TrackMapper:
         *,
         delay_s: float = 1.0,
         progress=None,
-    ) -> tuple[int, int, list[tuple[str, str]]]:
-        """Analyse + cache every uncached ``(track_id, url)`` one at a time.
+    ) -> PrewarmResult:
+        """Analyse + cache every uncached ``(track_id, url, label)`` one at a time.
 
         A gentle, resumable background sweep of a music library so a track plays
         instantly (offline track-map) the first time too. Already-cached tracks
         (in memory or on disk) and permanently-failed ones are skipped, so a
-        re-run continues where it left off. The shared analysis lock means a
-        live playback analysis takes priority — the pre-warm waits between
-        tracks and never decodes two streams at once. Returns
-        ``(analysed, considered, failures)`` where ``failures`` is up to 20
-        ``(url, error)`` samples — a systematically failing library (bad login,
-        wrong URL scheme) must be visible, not silent.
+        re-run continues where it left off — and picks up newly-added library
+        tracks cheaply. The shared analysis lock means a live playback analysis
+        takes priority — the pre-warm waits between tracks and never decodes two
+        streams at once. Returns a :class:`PrewarmResult`; a systematically
+        failing library (bad login, wrong URL scheme) must be visible, not
+        silent, so failures carry labelled samples and every outcome lands in
+        the shared TrackIndex.
         """
         self._stop_prewarm = False
-        analysed = considered = failed = 0
-        failures: list[tuple[str, str]] = []
-        for track_id, url in items:
+        if self._index is not None:
+            await self._index.ensure_loaded()
+        res = PrewarmResult()
+        for item in items:
+            track_id, url, label = (
+                item if len(item) >= 3 else (item[0], item[1], None)
+            )
             if self._stop_prewarm:
                 break
-            considered += 1
+            res.considered += 1
             try:
                 if not track_id or not url:
                     continue
@@ -1387,9 +1881,9 @@ class TrackMapper:
                 except Exception:  # noqa: BLE001 - one bad track must not stop the sweep
                     _LOGGER.debug("Pre-warm analysis crashed for %s", redact_url(url), exc_info=True)
                     result = MapResult(None, decoded=False, error="prewarm crashed")
-                self._record_result(track_id, url, result)
+                self._record_result(track_id, url, result, label)
                 tm = result.track_map
-                if tm is not None and tm.usable:
+                if tm is not None and tm.servable:
                     if self._cache_dir is not None:
                         try:
                             await asyncio.get_running_loop().run_in_executor(
@@ -1399,31 +1893,39 @@ class TrackMapper:
                             _LOGGER.debug(
                                 "Pre-warm disk save failed for %s", track_id, exc_info=True
                             )
-                    analysed += 1
+                    if tm.grid_usable:
+                        res.analysed += 1
+                    else:
+                        res.ambient += 1
                 else:
-                    failed += 1
+                    res.failed += 1
                     err = result.error or (
                         "decoded but unanalysable" if result.decoded else "unknown error"
                     )
-                    if len(failures) < 20:
-                        failures.append((url, err))
-                    if failed <= 10:  # first few at WARNING; a broken library must show
+                    if len(res.failures) < 20:
+                        res.failures.append((label or "?", url, err))
+                    if res.failed <= 10:  # first few at WARNING; a broken library must show
                         _LOGGER.warning(
-                            "Library pre-warm: analysis failed for %s (%s)", redact_url(url), err
+                            "Library pre-warm: analysis failed for %s [%s] (%s)",
+                            label or "?", redact_url(url), err,
                         )
-                    elif failed == 11:
+                    elif res.failed == 11:
                         _LOGGER.warning(
                             "Library pre-warm: more analysis failures; further ones "
                             "logged at debug level only"
                         )
+                if self._index is not None:
+                    await self._index.flush()  # debounced
                 await asyncio.sleep(delay_s)  # be gentle on CPU + the music library
             finally:
                 # Every item counts as progress (cached/skipped ones too), so a
                 # progress surface moves smoothly instead of stalling on a
                 # mostly-cached library.
                 if progress is not None:
-                    progress(analysed, considered)
-        return analysed, considered, failures
+                    progress(res.analysed + res.ambient, res.considered)
+        if self._index is not None:
+            await self._index.flush(force=True)
+        return res
 
     def stop_prewarm(self) -> None:
         """Ask an in-flight :meth:`prewarm` sweep to stop after the current track."""
@@ -1434,3 +1936,5 @@ class TrackMapper:
         if self._task is not None and not self._task.done():
             self._task.cancel()
         self._task = None
+        if self._index is not None:
+            await self._index.flush(force=True)

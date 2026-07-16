@@ -218,9 +218,26 @@ See the [photosensitivity warning](#️-photosensitivity-warning) for what *Stri
 | `hue_music_sync.activate` | Start sync for one or more areas; optionally set mode, effect, colour, brightness and the followed player |
 | `hue_music_sync.deactivate` | Stop sync |
 | `hue_music_sync.set_options` | Change any setting live without restarting the session — including pinning or clearing the followed player |
-| `hue_music_sync.prewarm_library` | Analyse your whole Music Assistant library in the background and cache it to disk, so **every** track reacts with full beat accuracy the first time it plays |
+| `hue_music_sync.prewarm_library` | Analyse your whole Music Assistant library in the background and cache it to disk, so **every** track reacts with full beat accuracy the first time it plays. `retry_failed: true` clears recorded failures (and ambient-only maps) so they analyse again |
+| `hue_music_sync.analyze_track` | Diagnose **one** song right away and post the verdict as a notification: tier, tempo, confidence, and exactly why a beat grid was rejected. Takes a stream `url`, an `artist` + `title` library lookup, or a `media_player` that is currently playing |
 
-Pre-analysing the library (or pressing the **Analyse library** button) is the way to make a brand-new track react instantly. It runs gently — one track at a time, yielding to live playback — and is resumable, so re-running only analyses what's new. Progress and failures surface on the **Library analysis** sensor.
+Pre-analysing the library (or pressing the **Analyse library** button) is the way to make a brand-new track react instantly. It runs gently — one track at a time, yielding to live playback — and is resumable **and incremental**: re-running only analyses what's new, so it is also how newly added Navidrome/library tracks get picked up.
+
+### Library analysis, failures and re-analysis
+
+Every analysed track lands in one of three tiers:
+
+- **Full** — a trustworthy beat grid was found: scheduled, anticipatory beat playback (the best show).
+- **Ambient** — the audio decoded fine but no beat schedule was trustworthy (freely-timed, rubato, beatless material). The lights still get everything else: per-frame energy/spectrum, sections, song colours, and the *detected* onsets — the live beat tracker locks onto those in a few seconds. **A decodable track never falls back to the lifeless metadata animation.**
+- **Failed** — the audio could not be fetched/decoded at all (URL, login, network). These are recorded persistently with the reason.
+
+Where to look:
+
+- The **Library analysis** sensor: `failed` / `newly_ambient` counts, a capped `failed_tracks` list (Artist - Title + reason), and `pending` (tracks enumerated but not yet analysed).
+- The full uncapped report is written to `config/hue_music_sync/trackmaps/analysis_report.json` after each sweep.
+- `hue_music_sync.analyze_track` re-analyses a single song on demand and explains its verdict (beats-on-peaks contrast, interval spread vs the local tempo, coverage, tempo stability).
+
+The tempo analysis follows **drifting and changing tempo** (a live drummer, a 100→140 BPM switch) via a windowed tempogram with Viterbi tempo-path decoding, so dynamic, human-played music gets a full-tier grid instead of being rejected. After updating to a release that improves the analysis, run `prewarm_library` with `retry_failed: true` once so previously failed/ambient tracks get re-scored.
 
 ## Options
 

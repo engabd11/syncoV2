@@ -26,6 +26,7 @@ from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.util import dt as dt_util
 
 from .const import (
     CONF_APP_KEY,
@@ -56,6 +57,14 @@ SERVICE_ACTIVATE = "activate"
 SERVICE_DEACTIVATE = "deactivate"
 SERVICE_SET_OPTIONS = "set_options"
 SERVICE_PREWARM_LIBRARY = "prewarm_library"
+SERVICE_ANALYZE_TRACK = "analyze_track"
+
+ATTR_RETRY_FAILED = "retry_failed"
+ATTR_URL = "url"
+ATTR_ARTIST = "artist"
+ATTR_TITLE = "title"
+ATTR_MEDIA_PLAYER = "media_player"
+ATTR_FORCE = "force"
 
 DATA_PREWARM_RUNNING = "prewarm_running"
 DATA_PREWARM_RESUME = "prewarm_resume_scheduled"
@@ -484,13 +493,37 @@ def _register_services(hass: HomeAssistant) -> None:
     )
 
     async def _prewarm_library(call: ServiceCall) -> None:
-        await _start_library_prewarm(hass)
+        await _start_library_prewarm(
+            hass, retry_failed=bool(call.data.get(ATTR_RETRY_FAILED))
+        )
+
+    async def _analyze_track(call: ServiceCall) -> None:
+        hass.async_create_background_task(
+            _run_analyze_track(hass, dict(call.data)), "hue_music_sync_analyze_track"
+        )
 
     hass.services.async_register(DOMAIN, SERVICE_ACTIVATE, _activate, activate_schema)
     hass.services.async_register(DOMAIN, SERVICE_DEACTIVATE, _deactivate, deactivate_schema)
     hass.services.async_register(DOMAIN, SERVICE_SET_OPTIONS, _set_options, set_options_schema)
     hass.services.async_register(
-        DOMAIN, SERVICE_PREWARM_LIBRARY, _prewarm_library, vol.Schema({})
+        DOMAIN,
+        SERVICE_PREWARM_LIBRARY,
+        _prewarm_library,
+        vol.Schema({vol.Optional(ATTR_RETRY_FAILED, default=False): cv.boolean}),
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_ANALYZE_TRACK,
+        _analyze_track,
+        vol.Schema(
+            {
+                vol.Optional(ATTR_URL): cv.string,
+                vol.Optional(ATTR_ARTIST): cv.string,
+                vol.Optional(ATTR_TITLE): cv.string,
+                vol.Optional(ATTR_MEDIA_PLAYER): cv.entity_id,
+                vol.Optional(ATTR_FORCE, default=True): cv.boolean,
+            }
+        ),
     )
 
 
@@ -539,8 +572,12 @@ def prewarm_status(hass: HomeAssistant) -> dict:
             "total": 0,
             "done": 0,
             "analysed": 0,
+            "ambient": 0,
             "failed": 0,
+            "pending": None,
+            "last_run": None,
             "last_error": None,
+            "failed_tracks": [],
         },
     )
 
@@ -581,16 +618,29 @@ def _subsonic_cfg(hass: HomeAssistant):
     return None
 
 
-async def _start_library_prewarm(hass: HomeAssistant) -> None:
+def _report_path(hass: HomeAssistant) -> str:
+    import os
+
+    return os.path.join(trackmap_cache_dir(hass), "analysis_report.json")
+
+
+async def _start_library_prewarm(
+    hass: HomeAssistant, retry_failed: bool = False
+) -> None:
     """Analyse the whole Music Assistant library into the on-disk cache.
 
     Runs once, in the background, gently (one track at a time, yielding to live
     playback analysis), so every track plays instantly with offline track-map
-    reaction the first time too — not just on a repeat or in a queue. Resumable:
-    already-cached tracks are skipped, so re-running continues where it left off.
+    reaction the first time too — not just on a repeat or in a queue. Resumable
+    AND incremental: already-cached tracks are skipped, so re-running continues
+    where it left off and picks up newly added library tracks cheaply.
+    ``retry_failed`` clears the persistent failure verdicts (and deletes
+    ambient-tier maps) first, so everything problematic re-analyses — the way
+    to benefit from an analysis upgrade.
     """
     from .audio.source import library_prewarm_items
     from .audio.trackmap import TrackMapper
+    from .coordinator import get_track_index
 
     import time as _time
 
@@ -601,7 +651,7 @@ async def _start_library_prewarm(hass: HomeAssistant) -> None:
     data[DATA_PREWARM_RUNNING] = True
     _prewarm_update(
         hass, status="finding tracks", running=True,
-        done=0, analysed=0, failed=0, last_error=None,
+        done=0, analysed=0, ambient=0, failed=0, last_error=None,
     )
 
     throttle = {"sensor": 0.0, "notify": 0.0}
@@ -629,12 +679,37 @@ async def _start_library_prewarm(hass: HomeAssistant) -> None:
             )
 
     async def _run() -> None:
+        index = get_track_index(hass)
+        await index.ensure_loaded()
         mapper = TrackMapper(
             _ffmpeg_binary(hass),
             spawner=lambda coro, name: hass.async_create_background_task(coro, name),
             cache_dir=trackmap_cache_dir(hass),
+            track_index=index,
         )
         try:
+            if retry_failed:
+                cleared = index.clear_failures()
+                ambient = index.ambient_keys()
+                # Delete ambient-tier maps so the (possibly upgraded) analysis
+                # gets a fresh shot at a full beat grid for them.
+                if ambient:
+                    import os
+
+                    def _drop_ambient() -> None:
+                        for key in ambient:
+                            try:
+                                os.unlink(
+                                    os.path.join(trackmap_cache_dir(hass), f"{key}.npz")
+                                )
+                            except OSError:
+                                pass
+
+                    await hass.async_add_executor_job(_drop_ambient)
+                _LOGGER.info(
+                    "Library pre-warm: retry_failed cleared %d failure records "
+                    "and %d ambient maps for re-analysis", cleared, len(ambient),
+                )
             # Enumerate inside the task (paged library calls can take a moment)
             # so the service call returns immediately.
             items = await library_prewarm_items(hass, _subsonic_cfg(hass))
@@ -654,54 +729,94 @@ async def _start_library_prewarm(hass: HomeAssistant) -> None:
                 _prewarm_update(hass, status="no analysable tracks", running=False)
                 return
             total = len(items)
-            _LOGGER.info("Library pre-warm starting: %d tracks to consider", total)
-            _prewarm_update(hass, status="running", total=total)
+            # Size the shared disk cache to the library BEFORE analysing, so
+            # the prune can never evict maps the sweep just wrote.
+            index.set_library_total(total)
+            # How many enumerated tracks have no map yet (the "new since last
+            # run" signal; permanent failures are not pending, they're failed).
+            def _count_pending() -> int:
+                return sum(
+                    1 for sig, _url, _label in items
+                    if not mapper.has_disk(sig) and not mapper.failed(sig)
+                )
+
+            pending = await hass.async_add_executor_job(_count_pending)
+            _LOGGER.info(
+                "Library pre-warm starting: %d tracks total, %d to analyse",
+                total, pending,
+            )
+            _prewarm_update(hass, status="running", total=total, pending=pending)
             # Mark the sweep in-flight so an HA restart resumes it automatically.
             await hass.async_add_executor_job(
                 _write_prewarm_state, hass, {"completed": False, "total": total}
             )
-            analysed, considered, failures = await mapper.prewarm(
+            res = await mapper.prewarm(
                 items, delay_s=1.0, progress=lambda a, c: _progress(a, c, total)
             )
-            interrupted = considered < total  # stop_prewarm() ended it early
+            interrupted = res.considered < total  # stop_prewarm() ended it early
+            now_iso = dt_util.utcnow().isoformat()
             await hass.async_add_executor_job(
                 _write_prewarm_state,
                 hass,
                 {
                     "completed": not interrupted,
                     "total": total,
-                    "analysed": analysed,
-                    "failed": len(failures),
+                    "analysed": res.analysed,
+                    "ambient": res.ambient,
+                    "failed": res.failed,
+                    "finished_at": now_iso,
+                    "disk_budget": index.disk_budget,
                 },
             )
+            # The full problem-track report (uncapped, with reasons) next to
+            # the cache, for anything the sensor attribute cannot carry.
+            await hass.async_add_executor_job(
+                index.write_report_sync, _report_path(hass)
+            )
+            first = res.failures[0] if res.failures else None
             _prewarm_update(
                 hass,
                 status="interrupted" if interrupted else "complete",
                 running=False,
-                done=considered,
-                analysed=analysed,
-                failed=len(failures),
-                last_error=(
-                    f"{failures[0][0]} ({failures[0][1]})" if failures else None
-                ),
+                done=res.considered,
+                analysed=res.analysed,
+                ambient=res.ambient,
+                failed=res.failed,
+                pending=max(
+                    0, pending - res.analysed - res.ambient - res.failed
+                ) if not interrupted else None,
+                last_run=now_iso,
+                last_error=(f"{first[0]} ({first[2]})" if first else None),
+                failed_tracks=index.failed_entries(25),
             )
             _LOGGER.info(
-                "Library pre-warm complete: %d newly analysed of %d tracks "
-                "(the rest were already cached, failed, or not analysable)",
-                analysed, total,
+                "Library pre-warm complete: %d newly analysed (+%d ambient-only) "
+                "of %d tracks (the rest were already cached, failed, or not "
+                "analysable)", res.analysed, res.ambient, total,
             )
-            skipped = considered - analysed - len(failures)
+            skipped = res.considered - res.analysed - res.ambient - res.failed
             msg = (
-                f"Library analysis finished: {analysed} newly analysed, "
-                f"{max(0, skipped)} already cached or skipped"
+                f"Library analysis finished: {res.analysed} newly analysed"
             )
-            if failures:
-                url, err = failures[0]
+            if res.ambient:
                 msg += (
-                    f", **{len(failures)}+ failed**. First failure: `{url}` "
-                    f"({err}). If most tracks failed, check the "
+                    f" plus {res.ambient} ambient-only (features/colours, "
+                    f"no reliable beat grid)"
+                )
+            msg += f", {max(0, skipped)} already cached or skipped"
+            if res.failed:
+                lines = "\n".join(
+                    f"- {label} ({err})" for label, _url, err in res.failures[:10]
+                )
+                msg += (
+                    f", **{res.failed} failed**:\n{lines}\n\n"
+                    f"The full list is in "
+                    f"`hue_music_sync/trackmaps/analysis_report.json`. Diagnose "
+                    f"one song with the `hue_music_sync.analyze_track` service, "
+                    f"or re-try everything with `prewarm_library` and "
+                    f"`retry_failed: true`. If most tracks failed, check the "
                     f"OpenSubsonic/Navidrome URL + login in the integration "
-                    f"options and re-run `hue_music_sync.prewarm_library`."
+                    f"options."
                 )
             else:
                 msg += ". Every analysed song now reacts from the first beat."
@@ -717,3 +832,152 @@ async def _start_library_prewarm(hass: HomeAssistant) -> None:
             await mapper.close()
 
     hass.async_create_background_task(_run(), "hue_music_sync_prewarm")
+
+
+async def _run_analyze_track(hass: HomeAssistant, params: dict) -> None:
+    """The ``analyze_track`` service: diagnose (and re-analyse) ONE song.
+
+    Resolves the track from a direct URL, an artist+title library lookup, or
+    whatever a media_player is currently playing; runs the offline analysis
+    right away (``force`` clears any failure verdict first) and posts the full
+    structured diagnostics as a persistent notification — the per-song answer
+    to "why doesn't this track react".
+    """
+    from .audio.library_match import TrackQuery
+    from .audio.source import (
+        ha_track_query,
+        library_index,
+        resolve_map_url,
+        track_label,
+        track_signature,
+    )
+    from .audio.trackmap import TrackMapper
+    from .coordinator import get_track_index
+
+    def _notify(message: str) -> None:
+        hass.async_create_task(
+            hass.services.async_call(
+                "persistent_notification",
+                "create",
+                {
+                    "title": "Hue Synco — track analysis",
+                    "message": message,
+                    "notification_id": "hue_music_sync_analyze",
+                },
+            )
+        )
+
+    subsonic = _subsonic_cfg(hass)
+    url = (params.get(ATTR_URL) or "").strip() or None
+    artist = (params.get(ATTR_ARTIST) or "").strip() or None
+    title = (params.get(ATTR_TITLE) or "").strip() or None
+    entity_id = params.get(ATTR_MEDIA_PLAYER)
+    force = bool(params.get(ATTR_FORCE, True))
+
+    sig = label = None
+    try:
+        if url:
+            label = "direct URL"
+        elif title or artist:
+            entry = await library_index(hass, subsonic).async_lookup(
+                TrackQuery(title=title, artist=artist)
+            )
+            if entry is None:
+                _notify(
+                    f"No Music Assistant library track matched "
+                    f"**{track_label(artist, title)}**. Check the spelling, or "
+                    f"pass the stream `url` directly."
+                )
+                return
+            sig, url = entry.signature, entry.url
+            label = track_label(entry.artist, entry.title)
+        elif entity_id:
+            st = hass.states.get(entity_id)
+            attrs = st.attributes if st else {}
+            sig = track_signature(
+                attrs.get("media_content_id"),
+                attrs.get("media_artist"),
+                attrs.get("media_title"),
+            )
+            label = track_label(attrs.get("media_artist"), attrs.get("media_title"))
+            url = resolve_map_url(hass, entity_id, subsonic)
+            if url is None:
+                entry = await library_index(hass, subsonic).async_lookup(
+                    ha_track_query(hass, entity_id)
+                )
+                if entry is not None:
+                    sig, url = entry.signature, entry.url
+        else:
+            _notify(
+                "Nothing to analyse: pass a `url`, an `artist` + `title`, or a "
+                "`media_player` that is currently playing."
+            )
+            return
+        if not url:
+            _notify(
+                f"**{label}**: no analysable stream URL could be resolved. For a "
+                f"Navidrome/OpenSubsonic library, set the library URL + login in "
+                f"the integration options."
+            )
+            return
+
+        mapper = TrackMapper(
+            _ffmpeg_binary(hass),
+            spawner=lambda coro, name: hass.async_create_background_task(coro, name),
+            cache_dir=trackmap_cache_dir(hass),
+            track_index=get_track_index(hass),
+        )
+        _LOGGER.info("Analysing %s on request (analyze_track)", label)
+        result = await mapper.analyze_now(sig, url, label, force=force)
+        _notify(_format_analysis(label, result, cached=sig is not None))
+    except Exception:  # noqa: BLE001 - a diagnostics service must never crash HA
+        _LOGGER.exception("analyze_track failed")
+        _notify("Track analysis crashed — see the Home Assistant log.")
+
+
+def _format_analysis(label: str | None, result, cached: bool) -> str:
+    """Human summary of a MapResult + MapDiagnostics for the notification."""
+    tm = result.track_map
+    d = result.diagnostics
+    lines = [f"**{label or '?'}**"]
+    if tm is None:
+        lines.append(
+            f"Analysis FAILED: {result.error or 'unknown error'} "
+            f"({'stream decoded' if result.decoded else 'could not fetch/decode the stream'})."
+        )
+        if not result.decoded:
+            lines.append(
+                "This is a fetch problem (URL/login/network), not a music "
+                "problem — check the OpenSubsonic/Navidrome settings."
+            )
+    else:
+        tier = d.tier if d else ("full" if tm.grid_usable else "ambient")
+        if tier == "full":
+            lines.append(
+                "Result: **full tier** — scheduled beat-grid playback. "
+                "This song gets the complete show."
+            )
+        else:
+            lines.append(
+                "Result: **ambient tier** — energy/colours/sections drive the "
+                "lights and the live beat tracker follows the replayed onsets, "
+                "but no offline beat schedule was trustworthy."
+            )
+        if d is not None:
+            lines.append(
+                f"- analysed {d.analysed_s:.0f} s, {d.bpm:.1f} BPM, "
+                f"confidence {d.confidence:.2f} (autocorrelation {d.autocorr_conf:.2f})"
+            )
+            lines.append(
+                f"- beats {d.beats}, sections {d.sections}, "
+                f"beats-on-peaks contrast {d.contrast:.1f} (noise is ~2.9), "
+                f"interval spread {d.mad_local:.2f}, coverage {d.coverage:.0%}, "
+                f"tempo stability {d.tempo_stability:.0%}"
+            )
+            if d.reason:
+                lines.append(f"- reason: {d.reason}")
+        if cached:
+            lines.append(
+                "The map was saved: this song now plays with track-map sync."
+            )
+    return "\n".join(lines)
