@@ -111,6 +111,12 @@ An immersive now-playing header themed by the music itself — the blurred album
 - Respects `prefers-reduced-motion`; pauses all animation when scrolled off-screen (wall tablets keep dashboards open 24/7)
 - **Demo mode** — added with no config, the card renders a self-running demo so you can style your dashboard before wiring entities
 
+### Tablet layout
+A landscape-optimised sibling — the **Hue Synco Card (Tablet)** — ships alongside the mobile card in the same soft Hue-navy theme, purpose-built for wall tablets and dashboards viewed sideways. Search for *"Hue Synco Card (Tablet)"* in the card picker. It shares all of the mobile card's real-data wiring (live analysis feed, album-colour extraction, player picker, beat pads) in a two-column arrangement:
+
+- **Left column** — a large centred album cover with a beat-reactive halo, marquee title/artist, centred transport, a **waveform scrubber** with time readout, and a **live frequency map** (one glowing dot per lamp, laid out low → high across the room)
+- **Right column** — the Area & Player dropdowns, an **intensity picker** with a live per-mode equalizer, the Effect segmented control, colour palette dots, and the brightness slider + timing stepper (with the Beat Pads button)
+
 ### Card configuration
 
 The card picker pre-fills a working template. Full form:
@@ -130,6 +136,16 @@ areas:
 ```
 
 A single flat area (`switch:`, `intensity:`, … at the top level) also works. Every key is optional — the card renders whatever you give it and falls back to demo mode with none.
+
+The tablet card takes the **same** configuration — just change the type:
+
+```yaml
+type: custom:hue-music-sync-card-tablet
+areas:
+  - name: Living Room
+    switch: switch.music_sync_living_room
+    # ...same keys as above
+```
 
 ## Requirements
 

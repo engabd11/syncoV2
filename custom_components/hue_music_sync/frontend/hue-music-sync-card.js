@@ -13,7 +13,7 @@
 // Cosmetic version (shown in the console banner). The browser cache-bust no
 // longer depends on this: the integration appends ?v=<content-hash> derived from
 // this file's bytes, so any edit is picked up without a manual hard refresh.
-const VERSION = "1.19.2";
+const VERSION = "1.20.0";
 
 /* ------------------------- Palette data ------------------------- */
 // Colour schemes from the integration, each a small gradient swatch.
@@ -2395,7 +2395,9 @@ class HueMusicSyncCard extends HTMLElement {
   _loop(now) {
     this._raf = requestAnimationFrame(this._loop);
     if (this._visible === false) return; // off-screen: skip all DOM work
-    if (!this._barNodes || !this._barNodes.length) return;
+    // The tablet card has no hero bars; it still animates the wash, cover,
+    // live frequency map and waveform from the same viz, so don't bail here on
+    // a missing bar set - just skip the bar-paint block below.
 
     // Lock the beat grid to playback: time advances only while the song plays,
     // from its reported position, so the bars pause/seek with the track.
@@ -2426,17 +2428,19 @@ class HueMusicSyncCard extends HTMLElement {
       this._trTime.textContent = dur ? `${fmt(time)} / ${fmt(dur)}` : fmt(time);
     }
 
-    const colors = this._barColors || PALETTES[0].colors;
-    const n = this._viz.count;
-    const dim = this._barDim != null ? this._barDim : 0.9;
-    for (let i = 0; i < n; i++) {
-      const v = this._viz.levels[i];
-      const c = colors[Math.floor((i / n) * colors.length) % colors.length];
-      const node = this._barNodes[i];
-      node.style.height = Math.min(100, Math.max(6, v * 100)) + "%";
-      node.style.background = `linear-gradient(to top, ${c}, ${c}cc)`;
-      node.style.opacity = dim;
-      node.style.boxShadow = `0 0 ${(4 + v * 10).toFixed(1)}px ${c}66`;
+    if (this._barNodes && this._barNodes.length) {
+      const colors = this._barColors || PALETTES[0].colors;
+      const n = this._viz.count;
+      const dim = this._barDim != null ? this._barDim : 0.9;
+      for (let i = 0; i < n; i++) {
+        const v = this._viz.levels[i];
+        const c = colors[Math.floor((i / n) * colors.length) % colors.length];
+        const node = this._barNodes[i];
+        node.style.height = Math.min(100, Math.max(6, v * 100)) + "%";
+        node.style.background = `linear-gradient(to top, ${c}, ${c}cc)`;
+        node.style.opacity = dim;
+        node.style.boxShadow = `0 0 ${(4 + v * 10).toFixed(1)}px ${c}66`;
+      }
     }
 
     if (this._washNode) {
@@ -2463,7 +2467,12 @@ class HueMusicSyncCard extends HTMLElement {
     if (this._glossNode) {
       this._glossNode.style.opacity = (0.5 + this._viz.beat * 0.3 + this._viz.downbeat * 0.2).toFixed(3);
     }
+    this._loopExtra(active, time);
   }
+
+  // Subclass hook: extra per-frame DOM work. No-op for the mobile card; the
+  // tablet card drives its live frequency map and waveform playhead here.
+  _loopExtra() {}
 
   _currentOn() {
     const area = this._areas[this._areaIndex] || {};
@@ -2471,6 +2480,649 @@ class HueMusicSyncCard extends HTMLElement {
       return this._hass.states[area.switch].state === "on";
     }
     return this._ui.on;
+  }
+}
+
+/* ============================================================================
+   Tablet / landscape card ("Ambient Glow · Landscape")
+
+   A landscape-optimised sibling of the mobile card, sharing its soft Hue-navy
+   theme. It subclasses HueMusicSyncCard so it reuses ALL of the proven wiring -
+   the entity model, the live analysis feed, album-art extraction, the beat-pad
+   overlay, player selection and the visualizer loop - and overrides only the
+   render (a two-column layout: now-playing on the left, controls on the right)
+   plus a per-frame hook for its live frequency map and waveform playhead.
+   ========================================================================== */
+
+// Equalizer envelopes for the landscape intensity picker (per option, keyed by
+// the normalised option label). Higher intensities move faster and taller.
+const L_INT_ENV = {
+  auto:    { spd: 1.25, max: 0.66, min: 0.20 },
+  subtle:  { spd: 2.00, max: 0.44, min: 0.20 },
+  medium:  { spd: 1.05, max: 0.70, min: 0.18 },
+  high:    { spd: 0.52, max: 0.90, min: 0.13 },
+  intense: { spd: 0.28, max: 1.00, min: 0.09 },
+  extreme: { spd: 0.16, max: 1.00, min: 0.05 },
+};
+const L_INT_SHAPE = [0.58, 0.82, 1.0, 0.8, 0.6];
+function lIntBars(label) {
+  const e = L_INT_ENV[normalise(label)] || L_INT_ENV.medium;
+  return L_INT_SHAPE.map((s, i) => {
+    const max = Math.max(0.16, e.max * s);
+    const min = Math.min(max - 0.05, e.min * (0.65 + 0.35 * s));
+    return {
+      min: min.toFixed(2), max: max.toFixed(2),
+      spd: (e.spd * (0.84 + (i % 3) * 0.13)).toFixed(2) + "s",
+      dly: (-(i * e.spd * 0.19)).toFixed(2) + "s",
+    };
+  });
+}
+
+// Landscape-only styles, appended after CARD_CSS in the tablet's shadow root so
+// every shared component (pill, cover, fields, segmented, palette dots, slider,
+// timing, power, area/player dropdowns) keeps the mobile card's exact look.
+const TABLET_CSS = `
+  .hue-card.hue-land { padding: 0; }
+
+  .hue-land-top { position: relative; z-index: 3; display: flex; align-items: center;
+    justify-content: space-between; padding: 22px 28px 6px; }
+  .hue-land-top-right { display: flex; align-items: center; gap: 12px; }
+
+  .hue-land-cols { position: relative; z-index: 2; display: grid; grid-template-columns: 0.9fr 1.1fr; }
+  .hue-land-left { position: relative; padding: 10px 30px 30px; display: flex; flex-direction: column; justify-content: center; }
+  .hue-land-left::after { content: ""; position: absolute; top: 8px; bottom: 8px; right: 0; width: 1px;
+    background: linear-gradient(180deg, transparent, var(--hue-line) 18%, var(--hue-line) 82%, transparent); }
+  .hue-land-right { position: relative; padding: 12px 30px 30px; display: flex; flex-direction: column;
+    justify-content: space-between; gap: 14px; }
+  .hue-land-right .hue-field { margin-bottom: 0; }
+
+  /* now-playing block */
+  .hue-land-cover { position: relative; align-self: center; margin: 6px 0 18px; }
+  .hue-land-cover-glow { position: absolute; inset: -22px; border-radius: 44px; pointer-events: none; filter: blur(26px); transition: opacity .08s; }
+  .hue-land-meta { text-align: center; margin-bottom: 18px; }
+  .hue-land-meta .hue-now-track { font-size: 23px; }
+  .hue-land-meta .hue-now-track-inner { display: inline-block; white-space: nowrap; }
+  .hue-land-meta .hue-now-track-inner.scroll { animation: hue-mq 9s linear infinite alternate; }
+  .hue-land-meta .hue-now-artist { font-size: 14.5px; margin-top: 3px; }
+
+  /* centred transport */
+  .hue-land-tx { display: flex; align-items: center; justify-content: center; gap: 20px; margin-bottom: 6px; }
+  .hue-tx-btn { width: 46px; height: 46px; flex: none; border-radius: 50%;
+    border: 1px solid rgba(255,255,255,.12); background: rgba(255,255,255,.08);
+    color: rgba(255,255,255,.82); cursor: pointer; transition: .14s;
+    display: flex; align-items: center; justify-content: center; touch-action: manipulation; }
+  .hue-tx-btn:hover { background: rgba(255,255,255,.15); color: #fff; }
+  .hue-tx-btn:active { transform: scale(.9); }
+  .hue-tx-play { width: 60px; height: 60px; background: rgba(255,255,255,.12); }
+  .hue-land-time { display: flex; justify-content: space-between; font-size: 11.5px; font-weight: 700;
+    font-variant-numeric: tabular-nums; color: var(--hue-faint); margin-top: 4px; }
+
+  /* waveform scrubber */
+  .hue-wave { position: relative; display: flex; align-items: center; gap: 2px; height: 46px;
+    cursor: pointer; margin: 10px 0 2px; touch-action: none; }
+  .hue-wave-bar { flex: 1; min-width: 0; border-radius: 2px; transition: background .25s, box-shadow .25s; }
+  .hue-wave-cursor { position: absolute; top: 0; bottom: 0; width: 2px; border-radius: 2px; background: #fff;
+    box-shadow: 0 0 10px #fff, 0 0 2px #fff; transform: translateX(-50%); pointer-events: none; }
+
+  /* live frequency map */
+  .hue-fmap { border: 1px solid rgba(255,255,255,.08); border-radius: 14px; background: rgba(0,0,0,.28);
+    backdrop-filter: blur(4px); padding: 9px 14px 6px; margin-top: 12px; }
+  .hue-fmap-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 2px; }
+  .hue-fmap-live { display: flex; align-items: center; gap: 5px; font-size: 10px; font-weight: 800;
+    letter-spacing: .1em; color: rgba(255,255,255,.5); }
+  .hue-fmap-livedot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+  .hue-fmap-rng { display: flex; align-items: center; gap: 6px; }
+  .hue-fmap-rng-lbl { font-size: 9px; font-weight: 700; letter-spacing: .07em; color: rgba(255,255,255,.28); }
+  .hue-fmap-rng-bar { width: 52px; height: 3px; border-radius: 3px; }
+  .hue-fmap-stage { position: relative; height: 58px; }
+  .hue-fmap-stage::after { content: ""; position: absolute; top: 50%; left: 0; right: 0; height: 1px;
+    background: rgba(255,255,255,.05); pointer-events: none; }
+  .hue-fmap-dot { position: absolute; width: 11px; height: 11px; border-radius: 50%; transform-origin: center;
+    transform: translate(-50%, -50%); transition: box-shadow .09s, transform .09s, opacity .09s; }
+
+  /* intensity picker · live equalizer */
+  .hue-int-picker { display: flex; gap: 8px; }
+  .hue-int-btn { position: relative; flex: 1; display: flex; flex-direction: column; align-items: center;
+    gap: 10px; padding: 16px 4px; border: 1px solid rgba(255,255,255,.07); border-radius: 16px;
+    background: rgba(255,255,255,.025); cursor: pointer; overflow: hidden; font-family: var(--hk);
+    transition: border-color .18s, background .18s, box-shadow .18s, transform .12s; }
+  .hue-int-btn:hover { background: rgba(255,255,255,.06); border-color: rgba(255,255,255,.13); }
+  .hue-int-btn:active { transform: scale(.96); }
+  .hue-int-btn.on { background: rgba(255,255,255,.05); }
+  .hue-int-wash { position: absolute; inset: 0; pointer-events: none; opacity: 0;
+    background: radial-gradient(85% 70% at 50% 122%, var(--ic), transparent 72%); transition: opacity .25s; }
+  .hue-int-btn.on .hue-int-wash { opacity: .22; }
+  .hue-int-eq { position: relative; z-index: 1; display: flex; align-items: flex-end; justify-content: center;
+    gap: 3.5px; height: 30px; }
+  .hue-int-bar { width: 4px; height: 100%; border-radius: 3px; flex: none; transform-origin: bottom;
+    transform: scaleY(var(--min)); animation: hue-int-eq var(--spd) ease-in-out infinite alternate; animation-delay: var(--dly); }
+  @keyframes hue-int-eq { from { transform: scaleY(var(--min)); } to { transform: scaleY(var(--max)); } }
+  .hue-int-label { position: relative; z-index: 1; font-size: 12px; font-weight: 700; letter-spacing: .05em;
+    color: rgba(255,255,255,.4); transition: color .18s; }
+  .hue-int-btn.on .hue-int-label { color: rgba(255,255,255,.96); }
+  .hue-int-underline { position: absolute; left: 50%; bottom: 0; width: 58%; height: 2.5px; border-radius: 3px;
+    transform: translateX(-50%) scaleX(0); transform-origin: center;
+    transition: transform .24s cubic-bezier(.2,1.3,.3,1); }
+  .hue-int-btn.on .hue-int-underline { transform: translateX(-50%) scaleX(1); }
+
+  @media (prefers-reduced-motion: reduce) {
+    .hue-int-bar { animation: none; transform: scaleY(var(--max)); }
+    .hue-land-meta .hue-now-track-inner.scroll { animation: none !important; }
+  }
+
+  /* On narrower tablets / portrait splits, stack the two columns. */
+  @media (max-width: 760px) {
+    .hue-land-cols { grid-template-columns: 1fr; }
+    .hue-land-left::after { display: none; }
+    .hue-land-left { border-bottom: 1px solid var(--hue-line); }
+  }
+`;
+
+class HueMusicSyncTabletCard extends HueMusicSyncCard {
+  getCardSize() { return 10; }
+
+  static getStubConfig() {
+    const base = HueMusicSyncCard.getStubConfig();
+    return { ...base, type: "custom:hue-music-sync-card-tablet" };
+  }
+
+  /* -- landscape render (overrides the mobile hero+body layout) -- */
+  _renderImpl() {
+    if (!this._config) return;
+    // Don't tear the DOM down while the beat-pad overlay is open.
+    if (this._drum) return;
+    const m = this._model();
+    const accent = m.accent;
+    const pal = m.colour.selected;
+    const wc = pal.colors;
+
+    // Same pre-render bookkeeping the mobile card does: album extraction and a
+    // playback snapshot so the shared visualizer loop stays locked to the song.
+    this._maybeExtractAlbum(m);
+    this._play = {
+      on: m.on,
+      playing: m.now.playing,
+      position: m.now.position || 0,
+      updatedAt: m.now.updatedAt || Date.now(),
+      bpm: m.bpm > 0 ? m.bpm : 122,
+      beatAnchor: m.beatAnchor,
+    };
+    this._accent = accent;
+
+    // Reset the mobile-only per-render node refs the shared loop / sync methods
+    // touch, so a prior mobile render (or an earlier tablet render) can't leave
+    // them pointing at detached nodes.
+    this._barNodes = null;
+    this._heroArtNode = null;
+    this._trTime = null;
+    this._stageNode = null;
+    this._stageDots = null;
+    this._tlNode = null;
+    this._tlSecs = null;
+
+    const card = document.createElement("div");
+    card.className = "hue-card hue-land";
+    this._cardNode = card;
+    card.style.background =
+      `radial-gradient(70% 55% at 22% 0%, ${wc[0]}22 0%, transparent 52%),` +
+      `radial-gradient(60% 50% at 78% 0%, ${wc[wc.length - 1]}1c 0%, transparent 48%),` +
+      `linear-gradient(180deg, #171626 0%, #0f0e1c 100%)`;
+    card.style.boxShadow = m.on
+      ? `0 34px 90px -28px ${accent}66, 0 0 0 1px var(--hue-line)`
+      : "0 0 0 1px var(--hue-line)";
+
+    // Soft palette wash across the top (pulsed by the shared loop via _washNode).
+    const wash = document.createElement("div");
+    wash.className = "hue-hero-wash";
+    wash.style.background =
+      `radial-gradient(50% 120% at 10% -12%, ${wc[0]}d8, transparent 55%),` +
+      `radial-gradient(50% 120% at 92% -12%, ${wc[wc.length - 1]}cc, transparent 55%)`;
+    this._washNode = wash;
+    card.appendChild(wash);
+
+    card.appendChild(this._landTop(m, accent));
+
+    const cols = document.createElement("div");
+    cols.className = "hue-land-cols";
+    cols.appendChild(this._landLeft(m, accent, wc));
+    cols.appendChild(this._landRight(m, accent, pal));
+    card.appendChild(cols);
+
+    this.shadowRoot.innerHTML = `<style>${CARD_CSS}${TABLET_CSS}</style>`;
+    this.shadowRoot.appendChild(card);
+
+    // Apply artwork to the cover (there is no full-bleed hero art in landscape),
+    // (re)connect the live feed and set up the title marquee.
+    this._applyArt(m.now.art);
+    this._ensureLiveSub();
+    this._setupMarquee();
+  }
+
+  /* -- top bar: source pill + brightness readout + power -- */
+  _landTop(m, accent) {
+    const top = document.createElement("div");
+    top.className = "hue-land-top";
+
+    const pill = document.createElement("div");
+    pill.className = "hue-pill";
+    pill.style.boxShadow = m.on ? `inset 0 0 0 1px ${accent}66` : "";
+    const dot = document.createElement("span");
+    dot.className = "hue-pill-dot";
+    const SRC_LABEL = {
+      "live-tap": "Live audio", snapcast: "Live (snapcast)",
+      "track-map": "Track map", metadata: "Metadata only", idle: "Starting",
+    };
+    const onFallback = m.on && m.audioSource === "metadata";
+    const pillColor = !m.on ? "#6b7088" : onFallback ? "#ffb24d" : accent;
+    dot.style.background = pillColor;
+    dot.style.boxShadow = m.on ? `0 0 8px ${pillColor}` : "none";
+    pill.appendChild(dot);
+    pill.appendChild(document.createTextNode(
+      m.on ? (SRC_LABEL[m.audioSource] || "Streaming") : "Idle"
+    ));
+    top.appendChild(pill);
+
+    const right = document.createElement("div");
+    right.className = "hue-land-top-right";
+    const bright = document.createElement("div");
+    bright.className = "hue-bright-mini";
+    bright.innerHTML =
+      `<span class="hue-bright-mini-icon">☀</span><span>${Math.round(m.brightness.value)}%</span>`;
+    right.appendChild(bright);
+    right.appendChild(this._power(m, accent));
+    top.appendChild(right);
+    return top;
+  }
+
+  /* -- left column: cover, meta, transport, waveform, live freq map -- */
+  _landLeft(m, accent, wc) {
+    const left = document.createElement("div");
+    left.className = "hue-land-left";
+
+    // Big centred album cover with a soft colour halo behind it.
+    const coverWrap = document.createElement("div");
+    coverWrap.className = "hue-land-cover";
+    const glow = document.createElement("div");
+    glow.className = "hue-land-cover-glow";
+    glow.style.background =
+      `radial-gradient(circle, ${wc[0]}55 0%, ${wc[wc.length - 1]}2e 58%, transparent 74%)`;
+    this._landCoverGlow = glow;
+    coverWrap.appendChild(glow);
+    coverWrap.appendChild(this._cover(208, 26, m.now.art));
+    left.appendChild(coverWrap);
+
+    // Track / artist (marquee for long titles, like the mobile card).
+    const meta = document.createElement("div");
+    meta.className = "hue-land-meta";
+    const track = document.createElement("div");
+    track.className = "hue-now-track";
+    const trackInner = document.createElement("span");
+    trackInner.className = "hue-now-track-inner";
+    trackInner.textContent = m.now.track;
+    track.appendChild(trackInner);
+    this._marqueeNodes = [track, trackInner];
+    const artist = document.createElement("div");
+    artist.className = "hue-now-artist";
+    artist.textContent = m.now.artist;
+    meta.append(track, artist);
+    left.appendChild(meta);
+
+    left.appendChild(this._landTransport(m));
+
+    // Waveform scrubber + time readout, driven per-frame by _loopExtra.
+    const wave = this._waveform(m, wc, accent);
+    left.appendChild(wave);
+    const time = document.createElement("div");
+    time.className = "hue-land-time";
+    const tCur = document.createElement("span");
+    const tDur = document.createElement("span");
+    tDur.textContent = this._fmtTime(m.now.duration || 0);
+    time.append(tCur, tDur);
+    this._waveTimeCur = tCur;
+    left.appendChild(time);
+
+    left.appendChild(this._freqMap(accent, wc));
+    return left;
+  }
+
+  /* -- right column: area/player, intensity, effect, colour, brightness+timing -- */
+  _landRight(m, accent, pal) {
+    const right = document.createElement("div");
+    right.className = "hue-land-right";
+
+    // Area + player selectors (reuse the mobile dropdowns for a consistent feel).
+    const selects = document.createElement("div");
+    selects.className = "hue-grid2";
+    selects.style.gap = "0 16px";
+    const areaField = document.createElement("div");
+    areaField.className = "hue-field";
+    areaField.appendChild(this._label("Area", null));
+    areaField.appendChild(this._areaSelect(accent));
+    selects.appendChild(areaField);
+    const playerDd = this._playerSelect(accent);
+    if (playerDd) {
+      const playerField = document.createElement("div");
+      playerField.className = "hue-field";
+      playerField.appendChild(this._label("Player", null));
+      playerField.appendChild(playerDd);
+      selects.appendChild(playerField);
+    }
+    right.appendChild(selects);
+
+    // Intensity — landscape equalizer picker.
+    const intField = document.createElement("div");
+    intField.className = "hue-field";
+    const intHint = m.intensity.autoMode
+      ? `Auto · ${titleize(m.intensity.autoMode)}` : null;
+    const selInt = m.intensity.options.find((o) => o.value === m.intensity.value);
+    intField.appendChild(this._label("Intensity", intHint || (selInt ? selInt.label : "")));
+    intField.appendChild(this._intensityPicker(m, accent));
+    right.appendChild(intField);
+
+    // Effect — shared segmented control.
+    const effLabel = m.effect.options.find((o) => o.value === m.effect.value);
+    const effField = document.createElement("div");
+    effField.className = "hue-field";
+    effField.appendChild(this._label("Effect", effLabel ? effLabel.label : ""));
+    effField.appendChild(this._segmented(m.effect.options, m.effect.value, accent, (v) => {
+      this._callSelect(m.effect.entity, v, "effect");
+      this._render();
+    }));
+    right.appendChild(effField);
+
+    // Colour — shared palette dots.
+    const colField = document.createElement("div");
+    colField.className = "hue-field";
+    colField.appendChild(this._label("Colour", pal.name));
+    colField.appendChild(this._dots(m.colour.options, m.colour.value, (v) => {
+      this._callSelect(m.colour.entity, v, "colour");
+      this._render();
+    }));
+    right.appendChild(colField);
+
+    // Brightness + timing (timing already carries the beat-pad button).
+    const grid = document.createElement("div");
+    grid.className = "hue-grid2 tight";
+    const brightField = document.createElement("div");
+    brightField.className = "hue-field";
+    brightField.appendChild(this._label("Brightness"));
+    brightField.appendChild(this._slider(m, accent));
+    grid.appendChild(brightField);
+    const timingField = document.createElement("div");
+    timingField.className = "hue-field";
+    timingField.appendChild(this._label("Timing"));
+    timingField.appendChild(this._timing(m, accent));
+    grid.appendChild(timingField);
+    right.appendChild(grid);
+    return right;
+  }
+
+  /* -- centred circular transport (only when a live player is followed) -- */
+  _landTransport(m) {
+    const tx = document.createElement("div");
+    tx.className = "hue-land-tx";
+    if (!m.now.player) return tx; // nothing to control yet
+    const svc = (service, data) => {
+      if (this._hass) {
+        this._hass.callService("media_player", service, { entity_id: m.now.player, ...data });
+      }
+    };
+    const ICONS = {
+      prev: "M6 5h2v14H6zM20 5v14l-11-7z",
+      play: "M8 5l12 7-12 7z",
+      pause: "M7 5h4v14H7zM13 5h4v14h-4z",
+      next: "M16 5h2v14h-2zM4 5l11 7-11 7z",
+    };
+    const mk = (icon, service, label, play) => {
+      const b = document.createElement("button");
+      b.className = "hue-tx-btn" + (play ? " hue-tx-play" : "");
+      const size = play ? 24 : 18;
+      b.innerHTML =
+        `<svg viewBox="0 0 24 24" width="${size}" height="${size}" aria-hidden="true">` +
+        `<path d="${ICONS[icon]}" fill="currentColor"/></svg>`;
+      b.setAttribute("aria-label", label);
+      b.addEventListener("click", () => svc(service));
+      return b;
+    };
+    tx.appendChild(mk("prev", "media_previous_track", "Previous track"));
+    tx.appendChild(mk(m.now.playing ? "pause" : "play", "media_play_pause", "Play / pause", true));
+    tx.appendChild(mk("next", "media_next_track", "Next track"));
+    return tx;
+  }
+
+  /* -- waveform scrubber (stable pseudo-random silhouette; seeks the player) -- */
+  _waveform(m, colors, accent) {
+    const N = 68;
+    if (!this._waveShape) {
+      const a = [];
+      for (let i = 0; i < N; i++) {
+        const env = 0.45 + 0.4 * Math.sin(i * 0.19) + 0.18 * Math.sin(i * 0.052);
+        const grit = 0.5 + 0.5 * Math.sin(i * 2.7 + Math.sin(i * 0.9) * 3);
+        a.push(Math.max(0.14, Math.min(1, env * (0.55 + grit * 0.5))));
+      }
+      this._waveShape = a;
+    }
+    const wave = document.createElement("div");
+    wave.className = "hue-wave";
+    const bars = [];
+    this._waveShape.forEach((v, i) => {
+      const bar = document.createElement("div");
+      bar.className = "hue-wave-bar";
+      bar.style.height = `${14 + v * 86}%`;
+      const c = colors[Math.floor((i / N) * colors.length) % colors.length];
+      wave.appendChild(bar);
+      bars.push({ node: bar, frac: i / N, c });
+    });
+    const cursor = document.createElement("div");
+    cursor.className = "hue-wave-cursor";
+    wave.appendChild(cursor);
+
+    this._waveBars = bars;
+    this._waveCursor = cursor;
+    this._waveDur = m.now.duration || 0;
+    this._waveLastIdx = -1;
+
+    // Seek the followed player (no-op without a player or a known duration).
+    const player = m.now.player;
+    const dur = this._waveDur;
+    if (player && dur > 0) {
+      const seekFrom = (clientX) => {
+        const r = wave.getBoundingClientRect();
+        let p = (clientX - r.left) / r.width;
+        p = Math.max(0, Math.min(1, p));
+        if (this._hass) {
+          this._hass.callService("media_player", "media_seek", {
+            entity_id: player, seek_position: Math.round(p * dur),
+          });
+        }
+      };
+      let seeking = false;
+      const onMove = (e) => { if (seeking) seekFrom(e.clientX); };
+      const onUp = () => {
+        seeking = false;
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+      };
+      wave.addEventListener("pointerdown", (e) => {
+        seeking = true;
+        wave.setPointerCapture && wave.setPointerCapture(e.pointerId);
+        window.addEventListener("pointermove", onMove);
+        window.addEventListener("pointerup", onUp);
+        seekFrom(e.clientX);
+      });
+    }
+    return wave;
+  }
+
+  /* -- live frequency map: one dot per lamp (or a default row) low -> high -- */
+  _freqMap(accent, colors) {
+    const map = document.createElement("div");
+    map.className = "hue-fmap";
+
+    const head = document.createElement("div");
+    head.className = "hue-fmap-head";
+    const live = document.createElement("span");
+    live.className = "hue-fmap-live";
+    const ld = document.createElement("span");
+    ld.className = "hue-fmap-livedot";
+    ld.style.background = accent;
+    ld.style.boxShadow = `0 0 6px ${accent}`;
+    live.append(ld, document.createTextNode("LIVE"));
+    const rng = document.createElement("div");
+    rng.className = "hue-fmap-rng";
+    const lo = document.createElement("span");
+    lo.className = "hue-fmap-rng-lbl";
+    lo.textContent = "LOW";
+    const rbar = document.createElement("div");
+    rbar.className = "hue-fmap-rng-bar";
+    rbar.style.background = `linear-gradient(90deg, ${[0, 0.25, 0.5, 0.75, 1].map((t) => spectrumColor(t)).join(", ")})`;
+    const hi = document.createElement("span");
+    hi.className = "hue-fmap-rng-lbl";
+    hi.textContent = "HIGH";
+    rng.append(lo, rbar, hi);
+    head.append(live, rng);
+    map.appendChild(head);
+
+    const stage = document.createElement("div");
+    stage.className = "hue-fmap-stage";
+    map.appendChild(stage);
+
+    this._fmapStage = stage;
+    this._fmapDots = null; // built lazily in _loopExtra (lamp count may change)
+    this._fmapN = 0;
+    return map;
+  }
+
+  // (Re)build the freq-map dots when the live lamp count changes. Uses the real
+  // room layout (from the live meta feed) laid out left->high; falls back to a
+  // fixed row before the feed arrives.
+  _ensureFmapDots(n) {
+    if (this._fmapN === n && this._fmapDots) return;
+    const stage = this._fmapStage;
+    if (!stage) return;
+    stage.replaceChildren();
+    this._fmapN = n;
+    this._fmapDots = [];
+    for (let i = 0; i < n; i++) {
+      const dot = document.createElement("div");
+      dot.className = "hue-fmap-dot";
+      const fx = n > 1 ? i / (n - 1) : 0.5;
+      dot.style.left = `${(6 + fx * 86).toFixed(1)}%`;
+      dot.style.top = i % 2 === 0 ? "26%" : "70%";
+      const col = spectrumColor(fx);
+      dot.style.background = col;
+      stage.appendChild(dot);
+      this._fmapDots.push({ node: dot, fx, col });
+    }
+  }
+
+  /* -- intensity equalizer picker -- */
+  _intensityPicker(m, accent) {
+    const picker = document.createElement("div");
+    picker.className = "hue-int-picker";
+    m.intensity.options.forEach((opt) => {
+      const on = opt.value === m.intensity.value;
+      const btn = document.createElement("button");
+      btn.className = "hue-int-btn" + (on ? " on" : "");
+      if (on) {
+        btn.style.borderColor = `${accent}66`;
+        btn.style.boxShadow = `0 0 24px ${accent}22, inset 0 0 0 1px ${accent}2e`;
+      }
+      const wash = document.createElement("span");
+      wash.className = "hue-int-wash";
+      wash.style.setProperty("--ic", accent);
+      btn.appendChild(wash);
+
+      const eq = document.createElement("div");
+      eq.className = "hue-int-eq";
+      lIntBars(opt.label).forEach((b) => {
+        const bar = document.createElement("span");
+        bar.className = "hue-int-bar";
+        bar.style.setProperty("--min", b.min);
+        bar.style.setProperty("--max", b.max);
+        bar.style.setProperty("--spd", b.spd);
+        bar.style.setProperty("--dly", b.dly);
+        bar.style.background = on ? accent : "rgba(255,255,255,.30)";
+        bar.style.boxShadow = on ? `0 0 8px ${accent}aa` : "none";
+        eq.appendChild(bar);
+      });
+      btn.appendChild(eq);
+
+      const lab = document.createElement("span");
+      lab.className = "hue-int-label";
+      lab.textContent = opt.label;
+      btn.appendChild(lab);
+
+      const underline = document.createElement("span");
+      underline.className = "hue-int-underline";
+      underline.style.background = accent;
+      underline.style.boxShadow = `0 0 10px ${accent}`;
+      btn.appendChild(underline);
+
+      btn.addEventListener("click", () => {
+        this._callSelect(m.intensity.entity, opt.value, "intensity");
+        this._render();
+      });
+      picker.appendChild(btn);
+    });
+    return picker;
+  }
+
+  _fmtTime(s) {
+    s = Math.max(0, Math.floor(s));
+    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  }
+
+  /* -- per-frame: waveform playhead + live freq-map (called from the loop) -- */
+  _loopExtra(active) {
+    // Cover halo breathes with the beat.
+    if (this._landCoverGlow) {
+      this._landCoverGlow.style.opacity = (0.55 + this._viz.beat * 0.45).toFixed(3);
+    }
+
+    // Waveform playhead: position advances only while the song plays.
+    if (this._waveBars && this._waveCursor) {
+      const p = this._play;
+      let pos = 0;
+      if (p) pos = p.playing ? p.position + (Date.now() - p.updatedAt) / 1000 : p.position;
+      const dur = this._waveDur || (this._liveMeta && this._liveMeta.duration) || 0;
+      const pct = dur > 0 ? Math.max(0, Math.min(1, pos / dur)) : 0;
+      this._waveCursor.style.left = (pct * 100).toFixed(2) + "%";
+      // Repaint the played/unplayed split only when the boundary bar changes.
+      const idx = Math.round(pct * this._waveBars.length);
+      if (idx !== this._waveLastIdx) {
+        this._waveLastIdx = idx;
+        this._waveBars.forEach((b, i) => {
+          const played = i < idx;
+          b.node.style.background = played
+            ? `linear-gradient(to top, ${b.c}, ${b.c}cc)`
+            : "#ffffff1a";
+          b.node.style.boxShadow = played ? `0 0 6px ${b.c}55` : "none";
+        });
+      }
+      if (this._waveTimeCur) this._waveTimeCur.textContent = this._fmtTime(pos);
+    }
+
+    // Live frequency map: one glowing dot per lamp, energy from the viz bands.
+    if (this._fmapStage) {
+      const positions = this._liveMeta && this._liveMeta.positions;
+      const lampCount = positions ? Object.keys(positions).length : 0;
+      const n = lampCount || 5;
+      this._ensureFmapDots(n);
+      const L = this._viz.levels;
+      const dots = this._fmapDots || [];
+      for (let i = 0; i < dots.length; i++) {
+        const d = dots[i];
+        const start = Math.floor((i / dots.length) * L.length);
+        const end = Math.max(start + 1, Math.floor(((i + 1) / dots.length) * L.length));
+        let e = 0;
+        for (let j = start; j < end; j++) e += L[j];
+        e = active ? e / (end - start) : 0.05;
+        d.node.style.boxShadow = `0 0 ${(4 + e * 26).toFixed(0)}px ${d.col}`;
+        d.node.style.opacity = (0.32 + e * 0.68).toFixed(3);
+        d.node.style.transform = `translate(-50%, -50%) scale(${(0.78 + e * 0.58).toFixed(3)})`;
+      }
+    }
   }
 }
 
@@ -2482,8 +3134,16 @@ const defineCard = () => {
       console.error("hue-music-sync-card: define failed", e);
     }
   }
+  if (!customElements.get("hue-music-sync-card-tablet")) {
+    try {
+      customElements.define("hue-music-sync-card-tablet", HueMusicSyncTabletCard);
+    } catch (e) {
+      console.error("hue-music-sync-card-tablet: define failed", e);
+    }
+  }
   console.info(
     `hue-music-sync-card: registered=${!!customElements.get("hue-music-sync-card")}` +
+    ` tablet=${!!customElements.get("hue-music-sync-card-tablet")}` +
     ` top=${window === window.top}`
   );
 };
@@ -2523,6 +3183,15 @@ if (!window.customCards.some((c) => c.type === "hue-music-sync-card")) {
     documentationURL: "https://github.com/engabd11/syncoV2",
   });
 }
+if (!window.customCards.some((c) => c.type === "hue-music-sync-card-tablet")) {
+  window.customCards.push({
+    type: "hue-music-sync-card-tablet",
+    name: "Hue Synco Card (Tablet)",
+    description: "Landscape Ambient Glow card for the Hue Synco integration, optimised for tablets.",
+    preview: true,
+    documentationURL: "https://github.com/engabd11/syncoV2",
+  });
+}
 
 // Late-load self-heal, scoped strictly to THIS document. If a dashboard
 // rendered before this module executed (slow resource import, stale app
@@ -2537,7 +3206,9 @@ if (!window.customCards.some((c) => c.type === "hue-music-sync-card")) {
 // into sibling frames or injecting scripts is deliberately NOT done here.
 const healLateLoad = () => {
   try {
-    const defined = !!customElements.get("hue-music-sync-card");
+    const defined =
+      !!customElements.get("hue-music-sync-card") &&
+      !!customElements.get("hue-music-sync-card-tablet");
     if (!defined) defineCard();
     const errors = [];
     const walk = (node) => {
