@@ -13,7 +13,7 @@
 // Cosmetic version (shown in the console banner). The browser cache-bust no
 // longer depends on this: the integration appends ?v=<content-hash> derived from
 // this file's bytes, so any edit is picked up without a manual hard refresh.
-const VERSION = "1.19.0";
+const VERSION = "1.19.1";
 
 /* ------------------------- Palette data ------------------------- */
 // Colour schemes from the integration, each a small gradient swatch.
@@ -268,6 +268,16 @@ const CARD_CSS = `
   .hue-area-row.sel { background: #ffffff10; color: var(--hue-text); }
   .hue-area-row-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .hue-area-check { width: 13px; text-align: center; font-size: 12px; font-weight: 800; flex: none; }
+  /* two-line menu rows (player menu: name + now-playing/state sub line) */
+  .hue-area-row-col { display: flex; flex-direction: column; min-width: 0; flex: 1; text-align: left; }
+  .hue-area-row-col .hue-area-row-name { flex: none; }
+  .hue-area-row-sub { font-size: 10.5px; font-weight: 600; color: var(--hue-faint);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* area/player dropdowns side by side under their section titles */
+  .hue-selects { margin-bottom: 14px; }
+  .hue-field .hue-area-dd { margin-bottom: 0; display: block; }
+  .hue-field .hue-area-trigger { width: 100%; justify-content: flex-start; }
+  .hue-field .hue-area-trigger .hue-area-name { flex: 1; text-align: left; min-width: 0; }
 
   /* -- fields / labels -- */
   .hue-field { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
@@ -345,27 +355,30 @@ const CARD_CSS = `
   .hue-pill { display: inline-flex; align-items: center; gap: 7px; padding: 6px 12px; border-radius: 999px; background: #00000040;
     backdrop-filter: blur(6px); border: 1px solid var(--hue-line); font-size: 12px; font-weight: 700; letter-spacing: .01em; }
   .hue-pill-dot { width: 7px; height: 7px; border-radius: 50%; }
-  .hue-pill-btn { cursor: pointer; max-width: 170px; color: inherit; font-family: var(--hk); }
-  .hue-pill-btn:active { transform: scale(.97); }
   .hue-pill-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .hue-pill-caret { font-size: 9px; color: var(--hue-dim); flex: none; }
   .hue-hero-now { position: relative; z-index: 2; display: flex; align-items: stretch; gap: 14px; margin-top: 26px; }
-  /* Right column fills the cover's height: title/artist pinned to the top, the
-     transport pinned to the bottom (level with the cover's lower edge). */
-  .hue-now-right { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: space-between; gap: 10px; }
+  /* Right column fills the cover's height; the transport lives in its own
+     full-width centred row below, so the meta simply centres here. */
+  .hue-now-right { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: 10px; }
   .hue-now-toprow { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; min-width: 0; }
   .hue-bright-mini { display: inline-flex; align-items: center; gap: 5px; padding: 7px 11px; border-radius: 11px; background: #00000040;
     backdrop-filter: blur(6px); border: 1px solid var(--hue-line); font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; }
   .hue-bright-mini-icon { font-size: 12px; }
   .hue-amb-body { position: relative; padding: 16px 20px 20px; background: linear-gradient(180deg, #121120cc, #0f0e1c); }
 
-  /* -- transport row (bottom of the now-playing right column) -- */
-  .hue-transport { position: relative; z-index: 2; display: flex; align-items: center; gap: 8px; }
-  .hue-tr-btn { width: 34px; height: 30px; border-radius: 10px; border: 1px solid var(--hue-line);
-    background: #00000040; color: var(--hue-text); font-size: 13px; cursor: pointer; transition: .15s;
-    display: inline-flex; align-items: center; justify-content: center; backdrop-filter: blur(6px); }
+  /* -- transport row (full-width, buttons centred on the card, sized for
+        touch; the time readout sits at the right edge) -- */
+  .hue-transport { position: relative; z-index: 2; display: flex; align-items: center;
+    justify-content: center; gap: 14px; margin-top: 12px; min-height: 48px; }
+  .hue-tr-btn { width: 52px; height: 44px; border-radius: 14px; border: 1px solid var(--hue-line);
+    background: #00000040; color: var(--hue-text); cursor: pointer; transition: .15s;
+    display: inline-flex; align-items: center; justify-content: center; backdrop-filter: blur(6px);
+    touch-action: manipulation; }
   .hue-tr-btn:hover { background: #ffffff18; }
-  .hue-tr-time { margin-left: auto; font-size: 11.5px; font-weight: 700; color: var(--hue-dim);
+  .hue-tr-btn:active { transform: scale(.94); }
+  .hue-tr-btn.main { width: 64px; height: 48px; border-radius: 16px; background: #ffffff14; }
+  .hue-tr-time { position: absolute; right: 0; top: 50%; transform: translateY(-50%);
+    font-size: 11.5px; font-weight: 700; color: var(--hue-dim);
     font-variant-numeric: tabular-nums; letter-spacing: .03em; }
 
   /* -- title marquee (long titles scroll once into view) -- */
@@ -410,39 +423,46 @@ const CARD_CSS = `
     100% { filter: blur(8px) hue-rotate(38deg); transform: scale(1.09) translateY(-2.5%); }
   }
 
-  /* -- calibration overlay (tap-to-sync) -- */
-  /* -- play-the-beats drum pad overlay -- */
+  /* -- beat pads overlay (full-page: tall tap columns) -- */
   .hue-drum { position: absolute; inset: 0; z-index: 10; display: flex; flex-direction: column;
-    align-items: center; justify-content: center; gap: 12px; border-radius: 26px; padding: 18px;
-    background: #0b0a14ee; backdrop-filter: blur(8px); user-select: none; -webkit-user-select: none; }
+    gap: 12px; border-radius: 26px; padding: 16px 16px 12px; overflow-y: auto;
+    background: #0b0a14f2; backdrop-filter: blur(8px); user-select: none; -webkit-user-select: none; }
+  .hue-drum-head { display: flex; align-items: center; gap: 12px; flex: none; }
+  .hue-drum-back { width: 38px; height: 38px; border-radius: 12px; border: 1px solid var(--hue-line);
+    background: #ffffff0a; color: var(--hue-text); cursor: pointer; flex: none;
+    display: inline-flex; align-items: center; justify-content: center; transition: .15s; }
+  .hue-drum-back:hover { background: #ffffff16; }
+  .hue-drum-titles { display: flex; flex-direction: column; min-width: 0; }
   .hue-cal-title { font-size: 16px; font-weight: 800; letter-spacing: .02em; }
-  .hue-cal-sub { font-size: 12.5px; color: var(--hue-dim); text-align: center; }
-  .hue-cal-cancel { margin-top: 6px; font-size: 11px; color: var(--hue-faint); text-transform: uppercase;
-    letter-spacing: .1em; cursor: pointer; }
-  .hue-drum-pads { display: flex; gap: 12px; width: 100%; max-width: 360px; }
-  .hue-drum-pad { flex: 1; aspect-ratio: 1 / 1; min-width: 0; border-radius: 18px; cursor: pointer;
-    border: 1px solid var(--hue-line); color: #fff; font-family: var(--hk); padding: 12px;
-    background: radial-gradient(120% 120% at 50% 28%, var(--pad), #0c0b18);
-    box-shadow: inset 0 0 0 1px #ffffff1f, inset 0 0 26px -10px #000a;
-    display: flex; align-items: flex-end; justify-content: center; transition: transform .06s, filter .12s; }
-  .hue-drum-pad:disabled { opacity: .4; cursor: default; }
-  .hue-drum-pad:active { transform: scale(.96); }
-  .hue-drum-pad-label { font-size: 12px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase;
-    text-shadow: 0 1px 6px #000a; }
-  /* -- player picker overlay (which player drives the lights) -- */
-  .hue-pick { justify-content: flex-start; padding: 18px 16px; }
-  .hue-pick-list { width: 100%; max-width: 380px; display: flex; flex-direction: column; gap: 6px;
-    flex: 1 1 auto; min-height: 0; overflow-y: auto; margin-top: 2px; }
-  .hue-pick-row { display: flex; align-items: center; gap: 10px; width: 100%; padding: 9px 11px; border-radius: 12px;
-    cursor: pointer; text-align: left; color: #fff; font-family: var(--hk);
-    background: #ffffff0a; border: 1px solid var(--hue-line); transition: background .12s; }
-  .hue-pick-row:hover { background: #ffffff14; }
-  .hue-pick-row.sel { background: #ffffff14; box-shadow: inset 0 0 0 1px #ffffff2e; }
-  .hue-pick-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
-  .hue-pick-text { display: flex; flex-direction: column; min-width: 0; flex: 1; }
-  .hue-pick-name { font-size: 13px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .hue-pick-sub { font-size: 11px; color: var(--hue-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .hue-pick-check { font-size: 13px; flex: none; }
+  .hue-drum-track { font-size: 11.5px; color: var(--hue-dim); font-weight: 600;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .hue-cal-sub { font-size: 12.5px; color: var(--hue-dim); text-align: center; flex: none; }
+  .hue-cal-cancel { margin-top: 2px; font-size: 11px; color: var(--hue-faint); text-transform: uppercase;
+    letter-spacing: .1em; cursor: pointer; text-align: center; flex: none; }
+  .hue-drum-pads { display: flex; gap: 12px; width: 100%; flex: 1 1 auto; min-height: 200px; }
+  .hue-drum-pad { flex: 1; min-width: 0; border-radius: 16px; cursor: pointer; position: relative;
+    border: 1px solid var(--hue-line); color: #fff; font-family: var(--hk); padding: 16px 8px 14px;
+    background: linear-gradient(180deg, #14131f, #0c0b16); overflow: hidden;
+    box-shadow: inset 0 0 0 1px #ffffff10;
+    display: flex; flex-direction: column; align-items: center; justify-content: space-between;
+    transition: transform .06s, filter .12s; touch-action: manipulation; }
+  .hue-drum-pad:disabled { opacity: .45; cursor: default; }
+  .hue-drum-pad:active { transform: scale(.97); }
+  .hue-drum-tap { font-size: 10px; font-weight: 800; letter-spacing: .3em; text-indent: .3em;
+    color: var(--hue-faint); text-transform: uppercase; }
+  .hue-drum-mid { display: flex; flex-direction: column; align-items: center; gap: 16px; }
+  .hue-drum-glyph { display: flex; align-items: flex-end; gap: 3px; height: 32px; }
+  .hue-drum-glyph span { width: 5px; border-radius: 2px; background: var(--pad); opacity: .9; }
+  .hue-drum-dots { display: flex; gap: 4px; }
+  .hue-drum-dots span { width: 4px; height: 4px; border-radius: 50%; background: #ffffff26; }
+  .hue-drum-glow { position: absolute; left: 0; right: 0; bottom: 0; height: 46%; pointer-events: none;
+    background: radial-gradient(130% 105% at 50% 118%, var(--pad), transparent 72%);
+    opacity: .45; transition: opacity .15s; }
+  .hue-drum-pad.hit .hue-drum-glow { opacity: .95; }
+  .hue-drum-lab { position: relative; display: flex; flex-direction: column; align-items: center; gap: 2px; }
+  .hue-drum-pad-label { font-size: 12px; font-weight: 800; letter-spacing: .18em; text-indent: .18em;
+    text-transform: uppercase; text-shadow: 0 1px 6px #000a; }
+  .hue-drum-pad-sub { font-size: 10.5px; color: var(--hue-dim); font-weight: 600; }
   .hue-drum-pad.hit { animation: hue-drum-hit .42s ease-out; }
   @keyframes hue-drum-hit {
     0% { filter: brightness(1.9); transform: scale(1.05); }
@@ -574,25 +594,28 @@ class HueMusicSyncCard extends HTMLElement {
     this._areaIndex = 0;
     this._demo = false;
     this._areaMenuOpen = false;   // is the area dropdown expanded?
+    this._playerMenuOpen = false; // is the player dropdown expanded?
     this._areaAutoDone = false;   // have we defaulted the view to the active area yet?
-    // Close the area dropdown when a pointer lands outside it. One persistent
+    // Close the dropdowns when a pointer lands outside them. One persistent
     // document listener (added on connect) rather than per-open wiring, since a
     // re-render rebuilds the menu nodes; composedPath crosses the shadow boundary.
     this._onDocPointer = (e) => {
-      if (!this._areaMenuOpen) return;
+      if (!this._areaMenuOpen && !this._playerMenuOpen) return;
       const path = e.composedPath ? e.composedPath() : [];
       if (path.some((n) => n.classList && n.classList.contains("hue-area-dd"))) return;
       this._areaMenuOpen = false;
+      this._playerMenuOpen = false;
       this._render();
     };
-    // The area menu is position:fixed (anchored to the trigger), so a page
-    // scroll or resize would leave it floating detached — close it instead,
-    // like a native <select>. Scrolls *inside* the menu itself are fine.
+    // The menus are position:fixed (anchored to their triggers), so a page
+    // scroll or resize would leave them floating detached; close them instead,
+    // like a native <select>. Scrolls *inside* a menu itself are fine.
     this._onWinMove = (e) => {
-      if (!this._areaMenuOpen) return;
+      if (!this._areaMenuOpen && !this._playerMenuOpen) return;
       const path = e && e.composedPath ? e.composedPath() : [];
       if (path.some((n) => n.classList && n.classList.contains("hue-area-menu"))) return;
       this._areaMenuOpen = false;
+      this._playerMenuOpen = false;
       this._render();
     };
 
@@ -650,7 +673,6 @@ class HueMusicSyncCard extends HTMLElement {
     // Player picker: which player the integration should follow. The candidate
     // list is dynamic (players start and stop), so it's fetched on demand and
     // only polled while the picker sheet is actually open.
-    this._pick = null;        // picker overlay state
     this._players = null;     // last hue_music_sync/players result
     this._playersFor = null;  // switch entity the list belongs to
     this._playersAt = 0;      // when it was fetched (ms)
@@ -814,13 +836,10 @@ class HueMusicSyncCard extends HTMLElement {
     window.removeEventListener("scroll", this._onWinMove, { capture: true });
     window.removeEventListener("resize", this._onWinMove);
     this._areaMenuOpen = false;
+    this._playerMenuOpen = false;
     if (this._io) {
       this._io.disconnect();
       this._io = null;
-    }
-    if (this._pick) {
-      clearInterval(this._pick.keep); // the sheet's refresh must not outlive the card
-      this._pick = null;
     }
     this._dropLiveSub();
   }
@@ -1124,7 +1143,7 @@ class HueMusicSyncCard extends HTMLElement {
     if (!this._config) return;
     // Don't tear the DOM down while an overlay page is open (it lives inside the
     // card node a render would replace). Each closes with its own _render().
-    if (this._drum || this._pick) return;
+    if (this._drum) return;
     const m = this._model();
     const accent = m.accent;
     const pal = m.colour.selected;
@@ -1210,8 +1229,6 @@ class HueMusicSyncCard extends HTMLElement {
     const pills = document.createElement("div");
     pills.className = "hue-hero-pills";
     pills.appendChild(pill);
-    const follow = this._followChip(m);
-    if (follow) pills.appendChild(follow);
     heroTop.appendChild(pills);
 
     heroTop.appendChild(this._power(m, accent));
@@ -1251,8 +1268,12 @@ class HueMusicSyncCard extends HTMLElement {
     topRow.appendChild(brightMini);
     right.appendChild(topRow);
 
-    // Transport row: control the actual playing player from the card. Sits at
-    // the bottom of the right column, level with the cover's lower edge.
+    heroNow.appendChild(right);
+    hero.appendChild(heroNow);
+
+    // Transport row: a full-width strip under the now-playing block with the
+    // buttons centred on the card and sized for touch; the time readout keeps
+    // to the right edge.
     if (m.now.player) {
       const tr = document.createElement("div");
       tr.className = "hue-transport";
@@ -1263,38 +1284,38 @@ class HueMusicSyncCard extends HTMLElement {
       };
       // Inline SVG icons (fill: currentColor) rather than the Unicode media
       // glyphs: browsers render those as coloured emoji (a yellow/blue play
-      // symbol that ignores CSS color) \u2014 the icons must follow the theme.
+      // symbol that ignores CSS color); the icons must follow the theme.
       const ICONS = {
         prev: "M6 5h2v14H6zM20 5v14l-11-7z",
         play: "M8 5l12 7-12 7z",
         pause: "M7 5h4v14H7zM13 5h4v14h-4z",
         next: "M16 5h2v14h-2zM4 5l11 7-11 7z",
       };
-      const mkBtn = (icon, service, label) => {
+      const mkBtn = (icon, service, label, main) => {
         const b = document.createElement("button");
-        b.className = "hue-tr-btn";
+        b.className = "hue-tr-btn" + (main ? " main" : "");
+        const size = main ? 22 : 18;
         b.innerHTML =
-          `<svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true">` +
+          `<svg viewBox="0 0 24 24" width="${size}" height="${size}" aria-hidden="true">` +
           `<path d="${ICONS[icon]}" fill="currentColor"/></svg>`;
         b.setAttribute("aria-label", label);
         b.addEventListener("click", () => svc(service));
         return b;
       };
       tr.appendChild(mkBtn("prev", "media_previous_track", "Previous track"));
-      tr.appendChild(mkBtn(m.now.playing ? "pause" : "play", "media_play_pause", "Play / pause"));
+      tr.appendChild(
+        mkBtn(m.now.playing ? "pause" : "play", "media_play_pause", "Play / pause", true)
+      );
       tr.appendChild(mkBtn("next", "media_next_track", "Next track"));
       const time = document.createElement("div");
       time.className = "hue-tr-time";
       this._trTime = time;
       this._trDur = m.now.duration;
       tr.appendChild(time);
-      right.appendChild(tr);
+      hero.appendChild(tr);
     } else {
       this._trTime = null;
     }
-
-    heroNow.appendChild(right);
-    hero.appendChild(heroNow);
 
     // Song-structure timeline (energy silhouette + playhead), filled from the
     // live meta feed once the track map is known.
@@ -1336,7 +1357,25 @@ class HueMusicSyncCard extends HTMLElement {
 
     this._accent = accent;
 
-    body.appendChild(this._areaSelect(accent));
+    // Area + player selectors side by side, each under a section title like
+    // the Intensity/Effect/Colour fields below them.
+    const areaField = document.createElement("div");
+    areaField.className = "hue-field";
+    areaField.appendChild(this._label("Area", null));
+    areaField.appendChild(this._areaSelect(accent));
+    const playerDd = this._playerSelect(accent);
+    if (playerDd) {
+      const playerField = document.createElement("div");
+      playerField.className = "hue-field";
+      playerField.appendChild(this._label("Player", null));
+      playerField.appendChild(playerDd);
+      const selects = document.createElement("div");
+      selects.className = "hue-grid2 tight hue-selects";
+      selects.append(areaField, playerField);
+      body.appendChild(selects);
+    } else {
+      body.appendChild(areaField);
+    }
 
     const intensityHint = m.intensity.autoMode
       ? `Auto · ${titleize(m.intensity.autoMode)}` : null;
@@ -1964,23 +2003,24 @@ class HueMusicSyncCard extends HTMLElement {
     const tap = document.createElement("button");
     tap.className = "hue-step";
     tap.textContent = "\ud83e\udd41"; // drum
-    tap.title = "Play the beats";
-    tap.setAttribute("aria-label", "Open the drum pad to play the beats");
+    tap.title = "Beat Pads";
+    tap.setAttribute("aria-label", "Open the beat pads to play the lights");
     tap.addEventListener("click", () => this._startDrums(m));
     wrap.appendChild(tap);
     return wrap;
   }
 
-  /* -- player picker --
+  /* -- player dropdown --
      Which player drives the lights. The integration auto-picks whatever is
      playing, which is ambiguous the moment two players are playing different
-     songs — so let the user pin one. The list is the *active* Music Assistant
+     songs, so let the user pin one. The list is the *active* Music Assistant
      players (short and relevant), plus whichever player is pinned or currently
      followed even if it is neither, so a non-MA player (a Subsonic radio on the
-     same library) never disappears from its own picker. The pin is persisted by
+     same library) never disappears from its own menu. The pin is persisted by
      the integration (hue_music_sync.set_options), so it survives a restart;
-     "Auto" clears it. */
-  _followChip(m) {
+     "Auto" clears it. Rendered as a dropdown next to the area selector, sharing
+     the area dropdown's trigger/menu styling and fixed-position placement. */
+  _playerSelect(accent) {
     const area = this._areas[this._areaIndex] || {};
     if (this._demo || !area.switch) return null;
 
@@ -1991,40 +2031,114 @@ class HueMusicSyncCard extends HTMLElement {
     const livePlayer = (swEnt && swEnt.attributes.source_player) || null;
     this._ensurePlayers(!!data && (data.following || null) !== livePlayer);
 
+    const players = (data && data.players) || [];
     const selected = (data && data.selected) || null;
-    const rowFor = (id) =>
-      (data && data.players ? data.players : []).find((p) => p.entity_id === id) || null;
+    const following = (data && data.following) || null;
+    const rowFor = (id) => players.find((p) => p.entity_id === id) || null;
     const nameOf = (id) => {
       const row = rowFor(id);
       return row ? row.name : id;
     };
 
-    const chip = document.createElement("button");
-    chip.className = "hue-pill hue-pill-btn";
+    const dd = document.createElement("div");
+    dd.className = "hue-area-dd" + (this._playerMenuOpen ? " open" : "");
+
+    const trigger = document.createElement("button");
+    trigger.className = "hue-area-trigger";
     const dot = document.createElement("span");
-    dot.className = "hue-pill-dot";
-    // Amber when a pinned player isn't the one being followed (typically the
-    // pinned one isn't playing) — otherwise "why are the lights dead?" is
+    dot.className = "hue-area-dot";
+    // Amber when a pinned player is not the one being followed (typically the
+    // pinned one is not playing); otherwise "why are the lights dead?" is
     // invisible.
-    const following = (data && data.following) || null;
+    const on = !!swEnt && swEnt.state === "on";
     const stale = !!selected && !!following && selected !== following;
-    const idle = !!selected && !following && m.on;
-    const colour = stale || idle ? "#ffb24d" : "#6b7088";
+    const idle = !!selected && !following && on;
+    const colour = stale || idle ? "#ffb24d" : following ? accent : "#5a5f78";
     dot.style.background = colour;
-    const text = document.createElement("span");
-    text.className = "hue-pill-label";
-    text.textContent = selected ? nameOf(selected) : "Auto";
+    dot.style.boxShadow = following && !stale ? `0 0 8px ${colour}` : "none";
+    const name = document.createElement("span");
+    name.className = "hue-area-name";
+    name.textContent = selected ? nameOf(selected) : "Auto";
     const caret = document.createElement("span");
-    caret.className = "hue-pill-caret";
+    caret.className = "hue-area-caret";
     caret.textContent = "▼";
-    chip.append(dot, text, caret);
-    chip.title = selected
-      ? `Lights follow ${nameOf(selected)}` + (stale ? ` (currently playing: ${nameOf(following)})` : "")
+    trigger.append(dot, name, caret);
+    trigger.setAttribute("aria-haspopup", "listbox");
+    trigger.setAttribute("aria-expanded", this._playerMenuOpen ? "true" : "false");
+    trigger.title = selected
+      ? `Lights follow ${nameOf(selected)}` +
+        (stale ? ` (currently playing: ${nameOf(following)})` : "")
       : following
-        ? `Auto — currently following ${nameOf(following)}`
-        : "Auto — follows whichever player is playing";
-    chip.addEventListener("click", () => this._startPicker());
-    return chip;
+        ? `Auto: currently following ${nameOf(following)}`
+        : "Auto: follows whichever player is playing";
+    trigger.addEventListener("click", () => {
+      this._playerMenuOpen = !this._playerMenuOpen;
+      this._areaMenuOpen = false;
+      if (this._playerMenuOpen) this._ensurePlayers(true); // fresh list at open
+      this._render();
+    });
+    dd.appendChild(trigger);
+
+    if (this._playerMenuOpen) {
+      const menu = document.createElement("div");
+      menu.className = "hue-area-menu";
+      menu.setAttribute("role", "listbox");
+      const rows = [{
+        entity_id: null,
+        name: "Auto",
+        sub: "Follow whichever player is playing",
+        state: null,
+      }].concat(players.map((x) => ({
+        entity_id: x.entity_id,
+        name: x.name,
+        sub: x.title
+          ? (x.artist ? `${x.title} · ${x.artist}` : x.title)
+          : titleize(x.state),
+        state: x.state,
+      })));
+      for (const r of rows) {
+        const row = document.createElement("button");
+        const isSel = selected === r.entity_id;
+        row.className = "hue-area-row" + (isSel ? " sel" : "");
+        row.setAttribute("role", "option");
+        row.setAttribute("aria-selected", isSel ? "true" : "false");
+        const rdot = document.createElement("span");
+        rdot.className = "hue-area-dot";
+        rdot.style.background =
+          r.state === null ? (accent || "#7b5cff")
+            : r.state === "playing" ? "#5ee08a"
+              : r.state === "unavailable" ? "#ff6b7a" : "#6b7088";
+        const col = document.createElement("span");
+        col.className = "hue-area-row-col";
+        const rname = document.createElement("span");
+        rname.className = "hue-area-row-name";
+        rname.textContent = r.name;
+        col.appendChild(rname);
+        if (r.sub) {
+          const rsub = document.createElement("span");
+          rsub.className = "hue-area-row-sub";
+          rsub.textContent = r.sub;
+          col.appendChild(rsub);
+        }
+        const check = document.createElement("span");
+        check.className = "hue-area-check";
+        check.textContent = isSel ? "✓" : "";
+        check.style.color = accent;
+        row.append(rdot, col, check);
+        row.addEventListener("click", () => this._choosePlayer(r.entity_id));
+        menu.appendChild(row);
+      }
+      if (!players.length) {
+        const empty = document.createElement("div");
+        empty.className = "hue-area-row-sub";
+        empty.style.padding = "6px 10px";
+        empty.textContent = "No Music Assistant player is playing right now.";
+        menu.appendChild(empty);
+      }
+      dd.appendChild(menu);
+      this._placeAreaMenu(trigger, menu);
+    }
+    return dd;
   }
 
   _ensurePlayers(force) {
@@ -2043,12 +2157,11 @@ class HueMusicSyncCard extends HTMLElement {
         .then((res) => {
           this._playersReq = false;
           this._players = res;
-          if (this._pick) this._fillPicker();
-          else this._render();
+          this._render();
         })
         .catch(() => {
-          // Older integration, or the switch isn't registered yet: the chip just
-          // keeps showing what we last knew (or "Auto").
+          // Older integration, or the switch isn't registered yet: the trigger
+          // just keeps showing what we last knew (or "Auto").
           this._playersReq = false;
         });
     } catch (_) {
@@ -2056,95 +2169,7 @@ class HueMusicSyncCard extends HTMLElement {
     }
   }
 
-  _startPicker() {
-    if (!this._cardNode || this._pick || this._demo) return;
-    const overlay = document.createElement("div");
-    overlay.className = "hue-drum hue-pick";
-    const title = document.createElement("div");
-    title.className = "hue-cal-title";
-    title.textContent = "Sync the lights to";
-    const sub = document.createElement("div");
-    sub.className = "hue-cal-sub";
-    sub.textContent = "Players active on Music Assistant";
-    const list = document.createElement("div");
-    list.className = "hue-pick-list";
-    const close = document.createElement("div");
-    close.className = "hue-cal-cancel";
-    close.textContent = "Done";
-    close.addEventListener("pointerdown", (e) => {
-      e.stopPropagation();
-      this._endPicker();
-    });
-
-    overlay.append(title, sub, list, close);
-    this._cardNode.appendChild(overlay);
-    // Players start and stop while the sheet is open, so refresh it — but only
-    // while it IS open (nothing polls behind a closed sheet).
-    this._pick = { overlay, list, keep: setInterval(() => this._ensurePlayers(true), 5000) };
-    this._fillPicker();
-    this._ensurePlayers(true);
-  }
-
-  _fillPicker() {
-    const p = this._pick;
-    if (!p) return;
-    const data = this._players || {};
-    const players = data.players || [];
-    const selected = data.selected || null;
-    p.list.textContent = "";
-
-    const rows = [{
-      entity_id: null,
-      name: "Auto",
-      sub: "Follow whichever player is playing",
-      state: null,
-    }].concat(players.map((x) => ({
-      entity_id: x.entity_id,
-      name: x.name,
-      sub: x.title
-        ? (x.artist ? `${x.title} — ${x.artist}` : x.title)
-        : titleize(x.state),
-      state: x.state,
-    })));
-
-    for (const r of rows) {
-      const row = document.createElement("button");
-      row.className = "hue-pick-row";
-      const isSel = selected === r.entity_id;
-      if (isSel) row.classList.add("sel");
-      const dot = document.createElement("span");
-      dot.className = "hue-pick-dot";
-      dot.style.background =
-        r.state === null ? (this._accent || "#7b5cff")
-          : r.state === "playing" ? "#5ee08a"
-            : r.state === "unavailable" ? "#ff6b7a" : "#6b7088";
-      const text = document.createElement("span");
-      text.className = "hue-pick-text";
-      const name = document.createElement("span");
-      name.className = "hue-pick-name";
-      name.textContent = r.name;
-      const sub = document.createElement("span");
-      sub.className = "hue-pick-sub";
-      sub.textContent = r.sub || "";
-      text.append(name, sub);
-      const check = document.createElement("span");
-      check.className = "hue-pick-check";
-      check.textContent = isSel ? "✓" : "";
-      row.append(dot, text, check);
-      row.addEventListener("click", () => this._selectPlayer(r.entity_id));
-      p.list.appendChild(row);
-    }
-
-    if (!players.length) {
-      const empty = document.createElement("div");
-      empty.className = "hue-cal-sub";
-      empty.style.marginTop = "8px";
-      empty.textContent = "No Music Assistant player is playing right now.";
-      p.list.appendChild(empty);
-    }
-  }
-
-  _selectPlayer(entityId) {
+  _choosePlayer(entityId) {
     const area = this._areas[this._areaIndex] || {};
     if (this._hass && area.switch && !this._demo) {
       // An empty media_player clears the pin: back to auto-picking.
@@ -2155,16 +2180,8 @@ class HueMusicSyncCard extends HTMLElement {
     }
     if (this._players) this._players.selected = entityId || null; // optimistic
     this._playersAt = 0; // and re-read once the integration has re-resolved
-    this._endPicker();
-  }
-
-  _endPicker() {
-    const p = this._pick;
-    if (!p) return;
-    clearInterval(p.keep);
-    p.overlay.remove();
-    this._pick = null;
-    this._render(); // repaint the normal card (the chip, and state that moved on)
+    this._playerMenuOpen = false;
+    this._render();
   }
 
   /* -- play-the-beats drum pad --
@@ -2176,33 +2193,96 @@ class HueMusicSyncCard extends HTMLElement {
      by a heartbeat while this page is open. */
   _startDrums(m) {
     if (!this._cardNode || this._drum) return;
-    const accent = this._accent || "#7b5cff";
     const playing = !!(this._play && this._play.playing);
 
     const overlay = document.createElement("div");
     overlay.className = "hue-drum";
+
+    // Header: back button + "Beat Pads" with the current track underneath.
+    const head = document.createElement("div");
+    head.className = "hue-drum-head";
+    const back = document.createElement("button");
+    back.className = "hue-drum-back";
+    back.setAttribute("aria-label", "Back to the card");
+    back.innerHTML =
+      '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">' +
+      '<path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" ' +
+      'stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    back.addEventListener("pointerdown", (e) => {
+      e.stopPropagation();
+      this._endDrums();
+    });
+    const titles = document.createElement("div");
+    titles.className = "hue-drum-titles";
     const title = document.createElement("div");
     title.className = "hue-cal-title";
-    title.textContent = "Play the beats";
+    title.textContent = "Beat Pads";
+    titles.appendChild(title);
+    const trackLine = m && m.now && m.now.track
+      ? m.now.track + (m.now.artist ? ` · ${m.now.artist}` : "")
+      : "";
+    if (trackLine) {
+      const tr = document.createElement("div");
+      tr.className = "hue-drum-track";
+      tr.textContent = trackLine;
+      titles.appendChild(tr);
+    }
+    head.append(back, titles);
+
     const sub = document.createElement("div");
     sub.className = "hue-cal-sub";
     sub.textContent = playing
-      ? "Tap the pads in time — you drive the lights"
+      ? "Tap in time, you drive the lights"
       : "Play a song first, then drum along";
 
+    // Three tall tap columns; each drives a third of the room.
     const padWrap = document.createElement("div");
     padWrap.className = "hue-drum-pads";
-    const groups = [["low", "Low"], ["mid", "Mid"], ["high", "High"]];
+    const groups = [
+      // id, label, sub-label, default tint, glyph bar heights (px)
+      ["low", "Low", "Bass", "#4ade80", [14, 30, 10, 5]],
+      ["mid", "Mid", "Mids", "#58a6ff", [8, 22, 30, 7]],
+      ["high", "High", "Treble", "#a78bfa", [5, 12, 26, 16, 7]],
+    ];
     const padNodes = {};
-    for (const [id, label] of groups) {
+    for (const [id, label, subLabel, tint, glyph] of groups) {
       const pad = document.createElement("button");
       pad.className = "hue-drum-pad";
       pad.disabled = !playing;
-      pad.style.setProperty("--pad", accent);
+      pad.style.setProperty("--pad", tint);
+
+      const tap = document.createElement("span");
+      tap.className = "hue-drum-tap";
+      tap.textContent = "Tap";
+
+      const mid = document.createElement("span");
+      mid.className = "hue-drum-mid";
+      const bars = document.createElement("span");
+      bars.className = "hue-drum-glyph";
+      for (const h of glyph) {
+        const bar = document.createElement("span");
+        bar.style.height = `${h}px`;
+        bars.appendChild(bar);
+      }
+      const dots = document.createElement("span");
+      dots.className = "hue-drum-dots";
+      for (let i = 0; i < 6; i++) dots.appendChild(document.createElement("span"));
+      mid.append(bars, dots);
+
+      const glow = document.createElement("span");
+      glow.className = "hue-drum-glow";
+
       const lab = document.createElement("span");
-      lab.className = "hue-drum-pad-label";
-      lab.textContent = label;
-      pad.appendChild(lab);
+      lab.className = "hue-drum-lab";
+      const labMain = document.createElement("span");
+      labMain.className = "hue-drum-pad-label";
+      labMain.textContent = label;
+      const labSub = document.createElement("span");
+      labSub.className = "hue-drum-pad-sub";
+      labSub.textContent = subLabel;
+      lab.append(labMain, labSub);
+
+      pad.append(glow, tap, mid, lab);
       if (playing) {
         pad.addEventListener("pointerdown", (e) => {
           e.preventDefault();
@@ -2221,7 +2301,7 @@ class HueMusicSyncCard extends HTMLElement {
       this._endDrums();
     });
 
-    overlay.append(title, sub, padWrap, close);
+    overlay.append(head, sub, padWrap, close);
     this._cardNode.appendChild(overlay);
     this._drum = { overlay, pads: padNodes, playing, keep: 0 };
 
@@ -2408,7 +2488,7 @@ const defineCard = () => {
 
 // DO NOT define eagerly. HA's core bundle installs a scoped custom-element-
 // registry polyfill as it boots; a definition made BEFORE that polyfill
-// installs lands in the native registry the polyfill cannot see —
+// installs lands in the native registry the polyfill cannot see -
 // customElements.get() then returns undefined for us forever and every
 // dashboard shows "Custom element doesn't exist", while a page where this
 // module happened to load AFTER the core bundle works fine. That is exactly
@@ -2451,7 +2531,7 @@ if (!window.customCards.some((c) => c.type === "hue-music-sync-card")) {
 // document's stale error cards with ll-rebuild (the event must be dispatched
 // on the error element itself, which lives behind nested shadow roots, hence
 // the deep walk; rebuilding an unrelated error card is a harmless no-op).
-// Dashboards in other frames must import the module themselves — reaching
+// Dashboards in other frames must import the module themselves - reaching
 // into sibling frames or injecting scripts is deliberately NOT done here.
 const healLateLoad = () => {
   try {

@@ -274,6 +274,12 @@ async def _register_lovelace_resource(hass: HomeAssistant, url: str) -> bool:
         return False
 
 
+# No YAML configuration: everything is set up from config entries (async_setup
+# only pre-registers the card/WS feed). Declared for hassfest's CONFIG_SCHEMA
+# check.
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
+
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Component setup: register the bundled card + live feed as early as possible.
 

@@ -3,7 +3,7 @@
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.12%2B-blue)
-![Version](https://img.shields.io/badge/version-1.19.0-informational)
+![Version](https://img.shields.io/badge/version-1.19.1-informational)
 
 Real-time music-reactive lighting for **Philips Hue Entertainment areas**, driven by **any Home Assistant media player — Music Assistant players first and foremost**. Beat detection, frequency analysis and spatial choreography stream straight to the bridge over the Hue Entertainment API (DTLS-encrypted, up to 50 Hz), and a bundled dashboard card mirrors the whole show live — no separate frontend install.
 
@@ -57,7 +57,7 @@ You choose which player drives the lights — pick any player right from the car
 | **Any player at all** | Metadata fallback — gentle animation, upgraded to a real source automatically the moment one becomes tappable |
 | Snapcast-backed players *(experimental/legacy)* | Real-time stream tap with automatic buffer alignment — see [legacy sources](#experimental--legacy-audio-sources) |
 
-The followed player can be **pinned per area** (from the card's player picker or the `set_options` service) or left on auto.
+The followed player can be **pinned per area** (from the card's player dropdown or the `set_options` service) or left on auto.
 
 ## Features
 
@@ -96,16 +96,15 @@ The **Hue Synco Card** ships inside the integration and registers itself as a da
 An immersive now-playing header themed by the music itself — the blurred album art bleeds into the backdrop and the extracted album colours drive every accent:
 
 - **Audio-source pill** — what is actually driving the lights right now: `Live audio`, `Live (snapcast)`, `Track map`, or `Metadata only` (amber warning), so a dead tap is obvious at a glance
-- **Player chip** — which media player the lights follow; tap to open the **player picker**
-- **Power toggle**, **album art with beat gloss**, **marquee title/artist**, **live brightness readout** and **transport controls** that drive the followed player directly
+- **Power toggle**, **album art with beat gloss**, **marquee title/artist**, **live brightness readout**, and large centred **transport controls** that drive the followed player directly
 - **Song-structure timeline** — the track's energy silhouette with section boundaries and a moving playhead; the next section pulses as a drop approaches
 
 ### The body
 - **Visualizer bars** — a real ~20 Hz feed of the analysis output, delayed through the same timing buffer as the lights; it renders exactly what the room is reacting to
 - **Room mirror** — every lamp at its real position, glowing in the exact colour being streamed to it, with rings marking its instrument role
-- **Area dropdown** — one card controls several areas; the menu opens as a floating popover that scrolls when the list is long
+- **Area & Player dropdowns** — side-by-side titled selectors: one card controls several areas, and the lights can be pinned to any player (or Auto); menus open as floating popovers that scroll when the list is long
 - **Intensity selector** with live micro-animation previews, **colour palette dots**, **brightness slider** and a **timing-offset stepper** (±ms fine trim)
-- **Play-the-beats drum pad** — Low / Mid / High pads each drive a third of the room; while open, the automatic beats pause so *your* taps flash the lights; auto-releases when closed
+- **Beat Pads** — a full-page overlay of three tall Low / Mid / High tap columns, each driving a third of the room; while open, the automatic beats pause so *your* taps flash the lights; auto-releases when closed
 
 ### Behaviour
 - **Idle beauty** — while paused, the card (and the room) drifts slowly through the palette instead of freezing

@@ -8,7 +8,16 @@ harness isn't installed.
 
 from __future__ import annotations
 
+import os
+import sys
+
 import pytest
+
+# Make ``custom_components`` importable when pytest's rootdir is this
+# directory (CI invokes ``pytest tests_ha/``).
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 pytest.importorskip("pytest_homeassistant_custom_component")
 
