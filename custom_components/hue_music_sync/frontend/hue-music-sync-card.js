@@ -13,7 +13,7 @@
 // Cosmetic version (shown in the console banner). The browser cache-bust no
 // longer depends on this: the integration appends ?v=<content-hash> derived from
 // this file's bytes, so any edit is picked up without a manual hard refresh.
-const VERSION = "1.20.0";
+const VERSION = "1.20.1";
 
 /* ------------------------- Palette data ------------------------- */
 // Colour schemes from the integration, each a small gradient swatch.
@@ -2522,7 +2522,9 @@ function lIntBars(label) {
 // every shared component (pill, cover, fields, segmented, palette dots, slider,
 // timing, power, area/player dropdowns) keeps the mobile card's exact look.
 const TABLET_CSS = `
-  .hue-card.hue-land { padding: 0; }
+  /* container-type lets the breakpoint below react to the CARD's own width
+     (a viewport media query can't - the card is often narrower than the page). */
+  .hue-card.hue-land { padding: 0; container-type: inline-size; }
 
   .hue-land-top { position: relative; z-index: 3; display: flex; align-items: center;
     justify-content: space-between; padding: 22px 28px 6px; }
@@ -2610,16 +2612,33 @@ const TABLET_CSS = `
     .hue-land-meta .hue-now-track-inner.scroll { animation: none !important; }
   }
 
-  /* On narrower tablets / portrait splits, stack the two columns. */
-  @media (max-width: 760px) {
+  /* When the card itself is narrow (a small dashboard column, portrait split,
+     or a phone), stack the two columns instead of clipping. Keyed off the
+     card's own width via the container query above, not the viewport. */
+  @container (max-width: 760px) {
     .hue-land-cols { grid-template-columns: 1fr; }
     .hue-land-left::after { display: none; }
     .hue-land-left { border-bottom: 1px solid var(--hue-line); }
+    .hue-land-meta .hue-now-track { font-size: 20px; }
   }
 `;
 
 class HueMusicSyncTabletCard extends HueMusicSyncCard {
   getCardSize() { return 10; }
+
+  // Sections view: claim the full section width by default (this is a landscape
+  // card - a half-width column would clip its two columns). Users can still
+  // resize it down; it never drops below half, and it stacks below 760px.
+  getGridOptions() {
+    return { columns: "full", rows: "auto", min_columns: 6 };
+  }
+
+  // Older "layout card" / masonry hint of the same intent (harmless where the
+  // view ignores it; masonry has no true column-spanning, so a Sections or
+  // Panel view is where this card gets its width).
+  getLayoutOptions() {
+    return { grid_columns: 4, grid_rows: "auto" };
+  }
 
   static getStubConfig() {
     const base = HueMusicSyncCard.getStubConfig();
