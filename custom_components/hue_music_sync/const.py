@@ -13,6 +13,10 @@ CONF_HOST: Final = "host"
 CONF_APP_KEY: Final = "app_key"  # Hue "username" / application key
 CONF_CLIENT_KEY: Final = "client_key"  # PSK for DTLS, hex string
 CONF_AREAS: Final = "areas"  # list of enabled entertainment_configuration ids
+# The bridge's self-signed TLS certificate (PEM), captured at pairing time
+# (trust-on-first-use) so every later CLIP call verifies it is talking to the
+# same bridge instead of accepting any certificate.
+CONF_BRIDGE_CERT: Final = "bridge_certificate"
 
 # --- Per-area option keys ------------------------------------------------
 CONF_MODE: Final = "mode"
@@ -47,6 +51,14 @@ KEEPALIVE_INTERVAL: Final = 9.0  # bridge drops the channel after ~10s of silenc
 # (multiple lamps + gradient-strip segments) must be split across packets or the
 # bridge can drop the over-stuffed frame.
 MAX_CHANNELS_PER_PACKET: Final = 10
+
+# ffmpeg is only ever pointed at http(s) URLs (MA stream URLs, artwork,
+# Subsonic endpoints) — every source absolutises relative paths first. Locking
+# the protocol set down stops a malicious URL (a compromised media server, a
+# crafted entity_picture) from steering ffmpeg into file://, concat: and
+# friends (local-file read / SSRF surface). Passed as an input option, so the
+# pipe:1 PCM output is unaffected.
+FFMPEG_PROTOCOL_ARGS: Final = ("-protocol_whitelist", "http,https,tcp,tls,crypto")
 
 # --- Audio analysis ------------------------------------------------------
 # Decode rate for ffmpeg PCM output. 22050 mono is plenty for beat/band work

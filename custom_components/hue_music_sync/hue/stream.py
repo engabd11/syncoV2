@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Iterable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 
 from ..const import (
     HUE_DTLS_PORT,
@@ -269,6 +270,12 @@ class DtlsStream:
         self._last_frame: bytes | None = None
         self._write_lock = asyncio.Lock()
         self._closed = False
+        # Dedicated single-thread executor for the socket work: at up to
+        # ~50-100 datagrams/s, bouncing every frame off HA's SHARED default
+        # executor contends with everything else in the process (file I/O,
+        # other integrations). One private worker keeps sends ordered and off
+        # both the event loop and the shared pool.
+        self._executor: ThreadPoolExecutor | None = None
 
     @property
     def connected(self) -> bool:
@@ -283,8 +290,12 @@ class DtlsStream:
 
         client = DtlsPskClient(self._host, self._port, self._app_key.encode(), psk)
         loop = asyncio.get_running_loop()
+        if self._executor is None:
+            self._executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="hue-dtls"
+            )
         try:
-            await loop.run_in_executor(None, client.connect)
+            await loop.run_in_executor(self._executor, client.connect)
         except (DtlsError, OSError) as err:
             raise ConnectionError(
                 f"DTLS handshake to {self._host}:{self._port} failed: {err}"
@@ -309,7 +320,7 @@ class DtlsStream:
             self._last_frame = frame
             loop = asyncio.get_running_loop()
             try:
-                await loop.run_in_executor(None, client.send, frame)
+                await loop.run_in_executor(self._executor, client.send, frame)
             except (DtlsError, OSError) as err:
                 raise ConnectionError(f"DTLS send failed: {err}") from err
 
@@ -337,6 +348,10 @@ class DtlsStream:
         if client is not None:
             loop = asyncio.get_running_loop()
             try:
-                await loop.run_in_executor(None, client.close)
+                await loop.run_in_executor(self._executor, client.close)
             except OSError:
                 pass
+        executor = self._executor
+        self._executor = None
+        if executor is not None:
+            executor.shutdown(wait=False)

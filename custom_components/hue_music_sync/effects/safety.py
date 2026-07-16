@@ -8,12 +8,14 @@ where a "flash" is a pair of opposing luminance changes of ≥10% of max, and
 treats **saturated red** more strictly still.
 
 :class:`FieldSafety` enforces those limits as the final stage before encoding
-for every renderer (Music, Movies, Fireworks, idle glow) — with one explicit,
-documented exception: the **Intense** and **Extreme** intensities are
-*unrestrained club modes* that the user opts into knowing they flash as hard as
-the Hue pipeline allows (see ``modes.UNRESTRAINED_MODES`` and the README's
-photosensitivity warning). Subtle, Medium, High and the Movies effect are always
-protected. When engaged it is deliberately transparent on well-behaved content —
+for every renderer (Music, Movies, Fireworks, idle glow). The **Intense** and
+**Extreme** club modes (see ``modes.UNRESTRAINED_MODES``) run a *relaxed*
+limiter instead of the WCAG one: a much higher flash budget
+(:data:`RELAXED_MAX_FLASHES_PER_S`) that never engages on real music but still
+hard-caps true strobe output — there is no fully-unlimited path. Those modes
+remain unsuitable for photosensitive viewers (see the README's warning);
+Subtle, Medium, High and the Movies effect always get the strict limiter.
+When engaged it is deliberately transparent on well-behaved content —
 it only acts when the aggregate field actually starts to strobe — and degrades
 gracefully by compressing the *global* brightness swing while preserving each
 light's colour and the spatial pattern between lights (which is what makes the
@@ -34,6 +36,14 @@ from ..color.palette import RGB
 FLASH_DELTA = 0.10
 # Hard ceiling on full-field flashes within any rolling one-second window.
 MAX_FLASHES_PER_S = 3
+# The club modes (Intense/Extreme) run a RELAXED limiter instead of none at
+# all: this budget is far above any musical beat rate (8 flashes/s ≈ a beat
+# flash at 480 BPM), so it is transparent for the hardest-hitting real music
+# — the club character is untouched — while still hard-capping pathological
+# strobe content (broken analysis, adversarial input, a stuck oscillation).
+# It is NOT a WCAG-compliant level; those modes remain unsuitable for
+# photosensitive viewers and the README says so.
+RELAXED_MAX_FLASHES_PER_S = 8
 # Saturated red has a separate, stricter threshold; allow far fewer red flashes
 # before the guard starts pulling the colour toward white.
 MAX_RED_FLASHES_PER_S = 1
@@ -83,9 +93,18 @@ class FieldSafety:
         self,
         max_flashes_per_s: int = MAX_FLASHES_PER_S,
         flash_delta: float = FLASH_DELTA,
+        *,
+        calm_gated: bool = True,
     ) -> None:
+        # ``calm_gated`` (the strict default) also ENGAGES on hard-swinging
+        # content before the budget is spent and refuses to release until the
+        # content calms — the conservative WCAG posture. The relaxed club-mode
+        # limiter sets it False so engagement is keyed purely to the flash
+        # budget: musical full-range swings pass untouched, and only genuinely
+        # over-budget strobing pins the field.
         self._max_flashes = max_flashes_per_s
         self._delta = flash_delta
+        self._calm_gated = calm_gated
         self._t = 0.0
         self._ema: float | None = None
         self._prev_field: float | None = None
@@ -138,8 +157,13 @@ class FieldSafety:
         over = len(self._flashes) >= max(1, self._max_flashes - 1)
         # Only release when both the flash budget is clear *and* the incoming
         # field has gone quiet; otherwise stay pinned through a sustained strobe.
+        # (Budget-only when not calm-gated: the relaxed club-mode limiter must
+        # not engage on musical swings that are still within its budget.)
         calm = self._activity < _ACTIVITY_CALM
-        comp_target = 1.0 if (not over and calm) else 0.0
+        if self._calm_gated:
+            comp_target = 1.0 if (not over and calm) else 0.0
+        else:
+            comp_target = 0.0 if over else 1.0
         rate = _ENGAGE_RATE if comp_target < self._comp else _RELEASE_RATE
         self._comp += (comp_target - self._comp) * rate
         limiting = self._comp < 0.999

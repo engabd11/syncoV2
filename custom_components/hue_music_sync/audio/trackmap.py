@@ -47,8 +47,10 @@ from ..const import (
     ANALYSIS_SAMPLE_RATE,
     ANALYSIS_WINDOW,
     BANDS,
+    FFMPEG_PROTOCOL_ARGS,
     MELBANK_BINS,
 )
+from ..util import redact_url
 from .analyzer import (
     LONG_FLUX_FLOOR_FRAC,
     AnalysisFrame,
@@ -1022,7 +1024,7 @@ def _decode_and_analyze(ffmpeg_bin: str, url: str, max_seconds: float) -> MapRes
     the caller can tell a transient fetch failure from an unanalysable track.
     """
     args = [
-        ffmpeg_bin, "-nostdin", "-loglevel", "error",
+        ffmpeg_bin, "-nostdin", "-loglevel", "error", *FFMPEG_PROTOCOL_ARGS,
         "-i", url,
         "-t", f"{max_seconds:.0f}",
         "-vn", "-ac", "1", "-ar", str(ANALYSIS_SAMPLE_RATE),
@@ -1080,7 +1082,7 @@ async def build_track_map(
             timeout=_DECODE_TIMEOUT_S,
         )
     except asyncio.TimeoutError:
-        _LOGGER.info("Track-map analysis timed out for %s", url)
+        _LOGGER.info("Track-map analysis timed out for %s", redact_url(url))
         return MapResult(None, decoded=False, error="analysis timed out")
 
 
@@ -1286,7 +1288,7 @@ class TrackMapper:
             async with self._analysis_lock():  # yields to / blocks the pre-warm
                 result = await build_track_map(self._ffmpeg, url)
         except Exception:  # noqa: BLE001 - analysis must never break sync
-            _LOGGER.debug("Track-map analysis crashed for %s", url, exc_info=True)
+            _LOGGER.debug("Track-map analysis crashed for %s", redact_url(url), exc_info=True)
             result = MapResult(None, decoded=False, error="analysis crashed")
         finally:
             self._inflight = None
@@ -1325,20 +1327,20 @@ class TrackMapper:
             f.permanent = True
             _LOGGER.warning(
                 "Track-map analysis produced no usable map for %s "
-                "(decoded but unanalysable); using live/fallback sync", url
+                "(decoded but unanalysable); using live/fallback sync", redact_url(url)
             )
         elif f.attempts >= _MAX_ANALYSIS_ATTEMPTS:
             f.permanent = True
             _LOGGER.warning(
                 "Track-map analysis failed %d times for %s (%s); giving up for "
-                "this track", f.attempts, url, result.error or "unknown error"
+                "this track", f.attempts, redact_url(url), result.error or "unknown error"
             )
         else:
             delay = min(_RETRY_MAX_S, _RETRY_BASE_S * (2 ** (f.attempts - 1)))
             f.retry_at = time.monotonic() + delay
             _LOGGER.info(
                 "Track-map analysis failed for %s (%s); retry %d/%d in %.0fs",
-                url, result.error or "unknown error",
+                redact_url(url), result.error or "unknown error",
                 f.attempts, _MAX_ANALYSIS_ATTEMPTS, delay,
             )
         self._failures[track_id] = f
@@ -1383,7 +1385,7 @@ class TrackMapper:
                 except asyncio.CancelledError:
                     raise
                 except Exception:  # noqa: BLE001 - one bad track must not stop the sweep
-                    _LOGGER.debug("Pre-warm analysis crashed for %s", url, exc_info=True)
+                    _LOGGER.debug("Pre-warm analysis crashed for %s", redact_url(url), exc_info=True)
                     result = MapResult(None, decoded=False, error="prewarm crashed")
                 self._record_result(track_id, url, result)
                 tm = result.track_map
@@ -1407,7 +1409,7 @@ class TrackMapper:
                         failures.append((url, err))
                     if failed <= 10:  # first few at WARNING; a broken library must show
                         _LOGGER.warning(
-                            "Library pre-warm: analysis failed for %s (%s)", url, err
+                            "Library pre-warm: analysis failed for %s (%s)", redact_url(url), err
                         )
                     elif failed == 11:
                         _LOGGER.warning(

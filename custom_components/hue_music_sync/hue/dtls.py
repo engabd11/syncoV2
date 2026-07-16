@@ -220,11 +220,11 @@ class DtlsPskClient:
 
         self._send_records([cke_record, ccs_record, finished_record])
 
-        # Expect server ChangeCipherSpec + encrypted Finished. Best-effort verify.
-        try:
-            self._await_server_finished(master)
-        except socket.timeout:
-            _LOGGER.debug("No server Finished received; proceeding (bridge often goes quiet)")
+        # Expect server ChangeCipherSpec + encrypted Finished. Enforced: the
+        # server's Finished is the only message that proves the peer actually
+        # knows the PSK — without checking it we would stream to any impostor
+        # that echoed the plaintext flights.
+        self._await_server_finished(master)
 
     def _client_hello_body(self, cookie: bytes) -> bytes:
         return (
@@ -293,14 +293,31 @@ class DtlsPskClient:
         raise DtlsError(f"handshake timed out waiting for {needed - collected.keys()}")
 
     def _await_server_finished(self, master: bytes) -> None:
-        data = self._sock.recv(4096)
-        read_epoch = 0
-        for ctype, seq_bytes, fragment in self._split_records(data):
-            if ctype == _CT_CHANGE_CIPHER_SPEC:
-                read_epoch = 1
+        """Require and verify the server's Finished (mutual PSK confirmation).
+
+        Epoch-1 records are detected from the record header (not from having
+        seen the CCS in the same datagram — UDP may split or drop it), our
+        final flight is retransmitted on each timeout per DTLS retransmission
+        rules, and a missing or mismatching Finished fails the handshake.
+        A successful AES-GCM decrypt already proves the peer derived the same
+        keys; the verify_data check additionally binds the whole transcript.
+        """
+        for _ in range(_HANDSHAKE_RETRIES):
+            try:
+                data = self._sock.recv(4096)
+            except socket.timeout:
+                self._retransmit_last_flight()
                 continue
-            if ctype == _CT_HANDSHAKE and read_epoch == 1:
-                plain = self._decrypt(ctype, seq_bytes, fragment)
+            for ctype, seq_bytes, fragment in self._split_records(data):
+                epoch = struct.unpack(">H", seq_bytes[:2])[0]
+                if ctype != _CT_HANDSHAKE or epoch != 1:
+                    continue  # CCS, retransmits of epoch-0 flights, etc.
+                try:
+                    plain = self._decrypt(ctype, seq_bytes, fragment)
+                except Exception as err:
+                    raise DtlsError(
+                        "server Finished failed to decrypt (wrong PSK on one side?)"
+                    ) from err
                 # plain is a Finished handshake message; verify_data follows header.
                 if plain and plain[0] == _HS_FINISHED:
                     verify = plain[12:24]
@@ -308,8 +325,12 @@ class DtlsPskClient:
                         master, b"server finished",
                         hashlib.sha256(self._transcript).digest(), 12,
                     )
-                    if verify != expected:
-                        _LOGGER.debug("Server Finished verify mismatch (continuing)")
+                    if not hmac.compare_digest(verify, expected):
+                        raise DtlsError("server Finished verification failed")
+                    return
+        raise DtlsError(
+            "no server Finished received; peer never proved knowledge of the PSK"
+        )
 
     def _split_records(self, data: bytes):
         off = 0

@@ -46,6 +46,7 @@ activate:
             - lavender
             - ember
             - aurora
+            - rainbow
             - tropical
             - savanna
             - blossom
@@ -125,6 +126,7 @@ set_options:
             - lavender
             - ember
             - aurora
+            - rainbow
             - tropical
             - savanna
             - blossom

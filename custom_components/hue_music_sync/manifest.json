@@ -5,10 +5,11 @@
   "codeowners": ["@engabd11"],
   "config_flow": true,
   "dependencies": ["ffmpeg", "frontend", "http", "lovelace", "websocket_api"],
-  "documentation": "https://github.com/engabd11/synco",
+  "documentation": "https://github.com/engabd11/syncoV2",
   "integration_type": "hub",
   "iot_class": "local_push",
-  "issue_tracker": "https://github.com/engabd11/synco/issues",
-  "requirements": ["numpy"],
-  "version": "1.18.6"
+  "issue_tracker": "https://github.com/engabd11/syncoV2/issues",
+  "loggers": ["custom_components.hue_music_sync"],
+  "requirements": ["numpy>=1.23"],
+  "version": "1.19.0"
 }

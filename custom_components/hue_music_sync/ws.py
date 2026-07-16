@@ -103,7 +103,11 @@ def ws_subscribe(
         vol.Required("type"): f"{DOMAIN}/tap",
         vol.Required("entity_id"): str,
         vol.Optional("group", default="all"): vol.In(("low", "mid", "high", "all")),
-        vol.Optional("strength", default=0.95): vol.Coerce(float),
+        # Clamped: an out-of-range or non-finite strength must never reach the
+        # flash path (NaN would poison the brightness math downstream).
+        vol.Optional("strength", default=0.95): vol.All(
+            vol.Coerce(float), vol.Range(min=0.0, max=1.0)
+        ),
     }
 )
 @callback

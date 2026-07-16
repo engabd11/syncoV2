@@ -34,6 +34,8 @@ import logging
 
 import numpy as np
 
+from ..const import FFMPEG_PROTOCOL_ARGS
+from ..util import redact_url
 from .palette import RGB, Palette
 
 _LOGGER = logging.getLogger(__name__)
@@ -216,7 +218,7 @@ def _kmeans_palette(pixels: np.ndarray, k: int = 5) -> list[RGB]:
 async def extract_palette(ffmpeg_bin: str, url: str, k: int = 5) -> Palette | None:
     """Decode artwork at ``url`` with ffmpeg and return a vivid palette."""
     args = [
-        ffmpeg_bin, "-nostdin", "-loglevel", "error", "-i", url,
+        ffmpeg_bin, "-nostdin", "-loglevel", "error", *FFMPEG_PROTOCOL_ARGS, "-i", url,
         "-vf", f"scale={_THUMB}:{_THUMB}",
         "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
     ]
@@ -226,12 +228,14 @@ async def extract_palette(ffmpeg_bin: str, url: str, k: int = 5) -> Palette | No
         )
         raw, err = await asyncio.wait_for(proc.communicate(), timeout=10)
     except (asyncio.TimeoutError, OSError) as exc:
-        _LOGGER.debug("Album-art decode failed for %s: %s", url, exc)
+        _LOGGER.debug("Album-art decode failed for %s: %s", redact_url(url), exc)
         return None
 
     expected = _THUMB * _THUMB * 3
     if len(raw) < expected:
-        _LOGGER.debug("Album-art decode short (%d/%d bytes): %s", len(raw), expected, url)
+        _LOGGER.debug(
+            "Album-art decode short (%d/%d bytes): %s", len(raw), expected, redact_url(url)
+        )
         return None
 
     pixels = (

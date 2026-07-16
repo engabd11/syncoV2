@@ -7,6 +7,7 @@ import logging
 import mimetypes
 import ssl
 
+import aiohttp
 import voluptuous as vol
 
 # Some HA hosts (a misconfigured Windows registry, minimal OS images) map ".js"
@@ -28,6 +29,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
     CONF_APP_KEY,
+    CONF_BRIDGE_CERT,
     CONF_BRIGHTNESS,
     CONF_CLIENT_KEY,
     CONF_COLOUR,
@@ -86,12 +88,33 @@ CARD_URL = f"{CARD_BASE_URL}/{CARD_FILENAME}"
 LOCAL_CARD_URL = f"/local/{CARD_FILENAME}"
 
 
-def _build_ssl_context() -> ssl.SSLContext:
-    """Hue bridges use a self-signed cert on the local network."""
+def _build_ssl_context(pinned_cert_pem: str | None = None) -> ssl.SSLContext:
+    """SSL context for bridge HTTPS (blocking; build in an executor).
+
+    Hue bridges use a self-signed certificate, so CA validation can never
+    succeed. With a pinned PEM (captured at pairing, trust-on-first-use) the
+    context trusts exactly that certificate and requires it — a LAN
+    man-in-the-middle can no longer intercept the CLIP traffic or a pairing's
+    app key. Without one (legacy entries before their first re-setup, or a
+    capture failure) fall back to unverified TLS as before.
+    """
+    if pinned_cert_pem:
+        ctx = ssl.create_default_context(cadata=pinned_cert_pem)
+        ctx.check_hostname = False  # cert carries the bridge id, not the IP
+        ctx.verify_mode = ssl.CERT_REQUIRED
+        return ctx
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
     return ctx
+
+
+def _fetch_bridge_certificate(host: str) -> str | None:
+    """Capture the bridge's TLS certificate as PEM (blocking; run in executor)."""
+    try:
+        return ssl.get_server_certificate((host, 443), timeout=10)
+    except (OSError, ssl.SSLError, ValueError):
+        return None
 
 
 def _ffmpeg_binary(hass: HomeAssistant) -> str:
@@ -312,13 +335,39 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         async_call_later(hass, PREWARM_RESUME_DELAY_S, _resume_prewarm)
 
     session = async_get_clientsession(hass)
-    ssl_ctx = await hass.async_add_executor_job(_build_ssl_context)
     host = entry.data[CONF_HOST]
+    # Certificate pinning (trust-on-first-use): entries created before pinning
+    # existed capture the bridge's certificate on their next setup; from then
+    # on every CLIP call verifies it's the same bridge.
+    pinned_cert = entry.data.get(CONF_BRIDGE_CERT)
+    if not pinned_cert:
+        pinned_cert = await hass.async_add_executor_job(_fetch_bridge_certificate, host)
+        if pinned_cert:
+            hass.config_entries.async_update_entry(
+                entry, data={**entry.data, CONF_BRIDGE_CERT: pinned_cert}
+            )
+            _LOGGER.info("Pinned the Hue bridge's TLS certificate (trust-on-first-use)")
+        else:
+            _LOGGER.warning(
+                "Could not capture the Hue bridge's TLS certificate; "
+                "connecting without verification for now"
+            )
+    ssl_ctx = await hass.async_add_executor_job(_build_ssl_context, pinned_cert)
     bridge = HueBridge(session, host, entry.data[CONF_APP_KEY], ssl_ctx)
 
     try:
         configs = await bridge.get_entertainment_configs()
     except (HueBridgeError, OSError) as err:
+        if isinstance(err, aiohttp.ClientConnectorCertificateError):
+            # The bridge presented a different certificate than the pinned
+            # one. Legitimate cause: a factory-reset/replaced bridge (which
+            # invalidates the app key anyway). Malicious cause: an on-path
+            # interceptor. Never silently re-pin — tell the user instead.
+            raise ConfigEntryNotReady(
+                f"Hue bridge {host} presented an unexpected TLS certificate. "
+                "If the bridge was factory-reset or replaced, remove and "
+                "re-add the integration to pair (and pin) it again."
+            ) from err
         raise ConfigEntryNotReady(f"Cannot reach Hue bridge {host}: {err}") from err
 
     manager = SyncManager(
@@ -349,6 +398,21 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         index = hass.data[DOMAIN].get(DATA_AREA_INDEX, {})
         for eid in [k for k, (m, _) in index.items() if m is manager]:
             index.pop(eid, None)
+        # Last loaded entry gone: remove the domain services so nothing
+        # dangles. (The WebSocket commands have no unregister API; their
+        # handlers already resolve targets safely against hass.data.)
+        if not any(
+            e.entry_id in hass.data[DOMAIN]
+            for e in hass.config_entries.async_entries(DOMAIN)
+        ):
+            for service in (
+                SERVICE_ACTIVATE,
+                SERVICE_DEACTIVATE,
+                SERVICE_SET_OPTIONS,
+                SERVICE_PREWARM_LIBRARY,
+            ):
+                if hass.services.has_service(DOMAIN, service):
+                    hass.services.async_remove(DOMAIN, service)
     return unloaded
 
 

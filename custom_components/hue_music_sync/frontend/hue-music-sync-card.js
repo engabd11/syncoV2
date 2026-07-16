@@ -13,7 +13,7 @@
 // Cosmetic version (shown in the console banner). The browser cache-bust no
 // longer depends on this: the integration appends ?v=<content-hash> derived from
 // this file's bytes, so any edit is picked up without a manual hard refresh.
-const VERSION = "1.18.0";
+const VERSION = "1.19.0";
 
 /* ------------------------- Palette data ------------------------- */
 // Colour schemes from the integration, each a small gradient swatch.
@@ -250,10 +250,17 @@ const CARD_CSS = `
   .hue-area-badge { font-size: 10px; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; flex: none; }
   .hue-area-caret { font-size: 8px; color: var(--hue-dim); margin-left: 1px; flex: none; transition: transform .18s; }
   .hue-area-dd.open .hue-area-caret { transform: rotate(180deg); }
-  .hue-area-menu { position: absolute; z-index: 30; top: calc(100% + 6px); left: 0; min-width: 210px; max-width: 280px;
+  /* Fixed-position popover: escapes the card's overflow:hidden (which used to
+     clip long area lists at the card edge) and scrolls internally when the list
+     is taller than the space available. Anchored to the trigger via JS. */
+  .hue-area-menu { position: fixed; z-index: 60; visibility: hidden; min-width: 210px; max-width: 280px;
     background: #17162a; border: 1px solid var(--hue-line); border-radius: 14px; padding: 6px;
     box-shadow: 0 18px 44px -14px #000d, 0 0 0 1px #ffffff08; display: flex; flex-direction: column; gap: 2px;
-    backdrop-filter: blur(12px); }
+    backdrop-filter: blur(12px); overflow-y: auto; overscroll-behavior: contain;
+    scrollbar-width: thin; scrollbar-color: #ffffff2e transparent; }
+  .hue-area-menu::-webkit-scrollbar { width: 6px; }
+  .hue-area-menu::-webkit-scrollbar-thumb { background: #ffffff2e; border-radius: 3px; }
+  .hue-area-row { flex: none; }
   .hue-area-row { display: flex; align-items: center; gap: 9px; padding: 9px 10px; border-radius: 10px;
     background: none; border: none; text-align: left; width: 100%; cursor: pointer; color: var(--hue-dim);
     font-family: var(--hk); font-size: 13px; font-weight: 600; transition: .14s; }
@@ -578,6 +585,16 @@ class HueMusicSyncCard extends HTMLElement {
       this._areaMenuOpen = false;
       this._render();
     };
+    // The area menu is position:fixed (anchored to the trigger), so a page
+    // scroll or resize would leave it floating detached — close it instead,
+    // like a native <select>. Scrolls *inside* the menu itself are fine.
+    this._onWinMove = (e) => {
+      if (!this._areaMenuOpen) return;
+      const path = e && e.composedPath ? e.composedPath() : [];
+      if (path.some((n) => n.classList && n.classList.contains("hue-area-menu"))) return;
+      this._areaMenuOpen = false;
+      this._render();
+    };
 
     // local optimistic UI state (only used in demo / before hass arrives)
     this._ui = {
@@ -788,10 +805,14 @@ class HueMusicSyncCard extends HTMLElement {
       this._io.observe(this);
     }
     document.addEventListener("pointerdown", this._onDocPointer, true);
+    window.addEventListener("scroll", this._onWinMove, { capture: true, passive: true });
+    window.addEventListener("resize", this._onWinMove, { passive: true });
   }
   disconnectedCallback() {
     cancelAnimationFrame(this._raf);
     document.removeEventListener("pointerdown", this._onDocPointer, true);
+    window.removeEventListener("scroll", this._onWinMove, { capture: true });
+    window.removeEventListener("resize", this._onWinMove);
     this._areaMenuOpen = false;
     if (this._io) {
       this._io.disconnect();
@@ -1077,11 +1098,22 @@ class HueMusicSyncCard extends HTMLElement {
     } catch (err) {
       console.error("hue-music-sync-card: render failed", err);  // eslint-disable-line no-console
       try {
-        this.shadowRoot.innerHTML =
-          '<div style="padding:16px;font:13px system-ui,sans-serif;color:#ffb4b4;' +
-          'background:#1a0f17;border-radius:12px;">Hue Synco card hit an error: ' +
-          String((err && err.message) || err) +
-          '<br><span style="color:#9aa">Please report this message.</span></div>';
+        // Built with DOM APIs (not innerHTML) so the error text can never be
+        // interpreted as markup, whatever ends up in the message.
+        this.shadowRoot.replaceChildren();
+        const box = document.createElement("div");
+        box.style.cssText =
+          "padding:16px;font:13px system-ui,sans-serif;color:#ffb4b4;" +
+          "background:#1a0f17;border-radius:12px;";
+        box.appendChild(document.createTextNode(
+          `Hue Synco card hit an error: ${String((err && err.message) || err)}`
+        ));
+        box.appendChild(document.createElement("br"));
+        const hint = document.createElement("span");
+        hint.style.color = "#9aa";
+        hint.textContent = "Please report this message.";
+        box.appendChild(hint);
+        this.shadowRoot.appendChild(box);
       } catch (_) {
         /* shadowRoot not ready; nothing more we can do */
       }
@@ -1704,8 +1736,41 @@ class HueMusicSyncCard extends HTMLElement {
         menu.appendChild(row);
       });
       dd.appendChild(menu);
+      this._placeAreaMenu(trigger, menu);
     }
     return dd;
+  }
+
+  // Anchor the fixed-position area menu to its trigger, flipping above when
+  // there's more room there, clamping to the viewport, and capping height so a
+  // long area list scrolls inside the menu instead of being clipped by the
+  // card's overflow:hidden. Runs after attach (the menu needs layout to size).
+  _placeAreaMenu(trigger, menu) {
+    requestAnimationFrame(() => {
+      if (!menu.isConnected) return;
+      const r = trigger.getBoundingClientRect();
+      const vh = window.innerHeight;
+      const vw = window.innerWidth;
+      const gap = 6;      // trigger-to-menu spacing
+      const margin = 8;   // minimum distance from the viewport edge
+      const below = vh - r.bottom - gap - margin;
+      const above = r.top - gap - margin;
+      const desired = Math.min(380, menu.scrollHeight + 2);
+      let maxH;
+      let top;
+      if (below >= Math.min(desired, 220) || below >= above) {
+        maxH = Math.max(120, Math.min(desired, below));
+        top = r.bottom + gap;
+      } else {
+        maxH = Math.max(120, Math.min(desired, above));
+        top = r.top - gap - maxH;
+      }
+      menu.style.maxHeight = `${maxH}px`;
+      menu.style.top = `${Math.max(margin, top)}px`;
+      const w = menu.offsetWidth || 210;
+      menu.style.left = `${Math.min(Math.max(margin, r.left), vw - w - margin)}px`;
+      menu.style.visibility = "visible";
+    });
   }
 
   _label(text, value) {
@@ -2373,83 +2438,41 @@ if (!window.customCards.some((c) => c.type === "hue-music-sync-card")) {
     name: "Hue Synco Card",
     description: "Ambient Glow card for the Hue Synco integration.",
     preview: true,
-    documentationURL: "https://github.com/engabd11/synco",
+    documentationURL: "https://github.com/engabd11/syncoV2",
   });
 }
 
-// Late-load self-heal. If a dashboard rendered BEFORE this module executed
-// (slow resource import, stale app shell), Lovelace shows "Custom element
-// doesn't exist" error cards. Modern HA rebuilds those itself via
-// customElements.whenDefined -> ll-rebuild, but that only helps the realm the
-// module actually ran in: a dashboard rendered inside a same-origin FRAME
-// (an embedded dashboard page, a wall-panel wrapper, a cast view) has its own
-// element registry, and if its page never imported this module the error card
-// there sticks forever while the top window looks perfectly healthy. So the
-// heal walks every reachable same-origin frame: it injects this module into
-// frames that show our error without having the element, and fires
-// ll-rebuild on every error card (the event must be dispatched on the error
-// element itself, which lives behind nested shadow roots, hence the deep
-// walk; rebuilding an unrelated error card is a harmless no-op). Retried a
-// few times because dashboards may finish rendering after us; logs a report
-// only when it finds something wrong, so a healthy page stays quiet.
+// Late-load self-heal, scoped strictly to THIS document. If a dashboard
+// rendered before this module executed (slow resource import, stale app
+// shell), Lovelace shows "Custom element doesn't exist" error cards. Modern
+// HA rebuilds those itself via customElements.whenDefined -> ll-rebuild; this
+// covers two gaps in our own realm only: (a) the registry was swapped after
+// an early define, so re-register with the current one; (b) nudge our own
+// document's stale error cards with ll-rebuild (the event must be dispatched
+// on the error element itself, which lives behind nested shadow roots, hence
+// the deep walk; rebuilding an unrelated error card is a harmless no-op).
+// Dashboards in other frames must import the module themselves — reaching
+// into sibling frames or injecting scripts is deliberately NOT done here.
 const healLateLoad = () => {
-  const contexts = [];
-  const collect = (win) => {
-    try {
-      if (win.document) contexts.push([win, win.document]);
-    } catch (e) {
-      return; // cross-origin frame: not ours to touch
-    }
-    for (let i = 0; i < win.frames.length; i += 1) collect(win.frames[i]);
-  };
-  let root = window;
   try {
-    if (window.top && window.top.document) root = window.top;
-  } catch (e) {
-    /* HA itself embedded cross-origin: heal our own tree only */
-  }
-  collect(root);
-  const report = [];
-  for (const [win, doc] of contexts) {
-    try {
-      const errors = [];
-      const walk = (node) => {
-        for (const el of node.querySelectorAll("*")) {
-          if (el.localName === "hui-error-card") errors.push(el);
-          if (el.shadowRoot) walk(el.shadowRoot);
-        }
-      };
-      walk(doc);
-      const defined = !!win.customElements.get("hue-music-sync-card");
-      if (!defined && doc === document) {
-        // Our own window lost the definition (the registry was replaced
-        // after an early define): re-register with the CURRENT registry.
-        defineCard();
-      } else if (!defined && errors.length && !doc.querySelector("script[data-hue-music-sync]")) {
-        // A dashboard-rendering frame that never imported this module:
-        // load it there so the element exists in that realm too. (Useless
-        // for our own document - the module map would dedupe the import.)
-        const s = doc.createElement("script");
-        s.type = "module";
-        s.src = import.meta.url;
-        s.dataset.hueMusicSync = "1";
-        (doc.head || doc.documentElement).appendChild(s);
+    const defined = !!customElements.get("hue-music-sync-card");
+    if (!defined) defineCard();
+    const errors = [];
+    const walk = (node) => {
+      for (const el of node.querySelectorAll("*")) {
+        if (el.localName === "hui-error-card") errors.push(el);
+        if (el.shadowRoot) walk(el.shadowRoot);
       }
-      for (const el of errors) {
-        el.dispatchEvent(new Event("ll-rebuild", { bubbles: true, composed: true }));
-      }
-      if (errors.length || !defined) {
-        report.push(
-          `${doc === document ? "self" : "frame " + (win.location && win.location.pathname)}: ` +
-          `error-cards=${errors.length} defined=${defined}`
-        );
-      }
-    } catch (e) {
-      report.push(`walk failed: ${e && e.message}`);
+    };
+    walk(document);
+    for (const el of errors) {
+      el.dispatchEvent(new Event("ll-rebuild", { bubbles: true, composed: true }));
     }
-  }
-  if (report.length) {
-    console.info(`hue-music-sync-card heal: ${report.join(" | ")}`);
+    if (errors.length || !defined) {
+      console.info(`hue-music-sync-card heal: error-cards=${errors.length} defined=${defined}`);
+    }
+  } catch (e) {
+    /* healing is best-effort; never break the page over it */
   }
 };
 for (const delay of [800, 3000, 8000]) setTimeout(healLateLoad, delay);

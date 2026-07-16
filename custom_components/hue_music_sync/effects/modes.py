@@ -262,10 +262,13 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
     ),
 }
 
-# Modes that run with the whole-field flash limiter and red guard BYPASSED.
+# Modes that run the RELAXED flash limiter (a high budget that real music never
+# hits — see safety.RELAXED_MAX_FLASHES_PER_S) instead of the strict WCAG one.
 # An explicit, documented user choice: these are club modes meant to go as hard
-# as the Hue pipeline can. Subtle/Medium/High and the Movies effect stay fully
-# protected. See the photosensitivity warning in the README.
+# as the Hue pipeline can on musical content, but pathological strobe output is
+# still hard-capped — there is no fully-unlimited path. Subtle/Medium/High and
+# the Movies effect always get the strict limiter. See the photosensitivity
+# warning in the README.
 UNRESTRAINED_MODES = frozenset({SyncMode.INTENSE, SyncMode.EXTREME})
 
 

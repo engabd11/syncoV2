@@ -49,7 +49,11 @@ def subsonic_stream_url(
         return None
     base = base_url.rstrip("/")
     if not base.startswith(("http://", "https://")):
-        base = "http://" + base
+        # A scheme-less host defaults to httpS: the URL carries the username and
+        # a password-derived token+salt (offline-crackable if sniffed), so plain
+        # HTTP must be an explicit choice ("http://..." in the option), not a
+        # silent downgrade.
+        base = "https://" + base
     salt = salt or secrets.token_hex(8)
     token = hashlib.md5((password + salt).encode("utf-8")).hexdigest()  # noqa: S324 - Subsonic spec
     params = {

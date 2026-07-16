@@ -20,6 +20,7 @@ from hue_music_sync.effects.engine import EffectEngine
 from hue_music_sync.effects.safety import (
     FLASH_DELTA,
     MAX_FLASHES_PER_S,
+    RELAXED_MAX_FLASHES_PER_S,
     FieldSafety,
     _field_brightness,
     _field_redness,
@@ -123,6 +124,34 @@ def test_fireworks_within_the_flash_limit():
         safety.process(out, _DT)
         max_window = max(max_window, len(safety._flashes))
     assert max_window <= MAX_FLASHES_PER_S
+
+
+# --- the relaxed club-mode limiter ----------------------------------------
+
+def test_relaxed_limiter_caps_a_pathological_strobe():
+    # Intense/Extreme run this limiter instead of NO limiter: a 20 Hz
+    # black<->white strobe must still be bounded to the relaxed budget.
+    safety = FieldSafety(max_flashes_per_s=RELAXED_MAX_FLASHES_PER_S, calm_gated=False)
+    max_window = 0
+    for i in range(800):
+        v = 1.0 if i % 2 == 0 else 0.0  # one flash per 2 frames = 20 flashes/s
+        safety.process({0: (v, v, v)}, _DT)
+        max_window = max(max_window, len(safety._flashes))
+    assert max_window <= RELAXED_MAX_FLASHES_PER_S
+
+
+def test_relaxed_limiter_is_transparent_at_musical_beat_rates():
+    # A full-range beat swing at 180 BPM (3 flashes/s — the hardest real music
+    # gets) must pass through the relaxed limiter untouched, preserving the
+    # club-mode character.
+    safety = FieldSafety(max_flashes_per_s=RELAXED_MAX_FLASHES_PER_S, calm_gated=False)
+    period = int(round(1.0 / 3.0 / _DT))  # frames per beat at 180 BPM
+    for i in range(800):
+        phase = (i % period) / period
+        v = 1.0 if phase < 0.25 else 0.05  # hard hit then near-dark
+        inp = {0: (v, v, v)}
+        out = safety.process(inp, _DT)
+        assert out[0] == pytest.approx(inp[0], abs=1e-9)
 
 
 # --- the documented "calm guarantee": Subtle & Movie are flash-free ------

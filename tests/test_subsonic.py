@@ -26,9 +26,11 @@ def test_stream_url_uses_token_auth_and_hides_password():
     assert "secret" not in url  # password is never placed on the URL
 
 
-def test_stream_url_adds_http_scheme_and_strips_trailing_slash():
+def test_stream_url_defaults_to_https_and_strips_trailing_slash():
+    # Scheme-less hosts default to https (the URL carries auth material);
+    # plain HTTP requires an explicit http:// prefix.
     url = subsonic_stream_url("nas:4533/", "u", "p", "x", salt="s")
-    assert url.startswith("http://nas:4533/rest/stream.view?")
+    assert url.startswith("https://nas:4533/rest/stream.view?")
 
 
 def test_stream_url_none_when_a_field_is_missing():

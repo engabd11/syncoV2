@@ -74,9 +74,10 @@ from .const import (
 )
 from .effects.engine import EffectEngine
 from .effects.modes import UNRESTRAINED_MODES, auto_mode_for_bpm
-from .effects.safety import FieldSafety
+from .effects.safety import RELAXED_MAX_FLASHES_PER_S, FieldSafety
 from .hue.bridge import EntertainmentConfig, HueBridge
 from .hue.stream import DtlsStream, HueStreamEncoder
+from .util import redact_url
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -224,11 +225,16 @@ class SyncSession:
         self._encoder = HueStreamEncoder(config.id)
         self._stream = DtlsStream(host, app_key, client_key)
         self._engine = EffectEngine(config.channels)
-        # Final safety stage (whole-field flash limiter + red guard). Applied to
-        # every emitted frame in _safe_send EXCEPT in the explicitly
-        # unrestrained club modes (Intense/Extreme with a non-Movies effect),
-        # which the user opts into knowing they flash as hard as Hue allows.
+        # Final safety stage (whole-field flash limiter + red guard). Every
+        # emitted frame passes through ONE of these: the strict WCAG limiter
+        # normally, or the relaxed high-budget limiter in the club modes
+        # (Intense/Extreme with a non-Movies effect) — transparent on real
+        # music, but a hard cap on pathological strobe output. There is no
+        # fully-unlimited path.
         self._safety = FieldSafety()
+        self._safety_relaxed = FieldSafety(
+            max_flashes_per_s=RELAXED_MAX_FLASHES_PER_S, calm_gated=False
+        )
         self._was_unrestrained = False
         self._last_safe_t: float | None = None
         # Predictive beat grid + musical-structure trackers, fed the analyzer's
@@ -264,6 +270,7 @@ class SyncSession:
         self._last_track: str | None = None
         self._last_art_url: str | None = None
         self._art_task: asyncio.Task | None = None
+        self._reset_task: asyncio.Task | None = None  # player-switch source reset
         self._art_grace: float | None = None  # deadline for a lagging artwork URL
         self._art_retry_at = 0.0  # pacing after a failed extraction
         self._delay_buf: deque[tuple[float, dict]] = deque()
@@ -368,8 +375,9 @@ class SyncSession:
             # mode's field level forward: switching e.g. Subtle (steady ~0.8) to a
             # dark club mode would pin the room near the old bright anchor and
             # suppress the new mode's flashing until the session was restarted.
-            # Clear it so the new mode anchors to its own field from this frame.
+            # Clear them so the new mode anchors to its own field from this frame.
             self._safety.reset()
+            self._safety_relaxed.reset()
             self._was_unrestrained = self._unrestrained()
             self._last_safe_t = None
         if settings.colour != prev.colour:
@@ -387,7 +395,11 @@ class SyncSession:
             # also cancels an in-flight upgrade probe — one opened against the
             # *old* player would otherwise be installed as the source moments
             # after the switch.
-            self._hass.async_create_task(self._reset_source())
+            # Tracked (not fire-and-forget) so stop() can cancel it and a rapid
+            # second player switch supersedes an in-flight reset cleanly.
+            if self._reset_task is not None and not self._reset_task.done():
+                self._reset_task.cancel()
+            self._reset_task = self._hass.async_create_task(self._reset_source())
 
     def _maybe_apply_auto_intensity(self, beatgrid: BeatGrid | None) -> None:
         """When Auto intensity is selected, track the song's tempo to a level.
@@ -405,9 +417,10 @@ class SyncSession:
             return
         self._auto_level = target
         self._engine.set_mode(target)
-        # Mirror apply_settings: clear the flash-limiter's frozen anchor so the
+        # Mirror apply_settings: clear the flash-limiters' frozen anchors so the
         # new level settles to its own field instead of the previous level's.
         self._safety.reset()
+        self._safety_relaxed.reset()
         self._last_safe_t = None
 
     # -- drum-pad (manual beats) ----------------------------------------------
@@ -886,10 +899,10 @@ class SyncSession:
         dt = 0.025 if self._last_safe_t is None else max(0.0, now - self._last_safe_t)
         self._last_safe_t = now
         unrestrained = self._unrestrained()
-        if not unrestrained:
-            if self._was_unrestrained:
-                self._safety.reset()  # field history is stale after a bypass
-            colors = self._safety.process(colors, dt)
+        limiter = self._safety_relaxed if unrestrained else self._safety
+        if unrestrained != self._was_unrestrained:
+            limiter.reset()  # field history is stale after switching limiters
+        colors = limiter.process(colors, dt)
         self._was_unrestrained = unrestrained
         # Split large areas across packets (the bridge caps a packet at ~10 lights).
         for frame in self._encoder.build_packets(colors):
@@ -1001,6 +1014,7 @@ class SyncSession:
                 return False
             self._delay_buf.clear()  # drop stale frames buffered before the drop
             self._safety.reset()  # field history is stale after the gap
+            self._safety_relaxed.reset()
             self._last_safe_t = None
             _LOGGER.info("Reconnected DTLS stream for %s", self._config.name)
             return True
@@ -1196,7 +1210,10 @@ class SyncSession:
                 [tuple(round(v, 2) for v in c) for c in palette.colors],
             )
         elif palette is None:
-            _LOGGER.warning("Album-art extraction failed for %s (%s)", self._config.name, url)
+            _LOGGER.warning(
+                "Album-art extraction failed for %s (%s)",
+                self._config.name, redact_url(url),
+            )
             # Un-claim the track so it's retried (paced): a transient artwork
             # fetch failure must not strand the colours on the previous song.
             self._last_track = None
@@ -1350,6 +1367,18 @@ class SyncSession:
                 await asyncio.wait_for(asyncio.shield(task), timeout=3.0)
             except BaseException:  # noqa: BLE001 - cancelled/timeout/crash: proceed
                 pass
+        # In-flight background tasks (album-art extraction owns an ffmpeg
+        # subprocess; a player-switch source reset touches the source) must
+        # not outlive the session.
+        for bg in (self._art_task, self._reset_task):
+            if bg is not None and not bg.done():
+                bg.cancel()
+                try:
+                    await asyncio.wait_for(asyncio.shield(bg), timeout=2.0)
+                except BaseException:  # noqa: BLE001 - cancelled/timeout: proceed
+                    pass
+        self._art_task = None
+        self._reset_task = None
         try:
             await self._stream.stop()
         except Exception as err:  # noqa: BLE001

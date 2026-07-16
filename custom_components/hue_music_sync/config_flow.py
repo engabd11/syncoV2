@@ -21,6 +21,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from .const import (
     CONF_APP_KEY,
     CONF_AREAS,
+    CONF_BRIDGE_CERT,
     CONF_BRIDGE_ID,
     CONF_CLIENT_KEY,
     CONF_HOST,
@@ -68,6 +69,7 @@ class HueMusicSyncConfigFlow(ConfigFlow, domain=DOMAIN):
         self._app_key: str | None = None
         self._client_key: str | None = None
         self._bridge_id: str | None = None
+        self._bridge_cert: str | None = None
         self._configs: dict[str, str] = {}
         self._ssl_ctx: ssl.SSLContext | None = None
 
@@ -111,6 +113,15 @@ class HueMusicSyncConfigFlow(ConfigFlow, domain=DOMAIN):
             except (HueBridgeError, OSError):
                 errors["base"] = "cannot_connect"
             else:
+                # Pin the bridge's self-signed certificate now (trust-on-first-
+                # use): pairing is the trust ceremony (user pressed the physical
+                # button), so this is the moment to capture what to verify
+                # against from here on.
+                from . import _fetch_bridge_certificate
+
+                self._bridge_cert = await self.hass.async_add_executor_job(
+                    _fetch_bridge_certificate, self._host
+                )
                 bridge = HueBridge(session, self._host, self._app_key, await self._ctx())
                 try:
                     configs = await bridge.get_entertainment_configs()
@@ -135,6 +146,7 @@ class HueMusicSyncConfigFlow(ConfigFlow, domain=DOMAIN):
                     CONF_BRIDGE_ID: self._bridge_id,
                     CONF_APP_KEY: self._app_key,
                     CONF_CLIENT_KEY: self._client_key,
+                    CONF_BRIDGE_CERT: self._bridge_cert,
                     CONF_AREAS: user_input[CONF_AREAS],
                 },
             )

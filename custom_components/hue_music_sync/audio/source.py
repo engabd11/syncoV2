@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -24,7 +25,8 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 
-from ..const import ANALYSIS_HOP, ANALYSIS_SAMPLE_RATE, DOMAIN
+from ..const import ANALYSIS_HOP, ANALYSIS_SAMPLE_RATE, DOMAIN, FFMPEG_PROTOCOL_ARGS
+from ..util import redact_url
 from .analyzer import AnalysisFrame, Analyzer
 from .library_match import LibraryEntry, TrackQuery, best_match, build_index, query_key
 from .ma_stream import (
@@ -44,6 +46,12 @@ _LOGGER = logging.getLogger(__name__)
 # Resync if our decoded position drifts from the player by more than this.
 _DRIFT_RESYNC_S = 0.5
 _RESYNC_POLL_S = 1.0
+# Drift-only restarts (an ffmpeg re-open + seek each time) are cooled down:
+# base gap, exponential escalation cap, and how long a quiet stretch must be
+# before the escalation resets.
+_DRIFT_COOLDOWN_S = 3.0
+_DRIFT_COOLDOWN_MAX_S = 30.0
+_DRIFT_STREAK_RESET_S = 60.0
 _HOP_BYTES = ANALYSIS_HOP * 2  # s16le mono
 
 # The shared library index (see :class:`MaLibraryIndex`) lives in hass.data.
@@ -57,6 +65,11 @@ _INDEX_TTL_S = 1800.0
 _MISS_TTL_S = 600.0
 
 _MISS = object()  # cached negative result, distinct from "not looked up yet"
+
+# Ceiling on the memoised hit/miss maps. Hits are LRU-evicted, misses pruned of
+# expired entries — a long-lived HA process with a huge play history must not
+# grow these without bound.
+_MEMO_MAX = 512
 
 
 @dataclass(slots=True)
@@ -395,7 +408,9 @@ class MaLibraryIndex:
         self._index: dict[str, list[LibraryEntry]] | None = None
         self._built_at = 0.0
         self._lock = asyncio.Lock()
-        self._hits: dict[str, LibraryEntry] = {}
+        # LRU-bounded: one entry per unique song ever matched would otherwise
+        # grow for the lifetime of the HA process.
+        self._hits: OrderedDict[str, LibraryEntry] = OrderedDict()
         self._misses: dict[str, float] = {}
         self._tasks: dict[str, asyncio.Task] = {}
 
@@ -440,6 +455,7 @@ class MaLibraryIndex:
         key = query_key(query)
         hit = self._hits.get(key)
         if hit is not None:
+            self._hits.move_to_end(key)  # LRU touch
             return hit
         expires = self._misses.get(key)
         if expires is not None and time.monotonic() < expires:
@@ -464,12 +480,20 @@ class MaLibraryIndex:
             key = query_key(query)
             if entry is None:
                 self._misses[key] = time.monotonic() + _MISS_TTL_S
+                if len(self._misses) > _MEMO_MAX:
+                    now = time.monotonic()
+                    self._misses = {
+                        k: exp for k, exp in self._misses.items() if exp > now
+                    }
                 _LOGGER.debug(
                     "No Music Assistant library track matches %r by %r (%ss)",
                     query.title, query.artist, query.duration,
                 )
                 return None
             self._hits[key] = entry
+            self._hits.move_to_end(key)
+            while len(self._hits) > _MEMO_MAX:
+                self._hits.popitem(last=False)
             _LOGGER.info(
                 "Matched %r by %r to the library track %s",
                 query.title, query.artist, entry.signature,
@@ -553,7 +577,7 @@ class PcmDecoder:
 
     async def start(self, url: str, offset: float = 0.0) -> None:
         await self.stop()
-        args = [self._ffmpeg, "-nostdin", "-loglevel", "error"]
+        args = [self._ffmpeg, "-nostdin", "-loglevel", "error", *FFMPEG_PROTOCOL_ARGS]
         if offset > 0.05:
             args += ["-ss", f"{offset:.3f}"]
         args += [
@@ -561,7 +585,9 @@ class PcmDecoder:
             "-vn", "-ac", "1", "-ar", str(self._sr),
             "-f", "s16le", "-acodec", "pcm_s16le", "pipe:1",
         ]
-        _LOGGER.debug("ffmpeg decode: %s -i %s (ss=%.2f)", self._ffmpeg, url, offset)
+        _LOGGER.debug(
+            "ffmpeg decode: %s -i %s (ss=%.2f)", self._ffmpeg, redact_url(url), offset
+        )
         try:
             self._proc = await asyncio.create_subprocess_exec(
                 *args,
@@ -636,6 +662,8 @@ class MusicAssistantSource:
         self._frames_emitted = 0
         self._wall0 = 0.0
         self._last_resync_check = 0.0
+        self._last_drift_resync = 0.0
+        self._drift_streak = 0
         self._mass_cache = None
         self._mass_cache_ts = 0.0
         self._analyzer = Analyzer()
@@ -915,7 +943,10 @@ class MusicAssistantSource:
         )
         self._cand_meta = {url: (kind, fmt) for kind, fmt, url in variants}
         urls = [url for _kind, _fmt, url in variants]
-        _LOGGER.debug("[%s] MA stream candidates: %s", self._entity_id, urls)
+        _LOGGER.debug(
+            "[%s] MA stream candidates: %s",
+            self._entity_id, [redact_url(u) for u in urls],
+        )
         return urls
 
     def _absolute_url(self, path: str) -> str:
@@ -949,7 +980,10 @@ class MusicAssistantSource:
                 if meta is not None:
                     self._ma_kind, self._ma_fmt = meta  # reuse this variant on resync
                 if url != info.stream_url:
-                    _LOGGER.info("[%s] using alternate stream variant %s", self._entity_id, url)
+                    _LOGGER.info(
+                        "[%s] using alternate stream variant %s",
+                        self._entity_id, redact_url(url),
+                    )
                 self._analyzer.push(first)
                 self._frames_emitted += 1
                 return True
@@ -974,7 +1008,7 @@ class MusicAssistantSource:
         await self._decoder.start(url, start)
         _LOGGER.info(
             "Music sync tapping %s audio: %s (from %.1fs)",
-            self._entity_id, url, start,
+            self._entity_id, redact_url(url), start,
         )
 
     async def read_hop(self) -> np.ndarray | None:
@@ -1007,7 +1041,11 @@ class MusicAssistantSource:
     async def _maybe_resync(self, force: bool = False) -> bool:
         """Restart the decoder if the track changed or position drifted.
 
-        Returns False if nothing is playing.
+        Returns False if nothing is playing. Drift-only restarts are rate
+        limited with a growing cooldown: a player that reports a jumpy
+        ``media_position`` (some MA providers) would otherwise restart ffmpeg
+        on every poll, muting the tap far more than the drift itself would.
+        Track changes and end-of-stream restarts are never delayed.
         """
         info = self._resolve()
         if info is None:
@@ -1016,6 +1054,25 @@ class MusicAssistantSource:
         track_changed = info.track_id != self._track_id
         drift = abs(info.position + self._latency - decoded_pos)
         if force or track_changed or (not self._is_live and drift > _DRIFT_RESYNC_S):
+            if not force and not track_changed:
+                now = time.monotonic()
+                since = now - self._last_drift_resync
+                gap = min(
+                    _DRIFT_COOLDOWN_MAX_S,
+                    _DRIFT_COOLDOWN_S * (2 ** self._drift_streak),
+                )
+                if since < gap:
+                    return True  # keep playing; re-evaluate after the cooldown
+                # Back-to-back drift restarts escalate the cooldown; a quiet
+                # stretch resets it.
+                self._drift_streak = (
+                    min(self._drift_streak + 1, 4)
+                    if since < _DRIFT_STREAK_RESET_S
+                    else 0
+                )
+                self._last_drift_resync = now
+            else:
+                self._drift_streak = 0
             _LOGGER.debug(
                 "Resync %s (changed=%s drift=%.2fs)", self._entity_id, track_changed, drift
             )
