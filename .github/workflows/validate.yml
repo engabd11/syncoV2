@@ -47,8 +47,6 @@ jobs:
   tests-ha:
     name: Home Assistant harness tests (config flow)
     runs-on: ubuntu-latest
-    # New job - flip this off once it has proven green on CI.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python
