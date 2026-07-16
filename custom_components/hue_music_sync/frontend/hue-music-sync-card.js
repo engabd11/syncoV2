@@ -13,7 +13,7 @@
 // Cosmetic version (shown in the console banner). The browser cache-bust no
 // longer depends on this: the integration appends ?v=<content-hash> derived from
 // this file's bytes, so any edit is picked up without a manual hard refresh.
-const VERSION = "1.19.1";
+const VERSION = "1.19.2";
 
 /* ------------------------- Palette data ------------------------- */
 // Colour schemes from the integration, each a small gradient swatch.
@@ -356,30 +356,32 @@ const CARD_CSS = `
     backdrop-filter: blur(6px); border: 1px solid var(--hue-line); font-size: 12px; font-weight: 700; letter-spacing: .01em; }
   .hue-pill-dot { width: 7px; height: 7px; border-radius: 50%; }
   .hue-pill-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .hue-hero-now { position: relative; z-index: 2; display: flex; align-items: stretch; gap: 14px; margin-top: 26px; }
-  /* Right column fills the cover's height; the transport lives in its own
-     full-width centred row below, so the meta simply centres here. */
-  .hue-now-right { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: 10px; }
+  .hue-hero-now { position: relative; z-index: 2; display: flex; align-items: stretch; gap: 14px; margin-top: 22px; }
+  /* Right column fills the cover's height: title/artist pinned to the top
+     (aligned with the cover's top edge) and the transport pinned to the
+     bottom (aligned with the cover's bottom edge), so the block reads as one
+     compact unit instead of pushing the artwork/title up. */
+  .hue-now-right { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: space-between; gap: 10px; }
   .hue-now-toprow { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; min-width: 0; }
   .hue-bright-mini { display: inline-flex; align-items: center; gap: 5px; padding: 7px 11px; border-radius: 11px; background: #00000040;
     backdrop-filter: blur(6px); border: 1px solid var(--hue-line); font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; }
   .hue-bright-mini-icon { font-size: 12px; }
   .hue-amb-body { position: relative; padding: 16px 20px 20px; background: linear-gradient(180deg, #121120cc, #0f0e1c); }
 
-  /* -- transport row (full-width, buttons centred on the card, sized for
-        touch; the time readout sits at the right edge) -- */
-  .hue-transport { position: relative; z-index: 2; display: flex; align-items: center;
-    justify-content: center; gap: 14px; margin-top: 12px; min-height: 48px; }
-  .hue-tr-btn { width: 52px; height: 44px; border-radius: 14px; border: 1px solid var(--hue-line);
+  /* -- transport row (lives at the bottom of the now-playing right column,
+        aligned to the cover's bottom edge; the buttons flex to fill the band
+        and the time readout sits at the right edge) -- */
+  .hue-transport { position: relative; z-index: 2; display: flex; align-items: center; gap: 8px; }
+  .hue-tr-btn { flex: 1; min-width: 0; height: 42px; border-radius: 13px; border: 1px solid var(--hue-line);
     background: #00000040; color: var(--hue-text); cursor: pointer; transition: .15s;
     display: inline-flex; align-items: center; justify-content: center; backdrop-filter: blur(6px);
     touch-action: manipulation; }
   .hue-tr-btn:hover { background: #ffffff18; }
   .hue-tr-btn:active { transform: scale(.94); }
-  .hue-tr-btn.main { width: 64px; height: 48px; border-radius: 16px; background: #ffffff14; }
-  .hue-tr-time { position: absolute; right: 0; top: 50%; transform: translateY(-50%);
-    font-size: 11.5px; font-weight: 700; color: var(--hue-dim);
-    font-variant-numeric: tabular-nums; letter-spacing: .03em; }
+  .hue-tr-btn.main { flex: 1.35; background: #ffffff14; }
+  .hue-tr-time { flex: none; margin-left: 4px; min-width: 46px; text-align: right;
+    font-size: 11px; font-weight: 700; color: var(--hue-dim);
+    font-variant-numeric: tabular-nums; letter-spacing: .02em; }
 
   /* -- title marquee (long titles scroll once into view) -- */
   .hue-now-track { text-shadow: 0 1px 10px #000a; }
@@ -1268,12 +1270,9 @@ class HueMusicSyncCard extends HTMLElement {
     topRow.appendChild(brightMini);
     right.appendChild(topRow);
 
-    heroNow.appendChild(right);
-    hero.appendChild(heroNow);
-
-    // Transport row: a full-width strip under the now-playing block with the
-    // buttons centred on the card and sized for touch; the time readout keeps
-    // to the right edge.
+    // Transport row: sits at the bottom of the right column (aligned with the
+    // cover's bottom edge) so the artwork, title and controls form one compact
+    // block. The buttons flex to fill the band; the time keeps to the right.
     if (m.now.player) {
       const tr = document.createElement("div");
       tr.className = "hue-transport";
@@ -1312,10 +1311,13 @@ class HueMusicSyncCard extends HTMLElement {
       this._trTime = time;
       this._trDur = m.now.duration;
       tr.appendChild(time);
-      hero.appendChild(tr);
+      right.appendChild(tr);
     } else {
       this._trTime = null;
     }
+
+    heroNow.appendChild(right);
+    hero.appendChild(heroNow);
 
     // Song-structure timeline (energy silhouette + playhead), filled from the
     // live meta feed once the track map is known.
