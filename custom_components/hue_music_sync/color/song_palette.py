@@ -65,3 +65,40 @@ def dominant_pitch_class(chroma: np.ndarray) -> int:
     if c.size != 12 or c.max() <= 1e-9:
         return -1
     return int(np.argmax(c))
+
+
+# Live-path palette throttling: the per-frame chroma is noisy, so the room's
+# colour must only move on genuine harmonic shifts, never churn.
+_HOLD_MIN_S = 3.0    # absolute minimum time between palette applications
+_REFRESH_S = 8.0     # after this long, gentle drift may also re-anchor
+_CHANGE_BIG = 0.30   # cosine distance that counts as a real harmonic shift
+_CHANGE_SMALL = 0.10  # drift worth re-anchoring once _REFRESH_S has passed
+
+
+def chroma_distance(a, b) -> float:
+    """Cosine distance between two chroma vectors (0 = same key emphasis)."""
+    va = np.asarray(a, dtype=np.float64)
+    vb = np.asarray(b, dtype=np.float64)
+    na = float(np.linalg.norm(va))
+    nb = float(np.linalg.norm(vb))
+    if na <= 1e-12 or nb <= 1e-12:
+        return 1.0
+    return 1.0 - float(np.dot(va, vb)) / (na * nb)
+
+
+def should_update_palette(prev, cur, elapsed_s: float) -> bool:
+    """Should the live Song palette be re-derived from ``cur`` now?
+
+    ``prev`` is the chroma the current palette was built from (None = no
+    palette applied yet — always apply). Within ``_HOLD_MIN_S`` nothing moves;
+    a big harmonic shift applies immediately after that; small drift only
+    re-anchors once ``_REFRESH_S`` has passed. An unchanged key never churns.
+    """
+    if prev is None:
+        return True
+    if elapsed_s < _HOLD_MIN_S:
+        return False
+    d = chroma_distance(prev, cur)
+    if d > _CHANGE_BIG:
+        return True
+    return elapsed_s >= _REFRESH_S and d > _CHANGE_SMALL

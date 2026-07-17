@@ -161,6 +161,37 @@ class ModeParams:
     # The bass-content weight floor in kick_flash (was a hard-coded 0.4):
     # how much a bass-less onset may still flash.
     kick_bass_floor: float = 0.40
+    # Flash floor while the song has NO discernible beat (0..1): detected-onset
+    # flashes and waves scale between this and full with the engine's
+    # rhythm-confidence envelope (tempo lock, or broadband kicks while
+    # unlocked). The permissive club modes need it: their width/salience gates
+    # deliberately let nearly every onset through, so a beat-less passage
+    # (pads, vocals, ambience) otherwise strobes a dark room on false onsets.
+    # 1.0 = no gating (the strict modes' gates already handle this).
+    nobeat_flash: float = 1.0
+    # Pre-drop pull-down depth (0..1): how far the room tightens in the final
+    # moments before a drop (the classic pro-lighting anticipation — dim,
+    # desaturate, hold back the pulse, then detonate). Scales the brightness
+    # HEADROOM above the mode's floor, so a mode with base == floor is
+    # provably inert. 0 disables. Scheduled drops (track-map boundaries) ramp
+    # against their known ETA; the heuristic path commits conservatively (see
+    # engine._update_predrop).
+    predrop_depth: float = 0.0
+    # --- phrase-level evolution ------------------------------------------------
+    # Long steady sections shouldn't feel like a loop: every ``phrase_bars``
+    # locked bars the engine advances a phrase counter that cycles the wave
+    # origin around the room (centre/left/right), varies the colour-jump
+    # magnitude, and nudges the palette forward by ``phrase_colour_shift`` —
+    # all deterministic, so the variation is musical rather than random.
+    # 0 disables (Subtle stays perfectly steady).
+    phrase_bars: int = 0
+    phrase_colour_shift: float = 0.0
+    # --- stereo pan spatial mapping --------------------------------------------
+    # How strongly a lamp's melbank slice is weighted toward its side of the
+    # stereo field (frame.pan): a synth panned hard right brightens the
+    # right-hand lamps and fades from the left ones. 0 disables; frames
+    # without pan (mono taps, pre-v4 maps) always render exactly as before.
+    pan_gain: float = 0.0
 
 
 MODE_PARAMS: dict[SyncMode, ModeParams] = {
@@ -195,6 +226,8 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         energy_gain=0.15,
         melbank_gain=0.45, melbank_floor=0.06, colour_flow=0.05, spectral_pop=0.35,
         salience_gamma=1.3, width_min=0.15, kick_bass_floor=0.30,
+        predrop_depth=0.30, phrase_bars=4, phrase_colour_shift=0.03,
+        pan_gain=0.5,
     ),
     # The band on your lights: bass lights snap on kicks, guitar lights pop on
     # mid onsets, and vocal lights shimmer dimly with the singing — assignments
@@ -217,6 +250,8 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         energy_gain=0.15,
         melbank_gain=0.44, melbank_floor=0.035, colour_flow=0.05, spectral_pop=0.45,
         salience_gamma=1.0, width_min=0.12, kick_bass_floor=0.35,
+        predrop_depth=0.45, phrase_bars=4, phrase_colour_shift=0.05,
+        pan_gain=0.6,
     ),
     # UNRESTRAINED (eye-safety limiter bypassed - explicit user choice, see
     # effects/safety.py). The SAME smooth dim<->bright SWING as Extreme - the
@@ -238,7 +273,9 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         highlight_quantile=0.18, weak_pulse=0.42, downbeat_pulse=0.55,
         colour_jump=0.16, colour_spread=0.22, full_room_accent=0.0,
         melbank_gain=0.42, melbank_floor=0.06, colour_flow=0.05, spectral_pop=0.45,
-        salience_gamma=0.8, width_min=0.08,
+        salience_gamma=0.8, width_min=0.08, nobeat_flash=0.30,
+        predrop_depth=0.60, phrase_bars=4, phrase_colour_shift=0.06,
+        pan_gain=0.5,
     ),
     # UNRESTRAINED maximum club. The same quick dim<->bright SWING as Intense,
     # but a TRUE dark room: floor 0, so the quiet parts go black and every beat
@@ -258,7 +295,9 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         highlight_quantile=0.16, colour_jump=0.20, colour_spread=0.0,
         full_room_accent=0.0,
         melbank_gain=0.14, melbank_floor=0.0, colour_flow=0.03, spectral_pop=0.45,
-        salience_gamma=0.6, width_min=0.05,
+        salience_gamma=0.6, width_min=0.05, nobeat_flash=0.20,
+        predrop_depth=0.85, phrase_bars=4, phrase_colour_shift=0.08,
+        pan_gain=0.4,
     ),
 }
 
@@ -416,17 +455,45 @@ def _shimmer(t: float, cid: int) -> float:
 _MUSIC_GATE = 0.12
 
 
-def _melbank_drive(frame, env: dict[str, float], info: dict) -> float:
+def _pan_weighted_mean(
+    values, pan, lo: int, hi: int, side: float, gain: float
+) -> float:
+    """Mean of ``values[lo:hi]`` with each bin weighted toward this lamp's
+    side of the stereo field: a bin panned to the lamp's side counts up to
+    double, one panned away fades toward zero. Dividing by the bin count
+    (not the weight sum) keeps a centred mix EXACTLY the unweighted mean —
+    hard pans redistribute brightness across the room, never add to it.
+    """
+    total = 0.0
+    for k in range(lo, hi):
+        w = 1.0 + gain * pan[k] * side
+        if w < 0.0:
+            w = 0.0
+        elif w > 2.0:
+            w = 2.0
+        total += values[k] * w
+    return total / (hi - lo)
+
+
+def _melbank_drive(
+    frame, env: dict[str, float], info: dict, pan_gain: float = 0.0
+) -> float:
     """This lamp's continuous reactive level (0..~1) from its melbank slice.
 
     Falls back to the lamp's coarse band envelope when the analyzer did not
     populate a melbank (e.g. unit-test frames), so the continuous layer is
     always defined and the room never goes dark purely for lack of a melbank.
+    With stereo pan available, the slice is weighted toward the lamp's side
+    of the stereo field so panned instruments light the matching side.
     """
     mel = getattr(frame, "melbank", None)
     if mel:
         lo, hi = info["mel_lo"], info["mel_hi"]
         if hi > lo:
+            pan = getattr(frame, "pan", None)
+            if pan_gain > 0.0 and pan and len(pan) >= hi:
+                side = 2.0 * info["nx"] - 1.0
+                return _pan_weighted_mean(mel, pan, lo, hi, side, pan_gain)
             seg = mel[lo:hi]
             return sum(seg) / len(seg)
     return env.get(
@@ -611,7 +678,7 @@ def render(engine, frame) -> dict[int, tuple[RGB, float]]:
         drive = mids if (has_roles and role == ROLE_MID) else bass
         bri = base_term + p.bass_gain * drive * env_mul
         if p.melbank_gain:
-            mel_drive = _melbank_drive(frame, env, info)
+            mel_drive = _melbank_drive(frame, env, info, p.pan_gain)
             bri += (p.melbank_floor + p.melbank_gain * mel_drive) * music * env_mul
         if p.energy_gain:
             # The whole room follows the song's loudness contour together (the
@@ -619,10 +686,17 @@ def render(engine, frame) -> dict[int, tuple[RGB, float]]:
             bri += p.energy_gain * engine.energy_env
         if p.spectral_pop and tr:
             # Pop on a fresh attack anywhere in this lamp's slice of the spectrum
-            # (kick -> low lamps, snare -> low-mids, guitar -> mids, cymbal -> highs).
+            # (kick -> low lamps, snare -> low-mids, guitar -> mids, cymbal -> highs),
+            # pan-weighted so a panned hit pops the matching side of the room.
             lo, hi = info["mel_lo"], info["mel_hi"]
             if hi > lo:
-                bri += p.spectral_pop * (sum(tr[lo:hi]) / (hi - lo)) * music
+                pan = getattr(frame, "pan", None)
+                if p.pan_gain > 0.0 and pan and len(pan) >= hi:
+                    side = 2.0 * info["nx"] - 1.0
+                    pop = _pan_weighted_mean(tr, pan, lo, hi, side, p.pan_gain)
+                else:
+                    pop = sum(tr[lo:hi]) / (hi - lo)
+                bri += p.spectral_pop * pop * music
         if has_roles and role == ROLE_VOCAL:
             # The human flavour: a vocal lamp still reacts to the music (above),
             # then shimmers with the singing on top - softened a touch, but never
@@ -637,12 +711,13 @@ def render(engine, frame) -> dict[int, tuple[RGB, float]]:
             # Back/far lamps carry a gentle ambient wash; front lamps stay reactive.
             bri += p.depth_wash * (1.0 - info["ny"])
         if p.wave_gain and waves:
-            # Beat wavefront(s) sweeping out from the room's low centre. Vocal
-            # lights only catch a fraction, keeping their quiet identity.
-            d = info["dist_origin"]
+            # Beat wavefront(s) sweeping out from each wave's own origin (the
+            # phrase cycle moves it around the room). Vocal lights only catch
+            # a fraction, keeping their quiet identity.
+            dists = info["dist_origins"]
             amp = 0.0
             for w in waves:
-                amp += w.amplitude_at(d)
+                amp += w.amplitude_at(dists[w.origin_idx])
             part = 0.4 if (has_roles and role == ROLE_VOCAL) else 1.0
             bri += p.wave_gain * wave_mul * part * amp
         if p.shimmer and not has_roles:

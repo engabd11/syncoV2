@@ -59,6 +59,24 @@ def distance(a: tuple[float, float, float], b: tuple[float, float, float]) -> fl
     return math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2)
 
 
+def phrase_origins(
+    positions: dict[int, tuple[float, float, float]],
+) -> list[tuple[float, float, float]]:
+    """Deterministic wave-origin cycle for phrase-level variation.
+
+    Centre → left → right → centre, all at floor height, so waves sweep the
+    room from a different corner each musical phrase and the classic centred
+    bloom recurs every other phrase. Deterministic (no seed) so two runs of
+    the same song render identically.
+    """
+    centre = floor_origin(positions)
+    if not positions:
+        return [centre]
+    my = sum(p[1] for p in positions.values()) / len(positions)
+    mz = min(p[2] for p in positions.values())
+    return [centre, (0.15, my, mz), (0.85, my, mz), centre]
+
+
 @dataclass(slots=True)
 class Wave:
     """An expanding spherical pulse launched on a beat."""
@@ -68,6 +86,9 @@ class Wave:
     speed: float  # normalised units per second
     width: float  # thickness of the wavefront shell
     age: float = 0.0
+    # Which phrase origin this wave launched from (indexes the per-channel
+    # precomputed distances, so amplitude_at needs no per-frame sqrt).
+    origin_idx: int = 0
 
     def advance(self, dt: float, decay_tau: float) -> None:
         self.age += dt

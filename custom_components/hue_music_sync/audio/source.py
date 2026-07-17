@@ -575,11 +575,24 @@ def _ma_player_codec(player) -> str:
 
 
 class PcmDecoder:
-    """Wraps an ffmpeg subprocess decoding a URL to mono s16le PCM."""
+    """Wraps an ffmpeg subprocess decoding a URL to s16le PCM.
 
-    def __init__(self, ffmpeg_bin: str, sample_rate: int = ANALYSIS_SAMPLE_RATE) -> None:
+    ``channels=1`` is the classic mono tap. ``channels=2`` decodes stereo for
+    the pan feature; :meth:`read_hop` still returns the mono mid — identical
+    to what ``-ac 1`` produced — so every downstream consumer is unchanged,
+    and :meth:`read_hop_pair` exposes the (L, R) pair. Mono material decoded
+    at 2 channels duplicates L=R, so pan degrades safely to zero.
+    """
+
+    def __init__(
+        self,
+        ffmpeg_bin: str,
+        sample_rate: int = ANALYSIS_SAMPLE_RATE,
+        channels: int = 1,
+    ) -> None:
         self._ffmpeg = ffmpeg_bin
         self._sr = sample_rate
+        self._channels = max(1, min(2, channels))
         self._proc: asyncio.subprocess.Process | None = None
 
     async def start(self, url: str, offset: float = 0.0) -> None:
@@ -589,7 +602,7 @@ class PcmDecoder:
             args += ["-ss", f"{offset:.3f}"]
         args += [
             "-i", url,
-            "-vn", "-ac", "1", "-ar", str(self._sr),
+            "-vn", "-ac", str(self._channels), "-ar", str(self._sr),
             "-f", "s16le", "-acodec", "pcm_s16le", "pipe:1",
         ]
         _LOGGER.debug(
@@ -615,18 +628,35 @@ class PcmDecoder:
             _LOGGER.warning("ffmpeg could not open the stream: %s", err.splitlines()[-1])
 
     async def read_hop(self) -> np.ndarray | None:
-        """Read one hop of float32 samples (-1..1), or None at end of stream."""
+        """Read one hop of mono float32 samples (-1..1), or None at stream end.
+
+        A stereo decoder returns the mid (L+R)/2 — the same signal ``-ac 1``
+        would have produced — preserving the mono-parity invariant.
+        """
+        pair = await self.read_hop_pair()
+        if pair is None:
+            return None
+        l, r = pair
+        if l is r:  # mono decoder: no copy, no arithmetic
+            return l
+        return 0.5 * (l + r)
+
+    async def read_hop_pair(self) -> tuple[np.ndarray, np.ndarray] | None:
+        """Read one hop as an (L, R) pair (mono decoders return L is R)."""
         if self._proc is None or self._proc.stdout is None:
             return None
+        need = _HOP_BYTES * self._channels
         try:
-            raw = await self._proc.stdout.readexactly(_HOP_BYTES)
+            raw = await self._proc.stdout.readexactly(need)
         except asyncio.IncompleteReadError as err:
             raw = err.partial
-            if len(raw) < _HOP_BYTES:
+            if len(raw) < need:
                 await self._log_stderr_if_failed()
                 return None
         samples = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
-        return samples
+        if self._channels == 1:
+            return samples, samples
+        return samples[0::2], samples[1::2]
 
     async def stop(self) -> None:
         proc = self._proc
@@ -657,7 +687,9 @@ class MusicAssistantSource:
         self._hass = hass
         self._entity_id = entity_id
         self._latency = latency_ms / 1000.0
-        self._decoder = PcmDecoder(ffmpeg_bin)
+        # Stereo decode: pan (L/R spatial mapping) rides alongside the mono
+        # mid analysis; costs ~44 KB/s extra pipe bandwidth, nothing else.
+        self._decoder = PcmDecoder(ffmpeg_bin, channels=2)
         self._frame_period = ANALYSIS_HOP / ANALYSIS_SAMPLE_RATE
 
         self._track_id: str | None = None  # stream identity (drives decoder resync)
@@ -696,8 +728,8 @@ class MusicAssistantSource:
 
     async def read_frame(self) -> AnalysisFrame | None:
         """Read the next paced hop and turn it into analysis features."""
-        hop = await self.read_hop()
-        if hop is None:
+        pair = await self.read_hop_pair()
+        if pair is None:
             return None
         # Keep the display metadata (song id + album art) current so colours follow
         # track changes even within a continuous flow stream, where the decoder
@@ -706,7 +738,7 @@ class MusicAssistantSource:
         if now - self._meta_ts > 1.0:
             self._meta_ts = now
             self._refresh_meta()
-        return self._analyzer.push(hop)
+        return self._analyzer.push_stereo(*pair)
 
     def _refresh_meta(self) -> None:
         """Update the per-song id and album art from the player's live state."""
@@ -1019,7 +1051,15 @@ class MusicAssistantSource:
         )
 
     async def read_hop(self) -> np.ndarray | None:
-        """Return the next paced hop, resyncing on drift/track-change.
+        """Return the next paced mono hop (mid of the stereo pair)."""
+        pair = await self.read_hop_pair()
+        if pair is None:
+            return None
+        left, right = pair
+        return left if left is right else 0.5 * (left + right)
+
+    async def read_hop_pair(self) -> tuple[np.ndarray, np.ndarray] | None:
+        """Return the next paced (L, R) hop, resyncing on drift/track-change.
 
         Returns None when playback has stopped (caller should idle).
         """
@@ -1029,12 +1069,12 @@ class MusicAssistantSource:
             if not await self._maybe_resync():
                 return None
 
-        hop = await self._decoder.read_hop()
-        if hop is None:
+        pair = await self._decoder.read_hop_pair()
+        if pair is None:
             # Stream ended (track boundary); try to pick up the next track.
             if await self._maybe_resync(force=True):
-                hop = await self._decoder.read_hop()
-            if hop is None:
+                pair = await self._decoder.read_hop_pair()
+            if pair is None:
                 return None
 
         # Pace to wall clock so we don't outrun real playback.
@@ -1043,7 +1083,7 @@ class MusicAssistantSource:
         delay = target - time.monotonic()
         if delay > 0:
             await asyncio.sleep(delay)
-        return hop
+        return pair
 
     async def _maybe_resync(self, force: bool = False) -> bool:
         """Restart the decoder if the track changed or position drifted.

@@ -256,10 +256,12 @@ class SnapcastSource:
                     hdr, off = self._read_str(payload, off)
                     if header_bytes is None:
                         header_bytes = bytes(hdr)
+                        # Stereo decode so pan (L/R spatial mapping) rides
+                        # alongside the mono mid analysis (see _decode).
                         ff = subprocess.Popen(
                             [self._ffmpeg, "-nostdin", "-loglevel", "error",
                              "-f", codec.decode(), "-i", "pipe:0",
-                             "-ac", "1", "-ar", "22050", "-f", "s16le", "pipe:1"],
+                             "-ac", "2", "-ar", "22050", "-f", "s16le", "pipe:1"],
                             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             stderr=subprocess.DEVNULL,
                         )
@@ -303,13 +305,14 @@ class SnapcastSource:
                 sock.close()
 
     def _decode(self, ff: subprocess.Popen) -> None:
-        """Decoder thread: ffmpeg PCM -> analysis frames -> queue."""
+        """Decoder thread: ffmpeg stereo PCM -> analysis frames -> queue."""
+        need = _HOP_BYTES * 2  # interleaved stereo s16le
         while not self._stop.is_set():
-            raw = ff.stdout.read(_HOP_BYTES)
-            if len(raw) < _HOP_BYTES:
+            raw = ff.stdout.read(need)
+            if len(raw) < need:
                 break
-            hop = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
-            frame = self._analyzer.push(hop)
+            samples = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+            frame = self._analyzer.push_stereo(samples[0::2], samples[1::2])
             if self._frames.full():
                 try:
                     self._frames.get_nowait()

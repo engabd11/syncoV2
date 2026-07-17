@@ -111,6 +111,11 @@ class ColorScheme(StrEnum):
     """Selectable colour themes — smooth, harmonious palettes plus album art."""
 
     ALBUM_ART = "album_art"
+    # Album colours v2: the same faithful swatch extraction, but each colour
+    # carries its share of the cover (population weight) and the lights spend
+    # time on it proportionally — a 90% green / 10% red cover renders a green
+    # room that shifts to red in moments, not a 50/50 gradient.
+    ALBUM_ART_V2 = "album_art_v2"
     SONG = "song"  # colours derived from the song's own harmony (key/pitch -> hue)
     SUNSET = "sunset"
     OCEAN = "ocean"

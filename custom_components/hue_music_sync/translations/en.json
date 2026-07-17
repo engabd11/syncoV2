@@ -70,6 +70,7 @@
         "name": "Colour",
         "state": {
           "album_art": "Album colours",
+          "album_art_v2": "Album colours v2",
           "song": "Song colours",
           "sunset": "Sunset",
           "ocean": "Ocean",

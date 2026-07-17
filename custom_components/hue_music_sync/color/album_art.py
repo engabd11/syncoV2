@@ -215,8 +215,79 @@ def _kmeans_palette(pixels: np.ndarray, k: int = 5) -> list[RGB]:
     return out
 
 
-async def extract_palette(ffmpeg_bin: str, url: str, k: int = 5) -> Palette | None:
-    """Decode artwork at ``url`` with ffmpeg and return a vivid palette."""
+def _render_swatch(mean: np.ndarray, h: float, s: float, v: float) -> RGB:
+    """A cluster mean as a lighting colour, using the v1 faithful treatment."""
+    if s < _NEUTRAL_SAT:
+        return _tinted_white(mean, v)
+    return colorsys.hsv_to_rgb(h, s, max(_VALUE_FLOOR, v))
+
+
+def _kmeans_palette_v2(
+    pixels: np.ndarray, k: int = 4
+) -> tuple[list[RGB], list[float]]:
+    """Up to ``k`` cover colours with their population weights (v2).
+
+    Same perceptual clustering and faithful swatch treatment as v1, but
+    ranked purely by how much of the cover each colour occupies, and every
+    colour carries its share: near-duplicate hues merge (summing their
+    share), and once ``k`` swatches are picked the remaining clusters fold
+    their population into the closest pick — so the weights always describe
+    the WHOLE cover, and a 90% green / 10% red sleeve comes back as exactly
+    that.
+    """
+    if pixels.shape[0] == 0:
+        return [], []
+    _, _sat, luma = _rgb_to_hsv_components(pixels)
+    body = pixels[(luma >= 0.04) & (luma <= 0.98)]
+    if body.shape[0] < 6:
+        return _low_colour_fallback(pixels), [1.0]
+
+    lab = _rgb_to_lab(body)
+    n_clusters = min(14, body.shape[0], max(2 * k, 8))
+    labels = _kmeans(lab, n_clusters)
+
+    # (pop, h, s, v, rendered RGB) per non-empty cluster, most populous first.
+    swatches: list[tuple[float, float, float, float, RGB]] = []
+    total = float(body.shape[0])
+    for c in range(n_clusters):
+        members = body[labels == c]
+        if not members.shape[0]:
+            continue
+        mean = members.mean(axis=0)
+        h, s, v = colorsys.rgb_to_hsv(*mean)
+        pop = members.shape[0] / total
+        swatches.append((pop, h, s, v, _render_swatch(mean, h, s, v)))
+    if not swatches:
+        return _low_colour_fallback(pixels), [1.0]
+    swatches.sort(key=lambda t: -t[0])
+
+    # Greedy pick-and-merge: same-hue swatches pool their share; once k picks
+    # exist, everything else folds into its nearest pick by hue.
+    picked: list[list] = []  # [weight, h, s, RGB] (mutable weight)
+    for pop, h, s, _v, rgb in swatches:
+        merged = False
+        for slot in picked:
+            same_class = (s < _NEUTRAL_SAT) == (slot[2] < _NEUTRAL_SAT)
+            if same_class and _hue_distance(h, slot[1]) < _HUE_MIN_SEP:
+                slot[0] += pop
+                merged = True
+                break
+        if merged:
+            continue
+        if len(picked) < k:
+            picked.append([pop, h, s, rgb])
+        else:
+            nearest = min(picked, key=lambda slot: _hue_distance(h, slot[1]))
+            nearest[0] += pop
+    # Order by hue for smooth drift (v1 behaviour), weights travelling along.
+    picked.sort(key=lambda slot: colorsys.rgb_to_hsv(*slot[3])[0])
+    weights = [float(slot[0]) for slot in picked]
+    wsum = sum(weights) or 1.0
+    return [slot[3] for slot in picked], [w / wsum for w in weights]
+
+
+async def _decode_thumb(ffmpeg_bin: str, url: str) -> np.ndarray | None:
+    """Decode the artwork at ``url`` to an (N,3) float 0..1 pixel array."""
     args = [
         ffmpeg_bin, "-nostdin", "-loglevel", "error", *FFMPEG_PROTOCOL_ARGS, "-i", url,
         "-vf", f"scale={_THUMB}:{_THUMB}",
@@ -238,12 +309,34 @@ async def extract_palette(ffmpeg_bin: str, url: str, k: int = 5) -> Palette | No
         )
         return None
 
-    pixels = (
+    return (
         np.frombuffer(raw[:expected], dtype=np.uint8).astype(np.float32) / 255.0
     ).reshape(-1, 3)
+
+
+async def extract_palette(ffmpeg_bin: str, url: str, k: int = 5) -> Palette | None:
+    """Decode artwork at ``url`` with ffmpeg and return a vivid palette."""
+    pixels = await _decode_thumb(ffmpeg_bin, url)
+    if pixels is None:
+        return None
     colors = await asyncio.get_running_loop().run_in_executor(
         None, _kmeans_palette, pixels, k
     )
     if not colors:
         return None
     return Palette(colors)
+
+
+async def extract_weighted_palette(
+    ffmpeg_bin: str, url: str, k: int = 4
+) -> Palette | None:
+    """Album colours v2: the cover's colours weighted by their real share."""
+    pixels = await _decode_thumb(ffmpeg_bin, url)
+    if pixels is None:
+        return None
+    colors, weights = await asyncio.get_running_loop().run_in_executor(
+        None, _kmeans_palette_v2, pixels, k
+    )
+    if not colors:
+        return None
+    return Palette(colors, weights=weights)

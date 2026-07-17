@@ -55,6 +55,7 @@ from .analyzer import (
     LONG_FLUX_FLOOR_FRAC,
     AnalysisFrame,
     band_means,
+    chroma_projection,
     log_spectrum,
     make_melbank,
     make_onset_filterbank,
@@ -101,13 +102,15 @@ _MIN_AUDIO_RMS = 1e-4
 # files are ignored rather than mis-read. Stored in each .npz's ``meta`` row.
 # v2: per-frame onset width (``f_width``) + long-horizon floor on mid picks.
 # v3: detected-onset arrays for gridless (ambient) maps + the ``diag`` row.
-# v2 files load fine (their layout is a strict subset and every v2 map was
-# grid-usable by construction), so a format bump does NOT silently un-warm the
-# library. Any FUTURE incompatible bump must either extend _COMPAT_FORMATS or
-# add a one-time format scan to the pre-warm — has_disk() deliberately never
-# opens files, so it cannot tell a stale format from a fresh one.
-_CACHE_FORMAT = 3
-_COMPAT_FORMATS = frozenset({2, 3})
+# v4: per-frame stereo pan (``f_pan``, int8-quantised melbank balance).
+# Older files load fine (their layout is a strict subset; pan is simply absent
+# and the engine renders exactly as before pan existed), so a format bump does
+# NOT silently un-warm the pre-analysed library — no rescan, ever. Any FUTURE
+# incompatible bump must either extend _COMPAT_FORMATS or add a one-time format
+# scan to the pre-warm — has_disk() deliberately never opens files, so it
+# cannot tell a stale format from a fresh one.
+_CACHE_FORMAT = 4
+_COMPAT_FORMATS = frozenset({2, 3, 4})
 
 # Offline mid picks narrower than this across the SuperFlux filterbank are
 # dropped as vocal/tonal (see AnalysisFrame.onset_width). Deliberately at the
@@ -227,6 +230,11 @@ class TrackFeatures:
     # AnalysisFrame.onset_width), already 0..1 so not normalised. Empty on
     # older analyses (frame_at then reports the neutral 1.0).
     width: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float32))
+    # Per-frame stereo pan (n_frames, MELBANK_BINS), int8-quantised
+    # round(pan*127): -127 hard left .. +127 hard right. Empty on pre-v4
+    # analyses and mono decodes (frame_at then reports no pan — mono render).
+    # Compresses to near-nothing in the .npz for centred masters.
+    pan: np.ndarray = field(default_factory=lambda: np.zeros((0, 0), dtype=np.int8))
 
 
 @dataclass(slots=True)
@@ -309,7 +317,7 @@ class TrackMap:
                 "f_bands": f.bands, "f_energy": f.energy, "f_flux": f.flux,
                 "f_bass_flux": f.bass_flux, "f_mid_flux": f.mid_flux,
                 "f_centroid": f.centroid, "f_melbank": f.melbank,
-                "f_width": f.width,
+                "f_width": f.width, "f_pan": f.pan,
             })
         tmp = Path(path).with_suffix(".npz.tmp")
         with open(tmp, "wb") as fh:
@@ -341,7 +349,12 @@ class TrackMap:
                         bands=z["f_bands"], energy=z["f_energy"], flux=z["f_flux"],
                         bass_flux=z["f_bass_flux"], mid_flux=z["f_mid_flux"],
                         centroid=z["f_centroid"], melbank=z["f_melbank"],
-                        width=z["f_width"])
+                        width=z["f_width"],
+                        # Pre-v4 files have no pan row: mono render, as before.
+                        pan=(
+                            z["f_pan"] if "f_pan" in z
+                            else np.zeros((0, 0), dtype=np.int8)
+                        ))
                 return cls(
                     duration=float(meta[0]), bpm=float(meta[1]),
                     confidence=float(meta[2]), beats=z["beats"],
@@ -422,6 +435,7 @@ class TrackMap:
             # once), so map playback gets the same proportional reactions.
             salience=float(f.energy[i]),
             onset_width=float(f.width[i]) if f.width.shape[0] > i else 1.0,
+            pan=(f.pan[i] / 127.0).tolist() if f.pan.shape[0] > i else [],
         )
 
     def grid_at(self, pos: float, prev_pos: float | None = None) -> BeatGrid | None:
@@ -501,19 +515,10 @@ class TrackMap:
 
 # Chroma (pitch-class) range: fundamentals from ~A1 to ~D8. Below/above this,
 # bins are mostly hum, percussion noise or harmonics that muddy the key.
+# (The projection itself now lives in analyzer.chroma_projection, shared with
+# the live path, which uses a narrower range suited to per-frame estimates.)
 _CHROMA_FMIN = 55.0
 _CHROMA_FMAX = 5000.0
-
-
-def _chroma_projection(freqs: np.ndarray) -> np.ndarray:
-    """``(n_bins, 12)`` matrix folding FFT bins into pitch classes (0=C..11=B)."""
-    proj = np.zeros((freqs.size, 12), dtype=np.float32)
-    for b in range(freqs.size):
-        f = float(freqs[b])
-        if _CHROMA_FMIN <= f <= _CHROMA_FMAX:
-            midi = 69.0 + 12.0 * np.log2(f / 440.0)
-            proj[b, int(round(midi)) % 12] = 1.0
-    return proj
 
 
 class EnvelopeExtractor:
@@ -539,7 +544,7 @@ class EnvelopeExtractor:
         # Continuous melbank (same filterbank as the live analyzer) + chroma
         # projection, both precomputed once per analysis.
         self._mel_starts, self._mel_counts = make_melbank(freqs.astype(np.float32))
-        self._chroma_proj = _chroma_projection(freqs)
+        self._chroma_proj = chroma_projection(freqs, _CHROMA_FMIN, _CHROMA_FMAX)
         self.melbank: list[np.ndarray] = []  # per-frame melbank means
         self.chroma: list[np.ndarray] = []  # per-frame 12-bin chromagram
         self._freqs = freqs.astype(np.float32)
@@ -564,6 +569,38 @@ class EnvelopeExtractor:
         self.bands: list[np.ndarray] = []  # linear filterbank means per frame
         self.named_bands: list[np.ndarray] = []  # the 5 output bands per frame
         self.centroid: list[float] = []
+        # Stereo pan inputs (push_stereo only): raw per-frame L/R melbank
+        # means, turned into the smoothed quantised pan by _build_features.
+        self.mel_l: list[np.ndarray] = []
+        self.mel_r: list[np.ndarray] = []
+        self._tail_l = np.zeros(0, dtype=np.float32)
+        self._tail_r = np.zeros(0, dtype=np.float32)
+
+    def push_stereo(self, left: np.ndarray, right: np.ndarray) -> None:
+        """Analyse the mid downmix, plus per-frame L/R melbank means for pan.
+
+        The mid (L+R)/2 is exactly what the mono ``-ac 1`` decode produced, so
+        every existing feature and threshold is unchanged; the side channels
+        only feed the pan. Framing mirrors :meth:`push` (same window/hop and
+        tail handling), so the pan rows stay 1:1 with the feature frames.
+        """
+        self.push(0.5 * (left + right))
+        self._tail_l = self._push_side(left, self._tail_l, self.mel_l)
+        self._tail_r = self._push_side(right, self._tail_r, self.mel_r)
+
+    def _push_side(
+        self, samples: np.ndarray, tail: np.ndarray, out: list[np.ndarray]
+    ) -> np.ndarray:
+        buf = np.concatenate([tail, samples]) if tail.size else samples
+        if buf.size < self._window:
+            return buf
+        n_frames = 1 + (buf.size - self._window) // self._hop
+        frames = np.lib.stride_tricks.sliding_window_view(buf, self._window)[
+            :: self._hop
+        ][:n_frames]
+        mags = np.abs(np.fft.rfft(frames * self._hann, axis=1)).astype(np.float32)
+        out.extend(band_means(mags, self._mel_starts, self._mel_counts))
+        return buf[n_frames * self._hop :].copy()
 
     def push(self, samples: np.ndarray) -> None:
         buf = np.concatenate([self._tail, samples]) if self._tail.size else samples
@@ -1362,7 +1399,29 @@ def _build_features(
         centroid=np.asarray(ex.centroid, dtype=np.float32),
         melbank=_build_melbank(np.asarray(ex.melbank, dtype=np.float32)),
         width=np.asarray(ex.width, dtype=np.float32),  # already 0..1
+        pan=_build_pan(ex),
     )
+
+
+def _build_pan(ex: EnvelopeExtractor) -> np.ndarray:
+    """Smoothed, int8-quantised per-frame melbank pan from the L/R means.
+
+    Same ~100 ms symmetric smoothing as the live pan filter, so map replay
+    and the live tap agree. Empty when the analysis was mono (analyze_pcm)
+    or a side path produced no frames.
+    """
+    if not ex.mel_l or not ex.mel_r:
+        return np.zeros((0, 0), dtype=np.int8)
+    n = min(len(ex.mel_l), len(ex.mel_r), len(ex.rms))
+    left = np.asarray(ex.mel_l[:n], dtype=np.float32)
+    right = np.asarray(ex.mel_r[:n], dtype=np.float32)
+    pan = np.clip((right - left) / (right + left + 1e-9), -1.0, 1.0)
+    smooth = ExpFilter(
+        np.zeros(pan.shape[1], dtype=np.float32), alpha_rise=0.25, alpha_decay=0.25
+    )
+    for i in range(n):
+        pan[i] = smooth.update(pan[i])
+    return np.round(pan * 127.0).astype(np.int8)
 
 
 def _decode_and_analyze(ffmpeg_bin: str, url: str, max_seconds: float) -> MapResult:
@@ -1376,7 +1435,9 @@ def _decode_and_analyze(ffmpeg_bin: str, url: str, max_seconds: float) -> MapRes
         ffmpeg_bin, "-nostdin", "-loglevel", "error", *FFMPEG_PROTOCOL_ARGS,
         "-i", url,
         "-t", f"{max_seconds:.0f}",
-        "-vn", "-ac", "1", "-ar", str(ANALYSIS_SAMPLE_RATE),
+        # Stereo decode: pan analysis rides alongside; the mid (L+R)/2 feeds
+        # the same feature path the old mono decode did.
+        "-vn", "-ac", "2", "-ar", str(ANALYSIS_SAMPLE_RATE),
         "-f", "f32le", "-acodec", "pcm_f32le", "pipe:1",
     ]
     try:
@@ -1391,11 +1452,14 @@ def _decode_and_analyze(ffmpeg_bin: str, url: str, max_seconds: float) -> MapRes
     try:
         assert proc.stdout is not None
         while True:
-            raw = proc.stdout.read(1 << 18)  # 256 KiB ~ 3 s of audio
+            # 256 KiB ~ 1.5 s of stereo audio; a multiple of 8 bytes, so a
+            # chunk never splits an interleaved L/R f32 sample pair.
+            raw = proc.stdout.read(1 << 18)
             if not raw:
                 break
             n_bytes += len(raw)
-            ex.push(np.frombuffer(raw, dtype="<f4"))
+            samples = np.frombuffer(raw[: len(raw) & ~7], dtype="<f4")
+            ex.push_stereo(samples[0::2], samples[1::2])
     finally:
         try:
             proc.stdout.close()  # type: ignore[union-attr]
@@ -1412,7 +1476,7 @@ def _decode_and_analyze(ffmpeg_bin: str, url: str, max_seconds: float) -> MapRes
                 pass
         proc.kill()
         proc.wait()
-    decoded = (n_bytes / 4 / ANALYSIS_SAMPLE_RATE) >= _MIN_DECODE_S  # 4 bytes/f32
+    decoded = (n_bytes / 8 / ANALYSIS_SAMPLE_RATE) >= _MIN_DECODE_S  # 2ch f32 = 8 B/frame
     # "complete" = ffmpeg reached end-of-stream without complaining: only then
     # is an unusable analysis a fact about the MUSIC rather than the fetch, so
     # only then may the caller mark the track permanently failed.

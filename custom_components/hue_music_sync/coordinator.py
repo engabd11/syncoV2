@@ -39,8 +39,9 @@ from .audio.structure import StructureTracker
 from .audio.tempo import BeatGrid, TempoTracker
 from .audio.track_index import TrackIndex
 from .audio.trackmap import Section, TrackMapper
-from .color.album_art import extract_palette
+from .color.album_art import extract_palette, extract_weighted_palette
 from .color.palette import Palette
+from .color.song_palette import palette_from_chroma, should_update_palette
 from .const import (
     ANALYSIS_HOP,
     ANALYSIS_SAMPLE_RATE,
@@ -114,12 +115,28 @@ _DRUM_WINDOW_S = 4.0
 # than switching mid-song, and the freshly-analysed map is cached for next time.
 _MAP_COMMIT_WINDOW_S = 6.0
 
+# Scheduled pre-drop window: how far ahead of a clearly-louder section boundary
+# the engine is told a drop is coming (structure.drop_imminent + drop_eta_s).
+# ~1 bar at 120 BPM — long enough for the pre-drop pull-down to read as
+# deliberate tension, short enough that it always resolves.
+_PREDROP_WINDOW_S = 2.0
+
 # Album-art refresh: how long to wait for a new track's entity_picture to
 # catch up with its title (HA writes them in separate state updates) before
 # accepting an unchanged URL as "this track genuinely reuses the artwork",
 # and how long to back off before retrying a failed extraction.
 _ART_URL_GRACE_S = 6.0
 _ART_RETRY_S = 10.0
+
+# The colour schemes driven by album-art extraction (v1: hue-diverse gradient;
+# v2: the cover's colours weighted by their real share of the artwork).
+_ALBUM_SCHEMES = (ColorScheme.ALBUM_ART, ColorScheme.ALBUM_ART_V2)
+
+# Live Song colours (tracks with no offline map): per-frame chroma EMA with a
+# ~7 s time-constant at 50 fps, and a warm-up before the first palette so a
+# few noisy seconds can't pick the key.
+_CHROMA_ALPHA = 0.003
+_CHROMA_WARMUP_FRAMES = 150  # ~3 s
 
 
 def trackmap_cache_dir(hass) -> str:
@@ -318,6 +335,15 @@ class SyncSession:
         self._upgrade_interval = _META_UPGRADE_START_S
         self._prefetch_key: str | None = None  # next-track map already requested
         self._drum_until = 0.0  # drum-pad mode active while monotonic() < this
+        # Live Song colours (no offline map): slow chroma/centroid EMA, what
+        # the current palette was built from, and whether a map section
+        # palette owns the colour this track (the map always wins).
+        self._chroma_ema: list[float] | None = None
+        self._chroma_frames = 0
+        self._centroid_ema = 0.5
+        self._chroma_applied: list[float] | None = None
+        self._chroma_applied_at = 0.0
+        self._song_palette_from_map = False
 
     @property
     def settings(self) -> AreaSettings:
@@ -416,6 +442,10 @@ class SyncSession:
             self._art_grace = None
             self._art_retry_at = 0.0
             self._map_section = None  # re-apply Song section palette on next poll
+            # Live Song colours restart cleanly too (the map reclaims first).
+            self._chroma_applied = None
+            self._chroma_applied_at = 0.0
+            self._song_palette_from_map = False
         if settings.media_player != prev.media_player:
             # Player changed: drop the current source so the loop re-opens it on
             # the new one. Unconditional (a no-op without a source) because it
@@ -466,10 +496,10 @@ class SyncSession:
         self._engine.manual_flash(group, strength)
 
     def _apply_colour(self) -> None:
-        # Preset themes are static palettes. Album art and Song are dynamic
-        # (extracted per track / per section), and keep the engine fallback
-        # palette until their colours are ready.
-        if self._settings.colour not in (ColorScheme.ALBUM_ART, ColorScheme.SONG):
+        # Preset themes are static palettes. Album art (v1/v2) and Song are
+        # dynamic (extracted per track / per section), and keep the engine
+        # fallback palette until their colours are ready.
+        if self._settings.colour not in (*_ALBUM_SCHEMES, ColorScheme.SONG):
             self._engine.set_scheme(self._settings.colour)
 
     def _reset_rhythm_models(self) -> None:
@@ -763,10 +793,13 @@ class SyncSession:
                         continue
 
                     self._maybe_refresh_album_art()
+                    if self._settings.colour == ColorScheme.SONG and frame.chroma:
+                        self._update_live_chroma(frame)
                     if now - self._map_check >= 1.0:
                         self._map_check = now
                         self._maybe_track_map()
                         self._maybe_prefetch_next()
+                        self._maybe_live_song_palette(now)
                         # A metadata fallback shouldn't be a life sentence: on a
                         # track change, drop it and re-evaluate the better
                         # sources (the next track may be tappable/analysable).
@@ -796,6 +829,13 @@ class SyncSession:
                         self._map_prev_pos = None
                         self._map_section = None
                         self._map_commit = None  # re-decide the regime per track
+                        # Fresh live-chroma state: the new song picks its own
+                        # key, and the map (if it arrives) reclaims the colour.
+                        self._chroma_ema = None
+                        self._chroma_frames = 0
+                        self._chroma_applied = None
+                        self._chroma_applied_at = 0.0
+                        self._song_palette_from_map = False
                     # Causal beat grid (always running; the fallback rhythm model).
                     beatgrid = self._tempo.update(
                         frame.t_audio, frame.flux, frame.beat, frame.beat_strength,
@@ -1171,10 +1211,11 @@ class SyncSession:
             boundary = tm.next_boundary(pos)
             if (
                 boundary is not None
-                and boundary[0] <= 1.5
+                and boundary[0] <= _PREDROP_WINDOW_S
                 and boundary[1] > section.energy + 0.15
             ):
                 structure.drop_imminent = True
+                structure.drop_eta_s = boundary[0]
             if (
                 prev is not None
                 and section is not prev
@@ -1192,13 +1233,57 @@ class SyncSession:
                 palette = Palette(list(section.palette))
                 self._engine.set_palette(palette)
                 self._album_hex = self._palette_to_hex(palette)
+                # The map's per-section harmony owns the Song colour for the
+                # rest of this track; the live-chroma path stands down.
+                self._song_palette_from_map = True
                 self._maybe_publish()
         self._map_section = section
         return grid
 
+    def _update_live_chroma(self, frame) -> None:
+        """Fold this frame's chroma/centroid into the slow live EMA (~7 s)."""
+        c = frame.chroma
+        if self._chroma_ema is None or len(self._chroma_ema) != len(c):
+            self._chroma_ema = list(c)
+        else:
+            ema = self._chroma_ema
+            for i, v in enumerate(c):
+                ema[i] += (v - ema[i]) * _CHROMA_ALPHA
+        self._centroid_ema += (frame.centroid - self._centroid_ema) * _CHROMA_ALPHA
+        self._chroma_frames += 1
+
+    def _maybe_live_song_palette(self, now: float) -> None:
+        """Song colours from the LIVE chroma when no track map supplies them.
+
+        The offline map's per-section palettes always take precedence — this
+        only fills in for tracks that never got one (radio, untappable or
+        unanalysed songs), so harmony-driven colour works everywhere. Applies
+        are throttled (see should_update_palette) so the room's colour moves
+        on genuine harmonic shifts, never churns.
+        """
+        if (
+            self._settings.colour != ColorScheme.SONG
+            or self._song_palette_from_map
+            or self._chroma_ema is None
+            or self._chroma_frames < _CHROMA_WARMUP_FRAMES
+        ):
+            return
+        if not should_update_palette(
+            self._chroma_applied, self._chroma_ema, now - self._chroma_applied_at
+        ):
+            return
+        palette = palette_from_chroma(self._chroma_ema, self._centroid_ema)
+        if palette is None:
+            return
+        self._engine.set_palette(palette)
+        self._album_hex = self._palette_to_hex(palette)
+        self._chroma_applied = list(self._chroma_ema)
+        self._chroma_applied_at = now
+        self._maybe_publish()
+
     def _maybe_refresh_album_art(self) -> None:
-        # Only when the Album colour is selected; preset themes are static.
-        if self._settings.colour != ColorScheme.ALBUM_ART or self._source is None:
+        # Only when an Album colour (v1 or v2) is selected; presets are static.
+        if self._settings.colour not in _ALBUM_SCHEMES or self._source is None:
             return
         now = time.monotonic()
         if now < self._art_retry_at:
@@ -1235,15 +1320,20 @@ class SyncSession:
         self._art_task = self._hass.async_create_task(self._extract_art(url))
 
     async def _extract_art(self, url: str) -> None:
-        palette = await extract_palette(self._ffmpeg, url)
-        if palette is not None and self._settings.colour == ColorScheme.ALBUM_ART:
+        scheme = self._settings.colour
+        if scheme == ColorScheme.ALBUM_ART_V2:
+            palette = await extract_weighted_palette(self._ffmpeg, url)
+        else:
+            palette = await extract_palette(self._ffmpeg, url)
+        if palette is not None and self._settings.colour == scheme:
             self._engine.set_palette(palette)
             self._album_hex = self._palette_to_hex(palette)
             self._maybe_publish()  # surface the new album colours to cards at once
             _LOGGER.info(
-                "Album colours for %s: %s",
+                "Album colours for %s: %s (weights %s)",
                 self._config.name,
                 [tuple(round(v, 2) for v in c) for c in palette.colors],
+                [round(w, 2) for w in palette.weights] if palette.weights else None,
             )
         elif palette is None:
             _LOGGER.warning(

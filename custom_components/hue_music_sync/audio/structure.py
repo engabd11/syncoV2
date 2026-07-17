@@ -39,6 +39,11 @@ class StructureState:
     build_progress: float = 0.0  # 0..1 tension through a build
     drop_now: bool = False  # the single frame a drop lands
     drop_imminent: bool = False  # a drop is expected very soon
+    # Seconds until a *scheduled* drop (a louder section boundary known from
+    # the offline track map). < 0 means unknown — the heuristic path only sets
+    # the boolean. The engine's pre-drop choreography deepens as this counts
+    # down, so the pull-down lands exactly against the boundary.
+    drop_eta_s: float = -1.0
     breakdown: bool = False
     # Filled in from the offline track map when one is available: the current
     # section's loudness relative to the track's peak (1.0 when unknown), so

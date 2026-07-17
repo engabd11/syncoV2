@@ -49,6 +49,7 @@ from .spatial import (
     height_band,
     melbank_window,
     normalize_positions,
+    phrase_origins,
 )
 
 _FLASH_DECAY = 0.80  # default per-frame fade of the beat flash (modes override)
@@ -89,6 +90,45 @@ _PRESENCE_FALL = 0.008
 # within this phase distance of an eighth slot (on-beat or off-beat) pass,
 # syllables and ornaments floating between slots do not.
 _EIGHTH_PHASE = 0.12
+
+# Rhythm confidence: evidence the song currently HAS an actual beat, gating the
+# unlocked (detected-onset) flash path in the permissive club modes (see
+# ModeParams.nobeat_flash). A locked tempo grid is proof — dense mixes with
+# buried kicks still lock — so it rises fast while locked; unlocked, only
+# clearly broadband onsets (real kicks, per the width calibration in
+# MODE_PARAMS) count, one jump per event since onsets are single frames. It
+# decays over a few seconds so a beat-less passage softens the flashes to the
+# mode's floor instead of strobing a dark room, and a returning beat recovers
+# within a couple of real kicks.
+_RHYTHM_RISE = 0.10        # per-frame rise toward 1 while locked (~0.5 s)
+_RHYTHM_EVENT_RISE = 0.35  # rise per qualifying unlocked kick (sparse events)
+_RHYTHM_FALL = 0.006       # per-frame decay (half-life ~2.3 s at 50 fps)
+# Onset-width span for unlocked kick evidence: sung vowels measure ~0.11-0.13,
+# an isolated sine kick ~0.49 (see the width ladder in modes.MODE_PARAMS).
+_RHYTHM_W_LO = 0.13
+_RHYTHM_W_HI = 0.40
+
+# Pre-drop anticipation (ModeParams.predrop_depth): the room pulls in during
+# the final moments before a drop, then detonates out of the held-back
+# tension. A *scheduled* drop (track-map section boundary, drop_eta_s known)
+# is trusted immediately and the envelope deepens as the ETA counts down over
+# _PREDROP_RAMP_S. The *heuristic* flag (a build that nearly maxed out) is
+# treated with suspicion: it must persist _PREDROP_CONFIRM frames to commit,
+# is capped at _PREDROP_HEUR_CAP depth, eases out if no drop lands within
+# _PREDROP_TIMEOUT_S, and then blocks re-commits for _PREDROP_REFRACTORY_S —
+# a flickering build detector can never repeatedly dim the room.
+_PREDROP_RAMP_S = 1.2      # scheduled: full depth this many seconds before the boundary
+_PREDROP_CONFIRM = 10      # heuristic: consecutive frames (~200 ms) before committing
+_PREDROP_HEUR_CAP = 0.6    # heuristic: max envelope (the map path may reach 1.0)
+_PREDROP_TIMEOUT_S = 3.0   # commit with no drop: ease back out after this long
+_PREDROP_REFRACTORY_S = 8.0  # and ignore the heuristic flag for this long after
+_PREDROP_RISE = 0.10       # max envelope rise per frame (~0.2 s to full)
+_PREDROP_FALL = 0.04       # ease-out rate on timeout (drops snap to 0 instead)
+
+# Phrase-level colour-jump variation (ModeParams.phrase_bars): each phrase the
+# per-beat jump magnitude cycles through these multipliers — subtle, seed-free
+# and repeatable, so long steady sections evolve without feeling random.
+_PHRASE_JUMP = (1.0, 0.85, 1.15, 0.95)
 
 # Brightness and colour smoothing are per-mode (ModeParams.bri_attack/bri_decay
 # and colour_lerp): club modes snap up hard and fall fast; Movie eases gently.
@@ -134,6 +174,9 @@ class EffectEngine:
         n = len(order)
         positions = normalize_positions(channels)  # (nx, ny, nz) in 0..1
         self._origin = floor_origin(positions)
+        # Phrase-cycled wave origins (centre/left/right/centre) with the
+        # per-channel distances precomputed for each.
+        self._origins = phrase_origins(positions)
         self.cmap: dict[int, dict] = {}
         for rank, ch in enumerate(order):
             nx, ny, nz = positions[ch.channel_id]
@@ -151,6 +194,9 @@ class EffectEngine:
                 "nz": nz,
                 "hband": height_band(nz),  # frequency band by lamp height
                 "dist_origin": distance((nx, ny, nz), self._origin),
+                "dist_origins": [
+                    distance((nx, ny, nz), o) for o in self._origins
+                ],
                 "mel_lo": mel_lo,
                 "mel_hi": mel_hi,
             }
@@ -172,6 +218,18 @@ class EffectEngine:
         self._energy_env: float = 0.0
         # Fast-decaying loudness peak-hold for the silence gate (see _GATE_DECAY).
         self._loud: float = 0.0
+        # Rhythm confidence 0..1 (see the _RHYTHM_* constants): does the song
+        # currently have an actual beat? Gates the unlocked flash path.
+        self._rhythm_conf: float = 0.0
+        # Pre-drop pull-down state (see the _PREDROP_* constants).
+        self._predrop = 0.0          # rendered envelope 0..1
+        self._predrop_commit = False
+        self._predrop_streak = 0     # heuristic confirm counter
+        self._predrop_commit_t = 0.0
+        self._predrop_block_until = 0.0
+        # Depth held at the moment a drop landed (consumed the same frame by
+        # the drop swell: a deeper pull-down earns a bigger detonation).
+        self.predrop_released = 0.0
         # Per-bin melbank baseline + transient: the slow EMA tracks each band's
         # sustained level, and the transient is how far the band has jumped above
         # it right now. Every lamp pops on transients in *its* slice of the
@@ -185,6 +243,11 @@ class EffectEngine:
         self.roles = {}
         self._role_offset = 0
         self._beats_seen = 0
+        # Phrase-level evolution: locked downbeats advance the bar count; every
+        # phrase_bars bars the phrase index cycles the wave origin and the
+        # colour-jump magnitude (see _update_phrase).
+        self._bar_count = 0
+        self._phrase = 0
 
     @property
     def band_env(self) -> dict[str, float]:
@@ -207,6 +270,84 @@ class EffectEngine:
         self._energy_env += (frame.energy - self._energy_env) * a
         # Fast peak-hold for the silence gate.
         self._loud = max(frame.energy, self._loud * _GATE_DECAY)
+
+    def _update_rhythm_conf(self, frame: AnalysisFrame, beatgrid) -> None:
+        """Track evidence that the song currently has an actual beat.
+
+        A locked tempo grid is proof (dense mixes with buried kicks still
+        lock); while unlocked, only clearly broadband onsets — real kicks, per
+        the onset-width calibration — count, so sung vowels and tonal swells
+        that slip past the permissive club-mode width gates can never build
+        confidence. See the _RHYTHM_* constants for the dynamics.
+        """
+        c = self._rhythm_conf
+        if beatgrid is not None and beatgrid.locked:
+            c += (1.0 - c) * _RHYTHM_RISE
+        elif frame.bass_beat:
+            ev = (frame.onset_width - _RHYTHM_W_LO) / (_RHYTHM_W_HI - _RHYTHM_W_LO)
+            ev = max(0.0, min(1.0, ev))
+            if ev > c:
+                c += (ev - c) * _RHYTHM_EVENT_RISE
+        self._rhythm_conf = c * (1.0 - _RHYTHM_FALL)
+
+    def _update_predrop(self, p, structure) -> float:
+        """Advance the pre-drop pull-down envelope; return its 0..1 value.
+
+        See the _PREDROP_* constants for the full contract. On ``drop_now``
+        the envelope snaps to zero in ONE frame — the sudden release out of
+        the held-back dim is the detonation's contrast — and the depth it
+        held is published via ``predrop_released`` so the drop swell can size
+        with it.
+        """
+        self.predrop_released = 0.0
+        if structure is None or p.predrop_depth <= 0.0:
+            self._predrop = 0.0
+            self._predrop_commit = False
+            self._predrop_streak = 0
+            return 0.0
+
+        if structure.drop_now:
+            if self._predrop > 0.05:
+                self.predrop_released = self._predrop
+            self._predrop = 0.0
+            self._predrop_commit = False
+            self._predrop_streak = 0
+            return 0.0
+
+        scheduled = structure.drop_eta_s >= 0.0
+        if scheduled:
+            # The map knows exactly when the boundary lands: trust it and
+            # deepen as the ETA counts down (keeping commit_t fresh so the
+            # timeout only fires if the ETA vanishes, e.g. a position jump).
+            self._predrop_commit = True
+            self._predrop_commit_t = self.time
+            target = max(0.0, min(1.0, 1.0 - structure.drop_eta_s / _PREDROP_RAMP_S))
+        elif self._predrop_commit:
+            # Heuristic commit rides until the drop or the timeout.
+            if self.time - self._predrop_commit_t > _PREDROP_TIMEOUT_S:
+                self._predrop_commit = False
+                self._predrop_streak = 0
+                self._predrop_block_until = self.time + _PREDROP_REFRACTORY_S
+                target = 0.0
+            else:
+                target = _PREDROP_HEUR_CAP
+        elif structure.drop_imminent and self.time >= self._predrop_block_until:
+            self._predrop_streak += 1
+            if self._predrop_streak >= _PREDROP_CONFIRM:
+                self._predrop_commit = True
+                self._predrop_commit_t = self.time
+            target = 0.0  # nothing applied until the flag proves persistent
+        else:
+            self._predrop_streak = 0
+            target = 0.0
+
+        env = self._predrop
+        if target > env:
+            env = min(target, env + _PREDROP_RISE)
+        else:
+            env = max(target, env - _PREDROP_FALL)
+        self._predrop = env
+        return env
 
     @property
     def energy_env(self) -> float:
@@ -307,6 +448,23 @@ class EffectEngine:
             self._role_mix_eff = self._effective_mix(p)
         role_list = assign_roles(len(self._rank_ids), self._role_mix_eff, self._role_offset)
         self.roles = dict(zip(self._rank_ids, role_list))
+
+    def _update_phrase(self, p, beatgrid, music_gate: float) -> None:
+        """Advance the bar/phrase counters on locked downbeats.
+
+        Counting simply pauses while the grid is unlocked, so a bad lock can
+        never churn the phrase. Each completed phrase nudges the palette
+        forward (a deterministic phrase marker) — the wave origin and the
+        colour-jump multiplier read the phrase index directly.
+        """
+        if p.phrase_bars <= 0 or beatgrid is None or not beatgrid.locked:
+            return
+        if not (beatgrid.predicted_beat and beatgrid.beat_in_bar == 0):
+            return
+        self._bar_count += 1
+        if self._bar_count % p.phrase_bars == 0:
+            self._phrase += 1
+            self.colour_phase += p.phrase_colour_shift * music_gate
 
     def _beat_highlight(self, p, accent: float, append: bool) -> bool:
         """Is a beat with this accent a *highlight* of the current passage?
@@ -524,12 +682,16 @@ class EffectEngine:
         if strength <= 0.0:
             return
         bass = max(frame.bands.get("sub_bass", 0.0), frame.bands.get("bass", 0.0))
+        # Waves launch from the current phrase's origin (centre/left/right
+        # cycle) so long sections sweep the room from changing directions.
+        oi = self._phrase % len(self._origins) if p.phrase_bars > 0 else 0
         self._waves.append(
             Wave(
-                origin=self._origin,
+                origin=self._origins[oi],
                 strength=strength * (0.5 + 0.5 * bass),
                 speed=p.wave_speed,
                 width=p.wave_width,
+                origin_idx=oi,
             )
         )
         if len(self._waves) > 6:  # bound the live set
@@ -560,6 +722,8 @@ class EffectEngine:
         music_gate = min(1.0, self._loud / _SILENCE_GATE) if _SILENCE_GATE > 0 else 1.0
         # Refresh the instrument-role assignments (rotate on schedule + drops).
         self._update_roles(p, frame, beatgrid, structure)
+        # Advance the musical phrase (4-bar) counters on locked downbeats.
+        self._update_phrase(p, beatgrid, music_gate)
         # The event-selection gates (precision upgrade): amplitude proportional
         # to the frame's ABSOLUTE track-relative loudness, and a width gate
         # muting narrowband (vocal/tonal) detections. Both come from the mode,
@@ -570,6 +734,20 @@ class EffectEngine:
         vis_strength, vis_bass, grid_locked = self._visible_event(
             frame, beatgrid, width_gate
         )
+        # Does the song currently have an actual beat? While the grid is
+        # unlocked (no rhythm found), detected-onset flashes and waves soften
+        # toward the mode's nobeat_flash floor, so beat-less passages breathe
+        # with the continuous layers instead of strobing on false onsets. A
+        # locked grid — or a couple of real kicks — restores full punch.
+        self._update_rhythm_conf(frame, beatgrid)
+        rhythm_gate = (
+            p.nobeat_flash + (1.0 - p.nobeat_flash) * self._rhythm_conf
+        )
+        # Pre-drop anticipation: in the final moments before a drop the room
+        # pulls in (dimmer, tighter, desaturated) so the detonation lands out
+        # of held-back tension. ``pd`` scales every application below; the
+        # music gate keeps a fade-to-silence from freezing a stuck dim.
+        pd = p.predrop_depth * self._update_predrop(p, structure) * music_gate
         # Scale the flash by the beat's actual HEIGHT (item 3 / fade-outs): the
         # scheduled accent is normalised to the passage, so without this a track
         # fading out keeps flashing full on tiny beats. The smoothed loudness
@@ -652,7 +830,12 @@ class EffectEngine:
                 step = p.colour_jump * (0.55 + 0.45 * acc_now) * music_gate
                 if highlight:
                     step *= 1.7
-                self.colour_phase += step * sect
+                # Phrase variation: the jump size breathes across phrases.
+                if p.phrase_bars > 0:
+                    step *= _PHRASE_JUMP[self._phrase % len(_PHRASE_JUMP)]
+                # Hold the colour back through the pre-drop so the drop's
+                # jump reads bigger against the stillness.
+                self.colour_phase += step * sect * (1.0 - 0.5 * pd)
             if rolling:  # a whisper of tempo-locked roll underneath the jumps
                 self.colour_phase += (
                     p.colour_beat_step * 0.2 * (dt / beatgrid.period_s) * sect
@@ -672,7 +855,14 @@ class EffectEngine:
             # drum mode: no automatic wavefronts; silence: none either.
             if not self.manual_only and music_gate > 0.0:
                 self._spawn_waves(
-                    p, frame, beatgrid, vis_strength, music_gate * amp_scale
+                    p,
+                    frame,
+                    beatgrid,
+                    vis_strength,
+                    music_gate
+                    * amp_scale
+                    * (1.0 if grid_locked else rhythm_gate)
+                    * (1.0 - 0.8 * pd),
                 )
             for w in self._waves:
                 w.advance(dt, decay_tau=0.45)
@@ -696,11 +886,20 @@ class EffectEngine:
                     * beatgrid.schedule_strength
                 )
         else:
-            kick = kick_flash(p, vis_strength, vis_bass) * flash_scale
+            kick = kick_flash(p, vis_strength, vis_bass) * flash_scale * rhythm_gate
         # Silence gate (item 2: vanish in a gap) × loudness scale (item 3: a
         # fading beat brightens only as much as its height).
         kick *= music_gate * loud_scale
         midf = mid_flash(p, mid_strength) * music_gate * loud_scale
+        if not grid_locked:
+            midf *= rhythm_gate
+        # Pre-drop tightening: hold the pulse back through the pull-down —
+        # except the bar's downbeat, so the room never loses the count.
+        if pd > 0.0:
+            tighten = 1.0 - 0.8 * pd
+            if not (grid_locked and beatgrid is not None and beatgrid.beat_in_bar == 0):
+                kick *= tighten
+            midf *= tighten
         # The full-room moment: the passage's very biggest hits take EVERY
         # light at once (vocal lights a touch softer), the way the reference
         # shows punctuate a chorus. Ordinary highlights stay role-separated.
@@ -726,8 +925,16 @@ class EffectEngine:
         # the section arc (from the track map) scales the show's whole range.
         sat_mul = 1.0
         if structure is not None:
-            sat_mul = 1.0 - p.build_desat * structure.build_progress
-            drop = p.drop_boost if structure.drop_now else 0.0
+            # Builds and the pre-drop both desaturate; compose by max (never
+            # sum) so overlapping tension can't double-wash the colour.
+            sat_mul = 1.0 - max(
+                p.build_desat * structure.build_progress, 0.6 * pd
+            )
+            drop = 0.0
+            if structure.drop_now:
+                # A drop that detonates out of a held pre-drop swells bigger:
+                # the released depth is the tension it earned.
+                drop = p.drop_boost * (1.0 + 0.35 * self.predrop_released)
             self._swell = max(self._swell * 0.85, drop)
             alpha = 1.0 - math.exp(-dt / 2.0)
             self.section_level += (structure.section_level - self.section_level) * alpha
@@ -741,6 +948,11 @@ class EffectEngine:
         slew = p.bri_slew  # max emitted brightness RISE per frame (anti-strobe)
         out: dict[int, RGB] = {}
         for cid, (target_color, target_b) in targets.items():
+            # Pre-drop pull-down: compress the brightness HEADROOM above the
+            # mode's floor (base == floor modes are provably untouched, and
+            # the silence gate keeps priority since pd carries music_gate).
+            if pd > 0.0:
+                target_b = p.floor + (target_b - p.floor) * (1.0 - pd)
             overlay = self._light_flash.get(cid, 0.0) + self._swell
             prev_color, prev_b = self._state[cid]
             alpha = attack if target_b >= prev_b else decay

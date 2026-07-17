@@ -79,6 +79,15 @@ class AnalysisFrame:
     # many bands; a sung vowel or sustained tone concentrates it in a
     # fundamental plus a few harmonics — the vocal/tone discriminator.
     onset_width: float = 1.0
+    # 12-bin pitch-class magnitudes (0=C..11=B) of this frame, unnormalised.
+    # Drives the live Song-colour palette on tracks with no offline map.
+    # Empty list means "not computed" (silent frames, replay/metadata frames).
+    chroma: list[float] = field(default_factory=list)
+    # Per-melbank-bin stereo pan, -1 (hard left) .. +1 (hard right), smoothed
+    # ~100 ms. Lets panned instruments light the matching side of the room.
+    # Empty list means mono/unknown — every existing producer stays valid and
+    # the engine renders exactly as before pan existed.
+    pan: list[float] = field(default_factory=list)
 
 
 # SuperFlux parameters, shared with the offline track-map analysis.
@@ -128,6 +137,23 @@ SALIENCE_MIN_REF = 0.04
 # residue in a quiet bridge sits below 0.1x.
 LONG_FLUX_DECAY = 0.9995  # slow per-stream flux peak (~28 s half-life)
 LONG_FLUX_FLOOR_FRAC = 0.20
+# Live chroma range: narrower than the offline analysis (55-5000 Hz) because
+# the 1024-sample window's ~21.5 Hz bins are too coarse to name pitches below
+# ~80 Hz, and cymbal/hiss harmonics above ~2 kHz muddy the key. The live
+# chroma only has to pick hue anchors, not transcribe the song.
+CHROMA_LIVE_FMIN = 80.0
+CHROMA_LIVE_FMAX = 2000.0
+
+
+def chroma_projection(freqs: np.ndarray, fmin: float, fmax: float) -> np.ndarray:
+    """``(n_bins, 12)`` matrix folding FFT bins into pitch classes (0=C..11=B)."""
+    proj = np.zeros((freqs.size, 12), dtype=np.float32)
+    for b in range(freqs.size):
+        f = float(freqs[b])
+        if fmin <= f <= fmax:
+            midi = 69.0 + 12.0 * np.log2(f / 440.0)
+            proj[b, int(round(midi)) % 12] = 1.0
+    return proj
 
 
 def log_spectrum(mag: np.ndarray) -> np.ndarray:
@@ -279,6 +305,21 @@ class Analyzer:
             alpha_decay=0.20,
         )
 
+        # Live 12-bin chroma (Song colours without a track map): one small
+        # matmul per frame against the precomputed pitch-class projection.
+        self._chroma_proj = chroma_projection(
+            self._freqs, CHROMA_LIVE_FMIN, CHROMA_LIVE_FMAX
+        )
+
+        # Stereo pan state (push_stereo): rolling L/R windows plus a smoothed
+        # per-melbank-bin balance. Allocated lazily so plain mono callers pay
+        # nothing. IMPORTANT INVARIANT: all mono features come from the MID
+        # signal (L+R)/2 — bit-identical to ffmpeg's -ac 1 downmix — so every
+        # existing threshold, AGC and mode tuning holds; pan is purely additive.
+        self._buf_l: np.ndarray | None = None
+        self._buf_r: np.ndarray | None = None
+        self._pan_smooth: ExpFilter | None = None
+
         # Onset / beat state (broadband for tempo; bass = kicks and mid =
         # guitar/snare for the visible accent streams).
         self._fb_starts, self._fb_counts, self._n_bass, self._n_mid = (
@@ -313,6 +354,45 @@ class Analyzer:
     def frame_period(self) -> float:
         """Seconds represented by one hop/frame."""
         return self._hop / self._sr
+
+    def push_stereo(self, hop_l: np.ndarray, hop_r: np.ndarray) -> AnalysisFrame:
+        """Process one stereo hop: mono features from the mid, plus pan.
+
+        The frame is exactly what :meth:`push` would return for the (L+R)/2
+        downmix (the mono-parity invariant), with ``pan`` filled in from two
+        extra rFFTs — per melbank bin, ``(R−L)/(R+L)`` smoothed ~100 ms.
+        Silent frames keep ``pan`` empty like every other optional feature.
+        """
+        if hop_l.dtype != np.float32:
+            hop_l = hop_l.astype(np.float32)
+        if hop_r.dtype != np.float32:
+            hop_r = hop_r.astype(np.float32)
+        frame = self.push(0.5 * (hop_l + hop_r))
+        if frame.salience <= 0.0:
+            return frame  # silent frame (the noise-gated path): pan stays empty
+        if self._buf_l is None or self._buf_r is None:
+            self._buf_l = np.zeros(self._window, dtype=np.float32)
+            self._buf_r = np.zeros(self._window, dtype=np.float32)
+        for buf, hop in ((self._buf_l, hop_l), (self._buf_r, hop_r)):
+            n = hop.shape[0]
+            if n >= self._window:
+                buf[:] = hop[-self._window :]
+            else:
+                buf[:-n] = buf[n:]
+                buf[-n:] = hop
+        mag_l = np.abs(np.fft.rfft(self._buf_l * self._hann)).astype(np.float32)
+        mag_r = np.abs(np.fft.rfft(self._buf_r * self._hann)).astype(np.float32)
+        mel_l = band_means(mag_l, self._mel_starts, self._mel_counts)
+        mel_r = band_means(mag_r, self._mel_starts, self._mel_counts)
+        pan = np.clip((mel_r - mel_l) / (mel_r + mel_l + 1e-9), -1.0, 1.0)
+        if self._pan_smooth is None:
+            self._pan_smooth = ExpFilter(
+                np.zeros(self._n_mel, dtype=np.float32),
+                alpha_rise=0.25,
+                alpha_decay=0.25,
+            )
+        frame.pan = [float(x) for x in self._pan_smooth.update(pan.astype(np.float32))]
+        return frame
 
     def push(self, hop: np.ndarray) -> AnalysisFrame:
         """Process one hop of mono float32 samples and return features."""
@@ -406,6 +486,7 @@ class Analyzer:
             mid_strength=onsets["mid_strength"],
             salience=salience,
             onset_width=onsets["width"],
+            chroma=[float(x) for x in mag @ self._chroma_proj],
         )
 
     def _melbank(self, mag: np.ndarray) -> list[float]:
@@ -609,6 +690,10 @@ class Analyzer:
         self._bass_hist.clear()
         self._mid_hist.clear()
         self._beat_times.clear()
+        # Stereo pan state restarts with the new track.
+        self._buf_l = None
+        self._buf_r = None
+        self._pan_smooth = None
         self._since_beat = self._refractory
         self._since_bass = self._refractory
         self._since_mid = self._refractory
