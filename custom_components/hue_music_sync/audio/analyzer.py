@@ -88,6 +88,15 @@ class AnalysisFrame:
     # Empty list means mono/unknown — every existing producer stays valid and
     # the engine renders exactly as before pan existed.
     pan: list[float] = field(default_factory=list)
+    # Treble tick stream (hi-hats/shakers, > MID_ONSET_HZ): tiny texture pops
+    # for the groove between kicks. Defaults keep every producer valid.
+    high_beat: bool = False
+    high_strength: float = 0.0
+    # Lead-note onset (a broadband-stream event that is NOT bass-dominant —
+    # vocal syllables, lead/melody notes): what the engine's melody-follow
+    # rides in passages where no beat is discernible.
+    note_beat: bool = False
+    note_strength: float = 0.0
 
 
 # SuperFlux parameters, shared with the offline track-map analysis.
@@ -143,6 +152,38 @@ LONG_FLUX_FLOOR_FRAC = 0.20
 # chroma only has to pick hue anchors, not transcribe the song.
 CHROMA_LIVE_FMIN = 80.0
 CHROMA_LIVE_FMAX = 2000.0
+# Perceptual loudness weighting (a cheap analytic BS.1770 "K-weighting"
+# approximation, applied per FFT bin): plain RMS over-counts sub-bass (felt,
+# not "loud") and under-counts the 1.5-5 kHz presence range where hearing is
+# most sensitive, so a bass-heavy verse could out-"loud" the actual chorus.
+# Salience and the energy contour ride the K-weighted loudness instead; the
+# technical gates (noise floor, silence) stay on raw RMS.
+K_WEIGHT_HP_HZ = 60.0  # 2nd-order high-pass knee (sub-bass de-emphasis)
+K_WEIGHT_SHELF_HZ = 1800.0  # high-shelf knee (presence emphasis)
+K_WEIGHT_SHELF_GAIN = 1.585  # +4 dB shelf, as in BS.1770 stage 1
+# Treble tick stream (hi-hats/shakers): onsets above MID_ONSET_HZ with a real
+# high-band share. Faster refractory than the beat streams — 16th-note hats at
+# 125 BPM arrive every ~120 ms and the ticks are tiny by design.
+HIGH_FLUX_SHARE = 0.35
+HIGH_REFRACTORY = 4  # frames (~80 ms)
+
+
+def k_weighting(freqs: np.ndarray) -> np.ndarray:
+    """Per-bin amplitude weights approximating the BS.1770 K-weighting curve.
+
+    A 2nd-order Butterworth-style high-pass magnitude around
+    :data:`K_WEIGHT_HP_HZ` times a 2nd-order +4 dB high shelf above
+    :data:`K_WEIGHT_SHELF_HZ` (steep enough that 1 kHz stays ~unity, matching
+    the BS.1770 curve) — no filter state needed since the per-bin power is
+    already available every frame.
+    """
+    f = np.maximum(freqs.astype(np.float64), 1e-6)
+    r = (f / K_WEIGHT_HP_HZ) ** 2
+    hp = r / np.sqrt(1.0 + r * r)
+    g = K_WEIGHT_SHELF_GAIN
+    x2 = (f / K_WEIGHT_SHELF_HZ) ** 4
+    shelf = np.sqrt((1.0 + g * g * x2) / (1.0 + x2))
+    return (hp * shelf).astype(np.float32)
 
 
 def chroma_projection(freqs: np.ndarray, fmin: float, fmax: float) -> np.ndarray:
@@ -273,10 +314,18 @@ class Analyzer:
         self._noise_floor = noise_floor
         self._buf = np.zeros(window, dtype=np.float32)
         self._hann = np.hanning(window).astype(np.float32)
+        # Zero-padded FFT (2x): halves the bin width to ~10.8 Hz so the
+        # sub-bass bands (20-60 Hz) actually resolve instead of the low
+        # filterbank bands being forced to share single coarse bins. Pure
+        # interpolation — no extra time resolution — and cheap at 50 fps.
+        self._nfft = 2 * window
 
         # Precompute FFT bin index ranges per band.
-        freqs = np.fft.rfftfreq(window, 1.0 / sample_rate)
+        freqs = np.fft.rfftfreq(self._nfft, 1.0 / sample_rate)
         self._freqs = freqs.astype(np.float32)
+        # Perceptual (K-weighted) loudness: squared per-bin weights, applied to
+        # the power spectrum each frame to re-weight the raw RMS.
+        self._kw2 = k_weighting(freqs) ** 2
         self._band_bins: dict[str, tuple[int, int]] = {}
         for name, (lo, hi) in BANDS.items():
             lo_i = int(np.searchsorted(freqs, lo, side="left"))
@@ -335,11 +384,13 @@ class Analyzer:
         self._flux_hist: deque[float] = deque(maxlen=43)  # ~0.9s at 50 fps
         self._bass_hist: deque[float] = deque(maxlen=43)
         self._mid_hist: deque[float] = deque(maxlen=43)
+        self._high_hist: deque[float] = deque(maxlen=43)
         self._sensitivity = beat_sensitivity
         self._refractory = 6  # min frames between beats (~120 ms)
         self._since_beat = self._refractory
         self._since_bass = self._refractory
         self._since_mid = self._refractory
+        self._since_high = HIGH_REFRACTORY
         self._beat_times: deque[float] = deque(maxlen=8)
         self._frame_index = 0
 
@@ -349,6 +400,7 @@ class Analyzer:
         # Slow per-stream flux peaks for the long-horizon threshold floor.
         self._bass_slow = 0.0
         self._mid_slow = 0.0
+        self._high_slow = 0.0
 
     @property
     def frame_period(self) -> float:
@@ -380,8 +432,8 @@ class Analyzer:
             else:
                 buf[:-n] = buf[n:]
                 buf[-n:] = hop
-        mag_l = np.abs(np.fft.rfft(self._buf_l * self._hann)).astype(np.float32)
-        mag_r = np.abs(np.fft.rfft(self._buf_r * self._hann)).astype(np.float32)
+        mag_l = np.abs(np.fft.rfft(self._buf_l * self._hann, self._nfft)).astype(np.float32)
+        mag_r = np.abs(np.fft.rfft(self._buf_r * self._hann, self._nfft)).astype(np.float32)
         mel_l = band_means(mag_l, self._mel_starts, self._mel_counts)
         mel_r = band_means(mag_r, self._mel_starts, self._mel_counts)
         pan = np.clip((mel_r - mel_l) / (mel_r + mel_l + 1e-9), -1.0, 1.0)
@@ -411,13 +463,14 @@ class Analyzer:
             # instead of letting the per-band AGC amplify hiss/dither up to full.
             # Keep onset state coherent (no spurious beat on the next note) while
             # the AGC peaks decay on their own toward the floor.
-            spectrum = np.fft.rfft(self._buf * self._hann)
+            spectrum = np.fft.rfft(self._buf * self._hann, self._nfft)
             mag = np.abs(spectrum).astype(np.float32)
             self._prev_lin = band_means(mag, self._fb_starts, self._fb_counts)
             self._prev_log = log_spectrum(self._prev_lin)
             self._since_beat += 1
             self._since_bass += 1
             self._since_mid += 1
+            self._since_high += 1
             # Keep the mid-attack machine coherent through silence.
             self._mid_rise_n = 0
             self._mid_e_prev = float(
@@ -438,7 +491,7 @@ class Analyzer:
                 salience=0.0,  # silent frames are maximally non-salient
             )
 
-        spectrum = np.fft.rfft(self._buf * self._hann)
+        spectrum = np.fft.rfft(self._buf * self._hann, self._nfft)
         mag = np.abs(spectrum).astype(np.float32)
         power = mag * mag
 
@@ -447,13 +500,23 @@ class Analyzer:
             raw = float(np.mean(power[lo_i:hi_i])) if hi_i > lo_i else 0.0
             bands[name] = self._agc[name].normalise(np.sqrt(raw))
 
-        energy = self._energy_agc.normalise(rms)
+        # Perceptual (K-weighted) loudness: re-weight the time-domain RMS by
+        # the spectral K-weighting ratio, so a bass-heavy verse no longer
+        # out-"louds" the chorus and the presence range counts like ears hear
+        # it. The ratio form keeps the absolute calibration of every existing
+        # threshold (SALIENCE_MIN_REF, gates) — only the emphasis changes.
+        p_tot = float(np.mean(power))
+        rms_k = rms
+        if p_tot > 1e-18:
+            rms_k = rms * float(np.sqrt(np.mean(self._kw2 * power) / p_tot))
+        energy = self._energy_agc.normalise(rms_k)
 
-        # Absolute salience: smoothed raw RMS against the decaying track-level
-        # loud reference. Rising is instant (the first drop sets the bar), so
-        # early in a track salience ~1 and behaviour degrades gracefully to
-        # the pre-salience one until the reference has heard a loud section.
-        self._rms_smooth += (rms - self._rms_smooth) * SALIENCE_SMOOTH
+        # Absolute salience: smoothed perceptual loudness against the decaying
+        # track-level loud reference. Rising is instant (the first drop sets
+        # the bar), so early in a track salience ~1 and behaviour degrades
+        # gracefully to the pre-salience one until the reference has heard a
+        # loud section.
+        self._rms_smooth += (rms_k - self._rms_smooth) * SALIENCE_SMOOTH
         self._loud_ref = max(
             self._rms_smooth, self._loud_ref * SALIENCE_DECAY, SALIENCE_MIN_REF
         )
@@ -487,6 +550,10 @@ class Analyzer:
             salience=salience,
             onset_width=onsets["width"],
             chroma=[float(x) for x in mag @ self._chroma_proj],
+            high_beat=onsets["high_beat"],
+            high_strength=onsets["high_strength"],
+            note_beat=onsets["note_beat"],
+            note_strength=onsets["note_strength"],
         )
 
     def _melbank(self, mag: np.ndarray) -> list[float]:
@@ -525,6 +592,8 @@ class Analyzer:
                 "bass_beat": False, "bass_strength": 0.0, "bass_flux": 0.0,
                 "mid_beat": False, "mid_strength": 0.0, "mid_flux": 0.0,
                 "width": 1.0,
+                "high_beat": False, "high_strength": 0.0,
+                "note_beat": False, "note_strength": 0.0,
             }
         # SuperFlux on all three streams: positive increases over the
         # frequency-max-filtered previous frame. Vibrato, slides AND a low
@@ -548,29 +617,44 @@ class Analyzer:
         bass_flux = float(np.sum(bdiff[bdiff > 0]))
         mdiff = diff[nb:nm]
         mid_flux = float(np.sum(mdiff[mdiff > 0]))
+        hdiff = diff[nm:]
+        high_flux = float(np.sum(hdiff[hdiff > 0]))
         # Linear-domain band shares of this frame's onset energy (leakage-proof:
         # log compression makes a hi-hat's splash into other bands look big).
         ldiff = lin - self._prev_lin
         lin_pos = float(np.sum(ldiff[ldiff > 0]))
         lb = ldiff[:nb]
         lm = ldiff[nb:nm]
+        lh = ldiff[nm:]
         lin_bass = float(np.sum(lb[lb > 0]))
         lin_mid = float(np.sum(lm[lm > 0]))
+        lin_high = float(np.sum(lh[lh > 0]))
         bass_share = lin_bass / lin_pos if lin_pos > 1e-9 else 0.0
         mid_share = lin_mid / lin_pos if lin_pos > 1e-9 else 0.0
+        high_share = lin_high / lin_pos if lin_pos > 1e-9 else 0.0
         self._prev_log = cur
         self._prev_lin = lin
         # Passage-scale flux peaks: the long-horizon floor under the adaptive
-        # thresholds below (bass/mid only — the broadband stream feeds tempo
-        # and must keep firing through quiet bridges).
+        # thresholds below (band streams only — the broadband stream feeds
+        # tempo and must keep firing through quiet bridges).
         self._bass_slow = max(bass_flux, self._bass_slow * LONG_FLUX_DECAY)
         self._mid_slow = max(mid_flux, self._mid_slow * LONG_FLUX_DECAY)
+        self._high_slow = max(high_flux, self._high_slow * LONG_FLUX_DECAY)
 
         beat, strength, self._since_beat = self._threshold_onset(
             flux, self._flux_hist, self._since_beat
         )
         if beat:
             self._beat_times.append(self._frame_index * self.frame_period)
+        # Lead-note events: broadband-stream onsets that fail the kick gate
+        # (vocal syllables, lead/melody notes — the exact complement of the
+        # bass stream's discriminator, since even a pure lead's sharp attack
+        # splashes ~1/3 of its linear flux into the low bands). The visible
+        # beat paths mute these deliberately; the engine's melody-follow rides
+        # them instead in passages where no beat is discernible.
+        kick_like = bass_share >= BASS_FLUX_SHARE and bass_share >= mid_share
+        note_beat = beat and not kick_like
+        note_strength = strength if note_beat else 0.0
         # Each stream requires both a real share of the onset's linear energy
         # AND dominance over the other: a kick is bass-dominant, a guitar pluck
         # or snare is mid-dominant — attack splash alone can't cross over.
@@ -614,9 +698,25 @@ class Analyzer:
             self._mid_rise_n = 0
         self._mid_e_prev = e_mid
 
+        # Treble tick stream (hi-hats/shakers): high-dominant onsets above
+        # MID_ONSET_HZ, with a shorter refractory (hats arrive fast) and the
+        # same long-horizon floor so quiet-passage residue can't "tick".
+        if high_share >= HIGH_FLUX_SHARE and high_share > bass_share:
+            high_beat, high_strength, self._since_high = self._threshold_onset(
+                high_flux,
+                self._high_hist,
+                self._since_high,
+                floor=LONG_FLUX_FLOOR_FRAC * self._high_slow,
+                refractory=HIGH_REFRACTORY,
+            )
+        else:
+            high_beat, high_strength = False, 0.0
+            self._since_high += 1
+
         self._flux_hist.append(flux)
         self._bass_hist.append(bass_flux)
         self._mid_hist.append(mid_flux)
+        self._high_hist.append(high_flux)
         return {
             "beat": beat, "strength": strength, "flux": flux,
             "bass_beat": bass_beat, "bass_strength": bass_strength,
@@ -624,6 +724,8 @@ class Analyzer:
             "mid_beat": mid_beat, "mid_strength": mid_strength,
             "mid_flux": mid_flux,
             "width": width,
+            "high_beat": high_beat, "high_strength": high_strength,
+            "note_beat": note_beat, "note_strength": note_strength,
         }
 
     def _threshold_onset(
@@ -633,6 +735,7 @@ class Analyzer:
         since: int,
         require_rising: bool = True,
         floor: float = 0.0,
+        refractory: int | None = None,
     ) -> tuple[bool, float, int]:
         """Adaptive median+k·MAD threshold with a refractory, on one flux stream.
 
@@ -655,7 +758,8 @@ class Analyzer:
         # (The mid stream skips this — its attack state machine fires one frame
         # *after* the energy peak by design, having verified the shape itself.)
         rising = (not require_rising) or flux > float(hist[-1])
-        if flux > threshold and rising and since >= self._refractory:
+        min_gap = self._refractory if refractory is None else refractory
+        if flux > threshold and rising and since >= min_gap:
             return True, min(3.0, flux / threshold), 0
         return False, 0.0, since
 
@@ -689,6 +793,7 @@ class Analyzer:
         self._flux_hist.clear()
         self._bass_hist.clear()
         self._mid_hist.clear()
+        self._high_hist.clear()
         self._beat_times.clear()
         # Stereo pan state restarts with the new track.
         self._buf_l = None
@@ -697,6 +802,7 @@ class Analyzer:
         self._since_beat = self._refractory
         self._since_bass = self._refractory
         self._since_mid = self._refractory
+        self._since_high = HIGH_REFRACTORY
         # Same rationale as the AGC resets: the loud reference and the flux
         # floors are track-scale, so a quiet song after a loud one must not
         # start dim / deaf.
@@ -704,3 +810,4 @@ class Analyzer:
         self._loud_ref = SALIENCE_MIN_REF
         self._bass_slow = 0.0
         self._mid_slow = 0.0
+        self._high_slow = 0.0

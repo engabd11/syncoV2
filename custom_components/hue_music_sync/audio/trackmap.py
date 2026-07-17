@@ -56,6 +56,7 @@ from .analyzer import (
     AnalysisFrame,
     band_means,
     chroma_projection,
+    k_weighting,
     log_spectrum,
     make_melbank,
     make_onset_filterbank,
@@ -103,14 +104,17 @@ _MIN_AUDIO_RMS = 1e-4
 # v2: per-frame onset width (``f_width``) + long-horizon floor on mid picks.
 # v3: detected-onset arrays for gridless (ambient) maps + the ``diag`` row.
 # v4: per-frame stereo pan (``f_pan``, int8-quantised melbank balance).
-# Older files load fine (their layout is a strict subset; pan is simply absent
-# and the engine renders exactly as before pan existed), so a format bump does
-# NOT silently un-warm the pre-analysed library — no rescan, ever. Any FUTURE
-# incompatible bump must either extend _COMPAT_FORMATS or add a one-time format
-# scan to the pre-warm — has_disk() deliberately never opens files, so it
-# cannot tell a stale format from a fresh one.
-_CACHE_FORMAT = 4
-_COMPAT_FORMATS = frozenset({2, 3, 4})
+# v5: scheduled "moments" timeline (stop-gaps/drops/risers/fills/outro fade),
+#     section similarity groups (chorus recall) and the dynamics diagnostics
+#     (loudness range / onset rate / mean energy) appended to the diag row.
+# Older files load fine (their layout is a strict subset; missing rows are
+# simply absent and the engine renders exactly as before they existed), so a
+# format bump does NOT silently un-warm the pre-analysed library — no rescan,
+# ever. Any FUTURE incompatible bump must either extend _COMPAT_FORMATS or add
+# a one-time format scan to the pre-warm — has_disk() deliberately never opens
+# files, so it cannot tell a stale format from a fresh one.
+_CACHE_FORMAT = 5
+_COMPAT_FORMATS = frozenset({2, 3, 4, 5})
 
 # Offline mid picks narrower than this across the SuperFlux filterbank are
 # dropped as vocal/tonal (see AnalysisFrame.onset_width). Deliberately at the
@@ -153,12 +157,21 @@ class MapDiagnostics:
     sections: int = 0
     tier: str = "unusable"  # "full" | "ambient" | "unusable"
     reason: str = ""  # human sentence when tier != "full"
+    # Dynamics profile (v5): how the playback engine adapts its reaction
+    # constants to THIS track. lra_db is a loudness-range statistic (p95-p10
+    # of the K-weighted frame loudness, dB): a brick-walled EDM master reads
+    # ~3-6 dB, dynamic jazz/classical 12+. onset_rate is broadband onsets per
+    # second (percussiveness); energy_mean the mean normalised loudness.
+    lra_db: float = 0.0  # 0 = unknown (pre-v5 map)
+    onset_rate: float = 0.0
+    energy_mean: float = 0.0
 
     def as_array(self) -> np.ndarray:
         """The numeric core, persisted in the .npz ``diag`` row."""
         return np.array(
             [self.autocorr_conf, self.contrast, self.mad_local,
-             self.coverage, self.tempo_stability, self.analysed_s],
+             self.coverage, self.tempo_stability, self.analysed_s,
+             self.lra_db, self.onset_rate, self.energy_mean],
             dtype=np.float64,
         )
 
@@ -203,6 +216,20 @@ class Section:
     # Colours derived from this section's harmony (chroma -> hue), used by the
     # SONG colour scheme. Empty when the section had no usable pitch content.
     palette: list[RGB] = field(default_factory=list)
+    # Similarity group (chorus recall): sections whose spectral shape + energy
+    # match share a group id, so every chorus gets the same visual identity.
+    # -1 = ungrouped (pre-v5 map): renders exactly as before groups existed.
+    group: int = -1
+
+
+# Scheduled moment kinds (the "lights know the future" timeline, v5). Each is
+# (kind, t0, t1, strength 0..1) — detected offline in _detect_moments and
+# consumed by the coordinator per frame via TrackMap.moment_state().
+MOMENT_DROP = 1   # a ranked energy drop at a section boundary (t0 = boundary)
+MOMENT_GAP = 2    # a stop-gap / DJ cut: near-silence between loud passages
+MOMENT_RISER = 3  # sustained centroid+energy climb ending at a drop
+MOMENT_FILL = 4   # onset-density burst in the last bar before a boundary
+MOMENT_FADE = 5   # the outro fade-out (t1 = end of track)
 
 
 @dataclass(slots=True)
@@ -258,9 +285,15 @@ class TrackMap:
     # gets phase anchors — the room stays alive without claiming a schedule.
     onsets: np.ndarray = field(default_factory=lambda: np.zeros(0))
     onset_accents: np.ndarray = field(default_factory=lambda: np.zeros(0))
-    # Numeric diagnostics core (MapDiagnostics.as_array layout); zeros on maps
-    # loaded from pre-v3 cache files.
-    diag: np.ndarray = field(default_factory=lambda: np.zeros(6))
+    # Numeric diagnostics core (MapDiagnostics.as_array layout); zero-padded on
+    # maps loaded from pre-v5 cache files (pre-v3 files are all zeros).
+    diag: np.ndarray = field(default_factory=lambda: np.zeros(9))
+    # Scheduled moments timeline (v5): parallel arrays of (kind, t0, t1,
+    # strength). Empty on pre-v5 maps — playback behaves exactly as before.
+    mom_kind: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.int8))
+    mom_t0: np.ndarray = field(default_factory=lambda: np.zeros(0))
+    mom_t1: np.ndarray = field(default_factory=lambda: np.zeros(0))
+    mom_strength: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float32))
 
     @property
     def grid_usable(self) -> bool:
@@ -306,11 +339,16 @@ class TrackMap:
             "sec_start": np.array([s.start for s in self.sections], dtype=np.float64),
             "sec_end": np.array([s.end for s in self.sections], dtype=np.float64),
             "sec_energy": np.array([s.energy for s in self.sections], dtype=np.float32),
+            "sec_group": np.array([s.group for s in self.sections], dtype=np.int32),
             "pal_rgb": pal_rgb,
             "pal_counts": pal_counts,
             "onsets": self.onsets.astype(np.float64),
             "onset_accents": self.onset_accents.astype(np.float32),
             "diag": np.asarray(self.diag, dtype=np.float64),
+            "mom_kind": self.mom_kind.astype(np.int8),
+            "mom_t0": self.mom_t0.astype(np.float64),
+            "mom_t1": self.mom_t1.astype(np.float64),
+            "mom_strength": self.mom_strength.astype(np.float32),
         }
         if f is not None:
             data.update({
@@ -334,6 +372,7 @@ class TrackMap:
                     return None
                 pal_rgb = z["pal_rgb"]
                 pal_counts = z["pal_counts"]
+                sec_group = z["sec_group"] if "sec_group" in z else None
                 sections: list[Section] = []
                 k = 0
                 for i in range(len(z["sec_start"])):
@@ -342,7 +381,13 @@ class TrackMap:
                     k += n
                     sections.append(Section(
                         float(z["sec_start"][i]), float(z["sec_end"][i]),
-                        float(z["sec_energy"][i]), palette))
+                        float(z["sec_energy"][i]), palette,
+                        # Pre-v5 files have no groups: -1 = ungrouped, as before.
+                        group=(
+                            int(sec_group[i])
+                            if sec_group is not None and i < len(sec_group)
+                            else -1
+                        )))
                 features = None
                 if "f_energy" in z:
                     features = TrackFeatures(
@@ -367,7 +412,22 @@ class TrackMap:
                     onset_accents=(
                         z["onset_accents"] if "onset_accents" in z else np.zeros(0)
                     ),
-                    diag=z["diag"] if "diag" in z else np.zeros(6))
+                    # Pre-v5 diag rows are shorter (6): pad with zeros so the
+                    # dynamics entries read as "unknown" rather than crashing.
+                    diag=(
+                        np.pad(z["diag"], (0, max(0, 9 - z["diag"].size)))
+                        if "diag" in z else np.zeros(9)
+                    ),
+                    mom_kind=(
+                        z["mom_kind"] if "mom_kind" in z
+                        else np.zeros(0, dtype=np.int8)
+                    ),
+                    mom_t0=z["mom_t0"] if "mom_t0" in z else np.zeros(0),
+                    mom_t1=z["mom_t1"] if "mom_t1" in z else np.zeros(0),
+                    mom_strength=(
+                        z["mom_strength"] if "mom_strength" in z
+                        else np.zeros(0, dtype=np.float32)
+                    ))
         except (OSError, KeyError, ValueError, IndexError):
             return None
 
@@ -512,6 +572,67 @@ class TrackMap:
                 return s.start - pos, s.energy
         return None
 
+    @property
+    def chorus_group(self) -> int:
+        """The recurring section group with the highest mean energy (-1: none).
+
+        "The chorus" for choreography purposes: a similarity group that occurs
+        at least twice and out-louds the other recurring groups. Single-pass
+        tracks (or pre-v5 maps with no groups) report -1 and nothing changes.
+        """
+        by_group: dict[int, list[float]] = {}
+        for s in self.sections:
+            if s.group >= 0:
+                by_group.setdefault(s.group, []).append(s.energy)
+        best, best_e = -1, 0.0
+        for g, energies in by_group.items():
+            if len(energies) < 2:
+                continue
+            e = sum(energies) / len(energies)
+            if e > best_e:
+                best, best_e = g, e
+        return best
+
+    def moment_state(self, pos: float, prev_pos: float | None = None) -> dict:
+        """The scheduled-moment picture at playback position ``pos``.
+
+        Returns a dict with any of: ``gap`` (True while inside a stop-gap),
+        ``gap_release`` (0..1 strength, the single query in which the gap
+        ended — the detonation), ``riser`` (0..1 progress through a riser),
+        ``riser_eta`` (seconds until the riser resolves), ``fill`` (True
+        inside a pre-boundary fill), ``fade`` (0..1 progress through the outro
+        fade) and ``drop`` (0..1 ranked strength when ``pos`` just crossed a
+        drop boundary). Empty dict when nothing is scheduled here (including
+        every pre-v5 map), so callers can stay entirely hands-off.
+        """
+        out: dict = {}
+        n = self.mom_kind.size
+        if n == 0:
+            return out
+        lo = prev_pos if prev_pos is not None and prev_pos < pos else pos
+        for i in range(n):
+            kind = int(self.mom_kind[i])
+            t0 = float(self.mom_t0[i])
+            t1 = float(self.mom_t1[i])
+            s = float(self.mom_strength[i])
+            if kind == MOMENT_GAP:
+                if t0 <= pos < t1:
+                    out["gap"] = True
+                elif lo < t1 <= pos:
+                    out["gap_release"] = s
+            elif kind == MOMENT_RISER and t0 <= pos < t1:
+                span = max(1e-6, t1 - t0)
+                out["riser"] = max(out.get("riser", 0.0), (pos - t0) / span)
+                out["riser_eta"] = min(out.get("riser_eta", 1e9), t1 - pos)
+            elif kind == MOMENT_FILL and t0 <= pos < t1:
+                out["fill"] = True
+            elif kind == MOMENT_FADE and t0 <= pos < t1:
+                span = max(1e-6, t1 - t0)
+                out["fade"] = (pos - t0) / span
+            elif kind == MOMENT_DROP and lo < t0 <= pos:
+                out["drop"] = max(out.get("drop", 0.0), s)
+        return out
+
 
 # Chroma (pitch-class) range: fundamentals from ~A1 to ~D8. Below/above this,
 # bins are mostly hum, percussion noise or harmonics that muddy the key.
@@ -537,7 +658,11 @@ class EnvelopeExtractor:
         self._window = window
         self._hop = hop
         self._hann = np.hanning(window).astype(np.float32)
-        freqs = np.fft.rfftfreq(window, 1.0 / sample_rate)
+        # Zero-padded FFT (2x), matching the live analyzer — the shared
+        # filterbank/melbank/chroma layouts are built from the SAME bin grid,
+        # keeping live and replayed frames interchangeable.
+        self._nfft = 2 * window
+        freqs = np.fft.rfftfreq(self._nfft, 1.0 / sample_rate)
         self._fb_starts, self._fb_counts, self.n_bass, self.n_mid = (
             make_onset_filterbank(freqs.astype(np.float32))
         )
@@ -557,6 +682,10 @@ class EnvelopeExtractor:
         self._tail = np.zeros(0, dtype=np.float32)
         self._prev_log: np.ndarray | None = None
         self._prev_lin: np.ndarray | None = None
+        # Perceptual loudness weights (see analyzer.k_weighting): rms_k is the
+        # K-weighted twin of rms, feeding salience/energy/dynamics so playback
+        # loudness matches what ears (and the live analyzer) hear.
+        self._kw2 = k_weighting(freqs) ** 2
         self.env: list[float] = []  # SuperFlux onset envelope per frame
         self.bass_env: list[float] = []  # bass-band log-flux per frame
         self.mid_env: list[float] = []  # mid-band (guitar/snare) log-flux
@@ -566,6 +695,7 @@ class EnvelopeExtractor:
         # attack splash, and map-driven "guitar" lights pop on the kicks.
         self.mid_dom: list[bool] = []
         self.rms: list[float] = []
+        self.rms_k: list[float] = []  # K-weighted (perceptual) loudness per frame
         self.bands: list[np.ndarray] = []  # linear filterbank means per frame
         self.named_bands: list[np.ndarray] = []  # the 5 output bands per frame
         self.centroid: list[float] = []
@@ -598,7 +728,9 @@ class EnvelopeExtractor:
         frames = np.lib.stride_tricks.sliding_window_view(buf, self._window)[
             :: self._hop
         ][:n_frames]
-        mags = np.abs(np.fft.rfft(frames * self._hann, axis=1)).astype(np.float32)
+        mags = np.abs(np.fft.rfft(frames * self._hann, self._nfft, axis=1)).astype(
+            np.float32
+        )
         out.extend(band_means(mags, self._mel_starts, self._mel_counts))
         return buf[n_frames * self._hop :].copy()
 
@@ -612,7 +744,7 @@ class EnvelopeExtractor:
             :: self._hop
         ][:n_frames]
         windowed = frames * self._hann
-        mags = np.abs(np.fft.rfft(windowed, axis=1)).astype(np.float32)
+        mags = np.abs(np.fft.rfft(windowed, self._nfft, axis=1)).astype(np.float32)
         lin = band_means(mags, self._fb_starts, self._fb_counts)
         logb = log_spectrum(lin)
         # Prepend the previous chunk's last frame so flux is continuous.
@@ -647,11 +779,17 @@ class EnvelopeExtractor:
         mid_share = ldiff[:, self.n_bass : self.n_mid].sum(axis=1) / lin_pos
         self.mid_dom.extend(((mid_share >= 0.30) & (mid_share > bass_share)).tolist())
         self._prev_lin = lin[-1]
-        self.rms.extend(np.sqrt(np.mean(frames * frames, axis=1)).tolist())
+        rms = np.sqrt(np.mean(frames * frames, axis=1))
+        self.rms.extend(rms.tolist())
         self.bands.extend(lin)
         # The 5 named output bands (same maths as the live analyzer: RMS of the
         # band's power) and the spectral centroid, per frame.
         power = mags * mags
+        # K-weighted loudness (mirrors the live analyzer): re-weight the
+        # time-domain RMS by the spectral K-weighting ratio per frame.
+        p_tot = np.maximum(np.mean(power, axis=1), 1e-18)
+        p_k = np.mean(self._kw2[None, :] * power, axis=1)
+        self.rms_k.extend((rms * np.sqrt(p_k / p_tot)).tolist())
         named = np.stack(
             [np.sqrt(np.mean(power[:, lo:hi], axis=1)) for lo, hi in self._named_bins],
             axis=1,
@@ -1161,7 +1299,209 @@ def _segment_sections(
         i1 = max(i0 + 1, min(n_blocks, int(b / _BLOCK_S)))
         level = float(np.clip(rms_blocks[i0:i1].mean() / max(peak, 1e-9), 0.0, 1.0))
         sections.append(Section(float(a), float(b), level))
-    return sections or [Section(0.0, duration, 1.0)]
+    sections = sections or [Section(0.0, duration, 1.0)]
+    _group_sections(sections, feat, n_blocks)
+    return sections
+
+
+# Chorus recall: sections whose spectral shape + energy match are the SAME
+# musical section returning (chorus, repeated verse), and should get the same
+# visual identity every time. The similarity vector is the unit-norm mean
+# block feature with the section's energy appended (weight 1.0) — identical
+# instrumentation at clearly different levels (a quiet verse vs the chorus
+# using the same palette of sounds) then measures ~0.93, right at the gate.
+_GROUP_SIM = 0.93
+
+
+def _group_sections(sections: list[Section], feat: np.ndarray, n_blocks: int) -> None:
+    """Assign similarity ``group`` ids in place (greedy cosine clustering)."""
+    if not sections:
+        return
+    vecs: list[np.ndarray] = []
+    for s in sections:
+        i0 = min(n_blocks - 1, int(s.start / _BLOCK_S))
+        i1 = max(i0 + 1, min(n_blocks, int(s.end / _BLOCK_S)))
+        v = feat[i0:i1].mean(axis=0)
+        v = v / max(float(np.linalg.norm(v)), 1e-9)
+        v = np.concatenate([v, [s.energy]])
+        vecs.append(v / max(float(np.linalg.norm(v)), 1e-9))
+    centroids: list[np.ndarray] = []
+    counts: list[int] = []
+    for s, v in zip(sections, vecs):
+        best, best_sim = -1, _GROUP_SIM
+        for g, c in enumerate(centroids):
+            sim = float(v @ c) / max(float(np.linalg.norm(c)), 1e-9)
+            if sim >= best_sim:
+                best, best_sim = g, sim
+        if best < 0:
+            centroids.append(v.copy())
+            counts.append(1)
+            s.group = len(centroids) - 1
+        else:
+            # Running-mean centroid so the group tracks its members.
+            centroids[best] = (centroids[best] * counts[best] + v) / (counts[best] + 1)
+            counts[best] += 1
+            s.group = best
+
+
+# Scheduled-moment detection thresholds (all relative to the track's own
+# loudness, so mastering level is irrelevant).
+_GAP_MIN_S = 0.12    # a real cut, not a sample boundary
+_GAP_MAX_S = 2.0     # longer near-silence is a breakdown, not a stop-gap
+_GAP_LEVEL = 0.06    # "silent" = below this fraction of the p95 loudness
+_GAP_CONTEXT = 0.35  # the passages bounding a gap must be at least this loud
+_RISER_LENGTHS_S = (12.0, 8.0, 6.0, 4.0, 3.0)  # longest first: prefer long builds
+_RISER_CENTROID = 0.04   # min centroid climb over the riser
+_RISER_ENERGY = 0.06     # min loudness climb (fraction of p95)
+_FILL_DENSITY = 1.7      # onset density ratio vs the track mean
+_FADE_MIN_S = 6.0        # shortest outro fade worth riding down
+_FADE_END_LEVEL = 0.25   # the fade must end below this fraction of p95
+
+
+def _detect_moments(
+    bass_env: np.ndarray,
+    rms_k: np.ndarray,
+    centroid: np.ndarray,
+    sections: list[Section],
+    beats: np.ndarray,
+    onsets: np.ndarray,
+    duration: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """The scheduled "moments" timeline: ``(kind, t0, t1, strength)`` arrays.
+
+    Everything the show should *anticipate* rather than chase: stop-gaps (DJ
+    cuts — snap to black, detonate on re-entry), ranked drops (only the
+    track's biggest boundaries earn the full-room detonation), risers (the
+    pre-drop pull-down can build for the build's whole length, not just the
+    final 1.2 s), fills (every lamp joins the last bar before a boundary) and
+    the outro fade (ride it down instead of pulsing on residue). All detected
+    offline from data the analysis already computes — impossible to do live.
+    """
+    kinds: list[int] = []
+    t0s: list[float] = []
+    t1s: list[float] = []
+    ss: list[float] = []
+    n = rms_k.size
+    if n < 200:
+        return (np.zeros(0, dtype=np.int8), np.zeros(0), np.zeros(0),
+                np.zeros(0, dtype=np.float32))
+    k = 5  # ~100 ms loudness smoothing
+    rs = np.convolve(rms_k, np.ones(k) / k, mode="same")
+    p95 = max(float(np.percentile(rs, 95)), 1e-9)
+
+    # --- stop-gaps: near-silence runs bounded by loud passages --------------
+    quiet = rs < max(_GAP_LEVEL * p95, 2.0 * _MIN_AUDIO_RMS)
+    dq = np.diff(np.concatenate([[0], quiet.astype(np.int8), [0]]))
+    ctx = int(round(0.5 / _FRAME_PERIOD))
+    for i0, i1 in zip(np.flatnonzero(dq == 1), np.flatnonzero(dq == -1)):
+        dur = (i1 - i0) * _FRAME_PERIOD
+        if not (_GAP_MIN_S <= dur <= _GAP_MAX_S):
+            continue
+        if i0 < ctx or i1 + ctx > n:
+            continue  # gaps at the very edges are lead-in/lead-out, not cuts
+        before = float(rs[i0 - ctx:i0].mean())
+        after = float(rs[i1:i1 + ctx].mean())
+        if before < _GAP_CONTEXT * p95 or after < _GAP_CONTEXT * p95:
+            continue
+        kinds.append(MOMENT_GAP)
+        t0s.append(i0 * _FRAME_PERIOD)
+        t1s.append(i1 * _FRAME_PERIOD)
+        ss.append(float(np.clip(after / p95, 0.0, 1.0)))
+
+    # --- drops: louder-section boundaries, ranked against each other --------
+    p95b = max(float(np.percentile(bass_env, 95)), 1e-9) if bass_env.size else 1e-9
+    drop_ts: list[float] = []
+    drop_scores: list[float] = []
+    for prev, cur in zip(sections[:-1], sections[1:]):
+        if cur.energy <= prev.energy + 0.15:
+            continue
+        t = cur.start
+        i = int(t / _FRAME_PERIOD)
+        a0 = max(0, i - int(round(1.5 / _FRAME_PERIOD)))
+        a1 = max(a0 + 1, i - int(round(0.3 / _FRAME_PERIOD)))
+        b1 = min(n, i + int(round(0.6 / _FRAME_PERIOD)))
+        surge = 0.0
+        if bass_env.size >= b1 and b1 > i:
+            surge = float(np.clip(
+                (bass_env[i:b1].mean() - bass_env[a0:a1].mean()) / p95b, 0.0, 1.0
+            ))
+        drop_ts.append(float(t))
+        drop_scores.append((cur.energy - prev.energy) + 0.6 * surge)
+    if drop_ts:
+        mx = max(drop_scores)
+        for t, sc in zip(drop_ts, drop_scores):
+            kinds.append(MOMENT_DROP)
+            t0s.append(t)
+            t1s.append(t + 0.5)
+            # Ranked strength: the track's biggest drop detonates at full, the
+            # minor section lifts still register but stay proportionate.
+            ss.append(float(np.clip(sc / max(mx, 1e-9), 0.25, 1.0)))
+
+    # --- risers: sustained centroid+loudness climb ending at a drop ---------
+    if centroid.size >= n:
+        ck = max(1, int(round(1.0 / _FRAME_PERIOD)))
+        cs = np.convolve(centroid[:n], np.ones(ck) / ck, mode="same")
+        for t, sc in zip(drop_ts, drop_scores):
+            i = int(t / _FRAME_PERIOD)
+            ref = max(0, i - int(round(0.4 / _FRAME_PERIOD)))
+            for length_s in _RISER_LENGTHS_S:
+                j = i - int(round(length_s / _FRAME_PERIOD))
+                if j < 0 or ref <= j:
+                    continue
+                if (
+                    cs[ref] - cs[j] > _RISER_CENTROID
+                    and rs[ref] - rs[j] > _RISER_ENERGY * p95
+                ):
+                    kinds.append(MOMENT_RISER)
+                    t0s.append(t - length_s)
+                    t1s.append(t)
+                    ss.append(float(np.clip(sc / max(max(drop_scores), 1e-9), 0.25, 1.0)))
+                    break  # longest qualifying build wins
+
+    # --- fills: onset-density burst in the last bar before a boundary -------
+    if beats.size >= 8 and onsets.size >= 8 and duration > 0:
+        period = float(np.median(np.diff(beats)))
+        bar = 4.0 * period
+        density = onsets.size / duration
+        for s in sections[1:]:
+            b = s.start
+            if b - bar <= 0:
+                continue
+            cnt = int(np.searchsorted(onsets, b) - np.searchsorted(onsets, b - bar))
+            ratio = (cnt / bar) / max(density, 1e-6)
+            if ratio >= _FILL_DENSITY and cnt >= 4:
+                kinds.append(MOMENT_FILL)
+                t0s.append(b - bar)
+                t1s.append(b)
+                ss.append(float(np.clip((ratio - 1.0) / 2.0, 0.2, 1.0)))
+
+    # --- outro fade: a long monotonic-ish ride down to silence --------------
+    tail = int(round(1.0 / _FRAME_PERIOD))
+    if n > tail and float(rs[-tail:].mean()) < _FADE_END_LEVEL * p95:
+        above = np.flatnonzero(rs >= 0.6 * p95)
+        if above.size:
+            i0 = int(above[-1])
+            fade_s = (n - i0) * _FRAME_PERIOD
+            if fade_s >= _FADE_MIN_S:
+                # Mostly-decreasing check: 1-second block means must not climb
+                # back up mid-"fade" (that would be a breakdown, not an outro).
+                nb = (n - i0) // tail
+                if nb >= 2:
+                    blocks = rs[i0:i0 + nb * tail].reshape(nb, tail).mean(axis=1)
+                    rises = float(np.mean(np.diff(blocks) > 0.05 * p95))
+                    if rises < 0.3:
+                        kinds.append(MOMENT_FADE)
+                        t0s.append(i0 * _FRAME_PERIOD)
+                        t1s.append(duration)
+                        ss.append(1.0)
+
+    order = np.argsort(np.asarray(t0s)) if t0s else np.zeros(0, dtype=np.int64)
+    return (
+        np.asarray(kinds, dtype=np.int8)[order],
+        np.asarray(t0s, dtype=np.float64)[order],
+        np.asarray(t1s, dtype=np.float64)[order],
+        np.asarray(ss, dtype=np.float32)[order],
+    )
 
 
 def analyze_pcm(pcm: np.ndarray, sample_rate: int = ANALYSIS_SAMPLE_RATE) -> TrackMap | None:
@@ -1189,6 +1529,15 @@ def _finish_analysis(ex: EnvelopeExtractor) -> tuple[TrackMap | None, MapDiagnos
         return None, diag
     bass_env = np.asarray(ex.bass_env, dtype=np.float64)
     rms = np.asarray(ex.rms, dtype=np.float64)
+    # Perceptual loudness twin (falls back to raw RMS for any extractor that
+    # predates it, e.g. a test double): everything loudness-flavoured below —
+    # section energy, the energy feature, the dynamics profile, the moments —
+    # rides this, while the technical silence checks stay on raw RMS.
+    rms_k = (
+        np.asarray(ex.rms_k, dtype=np.float64)
+        if getattr(ex, "rms_k", None) and len(ex.rms_k) == env.size
+        else rms
+    )
     bands = np.asarray(ex.bands, dtype=np.float32)
     duration = env.size * _FRAME_PERIOD
     diag.analysed_s = duration
@@ -1257,7 +1606,7 @@ def _finish_analysis(ex: EnvelopeExtractor) -> tuple[TrackMap | None, MapDiagnos
         beat_frames = np.zeros(0, dtype=np.int64)
 
     grid_ok = confidence >= MIN_MAP_CONFIDENCE and beats.size >= 8
-    sections = _segment_sections(bands, rms, duration)
+    sections = _segment_sections(bands, rms_k, duration)
     _fill_section_palettes(sections, ex)
     mid_env = np.asarray(ex.mid_env, dtype=np.float64)
     mid_dom = np.asarray(ex.mid_dom, dtype=bool)
@@ -1270,13 +1619,35 @@ def _finish_analysis(ex: EnvelopeExtractor) -> tuple[TrackMap | None, MapDiagnos
     mid_beats, mid_accents = _width_filter(
         mid_beats, mid_accents, np.asarray(ex.width, dtype=np.float64)
     )
-    # Gridless (ambient) playback events: honest detected onsets on the full
-    # envelope — the engine's unlocked flash path and the causal tempo tracker
-    # get real per-event evidence without a fake schedule.
+    # Detected onsets on the full envelope: always computed now — the gridless
+    # (ambient) tier replays them as honest per-event beats, and every tier
+    # uses them for the fill detector and the onset-rate (percussiveness)
+    # diagnostic that drives Auto intensity and the dynamics profile.
+    all_onsets, all_onset_accents = _pick_onsets(env)
     onsets = np.zeros(0)
     onset_accents = np.zeros(0)
     if not grid_ok:
-        onsets, onset_accents = _pick_onsets(env)
+        onsets, onset_accents = all_onsets, all_onset_accents
+
+    # Dynamics profile: loudness range (LRA-like, p95-p10 of the perceptual
+    # frame loudness over the non-silent frames, in dB), percussiveness and
+    # mean normalised energy. The playback engine adapts its reaction
+    # constants per track from these (compressed masters need expansion,
+    # dynamic recordings need headroom), and Auto intensity reads them too.
+    act = rms_k[rms_k > 3.0 * _MIN_AUDIO_RMS]
+    if act.size >= 100:
+        p95_l = float(np.percentile(act, 95))
+        p10_l = float(np.percentile(act, 10))
+        diag.lra_db = float(20.0 * np.log10(max(p95_l, 1e-9) / max(p10_l, 1e-9)))
+        diag.energy_mean = float(np.clip(act / max(p95_l, 1e-9), 0.0, 1.0).mean())
+    diag.onset_rate = float(all_onsets.size / duration) if duration > 0 else 0.0
+
+    # The scheduled "moments" timeline (stop-gaps, ranked drops, risers,
+    # fills, outro fade) — what lets the show anticipate instead of chase.
+    mom_kind, mom_t0, mom_t1, mom_strength = _detect_moments(
+        bass_env, rms_k, np.asarray(ex.centroid, dtype=np.float64),
+        sections, beats, all_onsets, duration,
+    )
 
     diag.bpm = bpm
     diag.confidence = confidence
@@ -1314,12 +1685,16 @@ def _finish_analysis(ex: EnvelopeExtractor) -> tuple[TrackMap | None, MapDiagnos
         accents=accents,
         downbeat=downbeat,
         sections=sections,
-        features=_build_features(ex, env, bass_env, mid_env, rms),
+        features=_build_features(ex, env, bass_env, mid_env, rms_k),
         mid_beats=mid_beats,
         mid_accents=mid_accents,
         onsets=onsets,
         onset_accents=onset_accents,
         diag=diag.as_array(),
+        mom_kind=mom_kind,
+        mom_t0=mom_t0,
+        mom_t1=mom_t1,
+        mom_strength=mom_strength,
     )
     return tm, diag
 
@@ -1381,16 +1756,20 @@ def _build_features(
     env: np.ndarray,
     bass_env: np.ndarray,
     mid_env: np.ndarray,
-    rms: np.ndarray,
+    loudness: np.ndarray,
 ) -> TrackFeatures:
-    """Globally-normalised playback features (offline equivalent of the AGC)."""
+    """Globally-normalised playback features (offline equivalent of the AGC).
+
+    ``loudness`` is the K-weighted per-frame loudness: the energy feature (and
+    therefore replayed salience) is perceptual, matching the live analyzer.
+    """
     named = np.asarray(ex.named_bands, dtype=np.float32)
     bands = np.empty_like(named)
     for c in range(named.shape[1]):
         bands[:, c] = _norm_p(named[:, c], 95.0, floor=0.5)
     return TrackFeatures(
         bands=bands,
-        energy=_norm_p(rms, 95.0, floor=0.01),
+        energy=_norm_p(loudness, 95.0, floor=0.01),
         # Onset envelopes are sparse spikes: anchor on a high percentile so a
         # typical beat lands near 1.0 like the live flux AGC.
         flux=_norm_p(env, 99.0, floor=2.5),

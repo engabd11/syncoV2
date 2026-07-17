@@ -76,7 +76,7 @@ from .const import (
     signal_area_update,
 )
 from .effects.engine import EffectEngine
-from .effects.modes import UNRESTRAINED_MODES, auto_mode_for_bpm
+from .effects.modes import UNRESTRAINED_MODES, auto_mode_for_bpm, auto_mode_for_track
 from .effects.safety import RELAXED_MAX_FLASHES_PER_S, FieldSafety
 from .hue.bridge import EntertainmentConfig, HueBridge
 from .hue.stream import DtlsStream, HueStreamEncoder
@@ -302,6 +302,12 @@ class SyncSession:
         # Per-track regime commitment (item 4): None = undecided, True = use the
         # offline map grid this track, False = stay on the causal grid this track.
         self._map_commit: bool | None = None
+        # Per-track map profile (applied once when a map is adopted): the
+        # dynamics profile pushed into the engine, the chorus section group,
+        # and the musical Auto-intensity level resolved from the map.
+        self._profile_map = None
+        self._chorus_group = -1
+        self._map_auto_level: SyncMode | None = None
         self._play_track: str | None = None  # last track seen by the rhythm models
         self._fallback_track: str | None = None  # track the metadata source opened on
         self._meta_warned_track: str | None = None  # last track warned about
@@ -459,17 +465,21 @@ class SyncSession:
             self._reset_task = self._hass.async_create_task(self._reset_source())
 
     def _maybe_apply_auto_intensity(self, beatgrid: BeatGrid | None) -> None:
-        """When Auto intensity is selected, track the song's tempo to a level.
+        """When Auto intensity is selected, resolve the song to a level.
 
-        Reads the locked BPM and pushes the resolved Subtle/Medium/High into the
-        engine when it changes. Until a fresh tempo lock exists (song start,
-        track change) the last level is held rather than dipping to a default.
+        A track map's musical profile (tempo + percussiveness + energy) is
+        authoritative when available — a 120 BPM ballad and 120 BPM techno
+        finally land on different levels. Without one, the locked BPM ladder
+        decides as before. Until either exists (song start, track change) the
+        last level is held rather than dipping to a default.
         """
         if self._settings.mode is not SyncMode.AUTO:
             return
-        if beatgrid is None or not beatgrid.locked or beatgrid.bpm <= 0:
-            return
-        target = auto_mode_for_bpm(beatgrid.bpm, self._auto_level)
+        target = self._map_auto_level
+        if target is None:
+            if beatgrid is None or not beatgrid.locked or beatgrid.bpm <= 0:
+                return
+            target = auto_mode_for_bpm(beatgrid.bpm, self._auto_level)
         if target is self._auto_level:
             return
         self._auto_level = target
@@ -496,6 +506,11 @@ class SyncSession:
         self._engine.manual_flash(group, strength)
 
     def _apply_colour(self) -> None:
+        # Colour-luminance compensation rides with the Album colours v2 scheme
+        # only (its weighted palettes dwell on single hues, where a dim blue
+        # vs a bright amber distorts the loudness→brightness mapping most);
+        # every other scheme renders exactly as before.
+        self._engine.lum_comp = self._settings.colour is ColorScheme.ALBUM_ART_V2
         # Preset themes are static palettes. Album art (v1/v2) and Song are
         # dynamic (extracted per track / per section), and keep the engine
         # fallback palette until their colours are ready.
@@ -520,6 +535,12 @@ class SyncSession:
         self._map_prev_pos = None
         self._map_section = None
         self._prefetch_key = None  # re-evaluate the next track after a jump
+        # The per-track map profile is stale with the map state.
+        self._profile_map = None
+        self._chorus_group = -1
+        self._map_auto_level = None
+        self._engine.reset_track_profile()
+        self._engine.set_section_identity(-1, False)
 
     async def _reset_source(self) -> None:
         await self._cancel_meta_upgrade()
@@ -836,6 +857,13 @@ class SyncSession:
                         self._chroma_applied = None
                         self._chroma_applied_at = 0.0
                         self._song_palette_from_map = False
+                        # The previous track's dynamics profile / section
+                        # identity / Auto level must not leak onto this one.
+                        self._profile_map = None
+                        self._chorus_group = -1
+                        self._map_auto_level = None
+                        self._engine.reset_track_profile()
+                        self._engine.set_section_identity(-1, False)
                     # Causal beat grid (always running; the fallback rhythm model).
                     beatgrid = self._tempo.update(
                         frame.t_audio, frame.flux, frame.beat, frame.beat_strength,
@@ -856,7 +884,12 @@ class SyncSession:
                     # Drum-pad mode (card taps drive the beats) auto-expires, so
                     # set it from the live window every frame before rendering.
                     self._engine.set_manual_only(now < self._drum_until)
-                    colors = self._engine.render(frame, period, beatgrid, structure)
+                    # Honest wall-clock dt (clamped to 0.5x-2x the nominal frame
+                    # period): the engine's decays, waves and predrop timing
+                    # stay true under scheduler jitter instead of assuming a
+                    # perfect 20 ms every frame.
+                    render_dt = min(2.0 * period, max(0.5 * period, dt))
+                    colors = self._engine.render(frame, render_dt, beatgrid, structure)
                     features = (
                         self._ws_features(frame) if self._ws_active() else None
                     )
@@ -1200,13 +1233,37 @@ class SyncSession:
             use_map = bool(self._map_commit)
         if not use_map or tm is None or pos is None:
             return None
-        grid = tm.grid_at(pos, self._map_prev_pos)
+        prev_pos = self._map_prev_pos
+        grid = tm.grid_at(pos, prev_pos)
         self._map_prev_pos = pos
+
+        # Applied once per adopted map: the dynamics profile (the engine
+        # adapts its reaction constants to this track's measured loudness
+        # range), the chorus group and the musical Auto-intensity level.
+        if tm is not self._profile_map:
+            self._profile_map = tm
+            d = tm.diag
+            self._engine.set_track_profile(float(d[6]) if d.size > 6 else 0.0)
+            self._chorus_group = tm.chorus_group
+            self._map_auto_level = (
+                auto_mode_for_track(
+                    tm.bpm, float(d[7]) if d.size > 7 else 0.0,
+                    float(d[8]) if d.size > 8 else 0.0,
+                )
+                if d.size > 8 else None
+            )
 
         section = tm.section_at(pos)
         prev = self._map_section
         if section is not None:
             structure.section_level = section.energy
+            structure.is_chorus = (
+                section.group >= 0 and section.group == self._chorus_group
+            )
+            if section is not prev:
+                # Chorus recall: every occurrence of the same section group
+                # gets the same palette offset — repeated parts LOOK repeated.
+                self._engine.set_section_identity(section.group, structure.is_chorus)
             # A boundary into a clearly louder section is a *scheduled* drop.
             boundary = tm.next_boundary(pos)
             if (
@@ -1238,6 +1295,36 @@ class SyncSession:
                 self._song_palette_from_map = True
                 self._maybe_publish()
         self._map_section = section
+
+        # The scheduled "moments" timeline (v5 maps; empty dict on older
+        # ones): stop-gaps snap the room black and detonate on re-entry,
+        # risers drive the whole build (not just the final 1.2 s), fills pull
+        # every lamp in for the last bar, ranked drops size their detonation,
+        # and the outro fade rides the lights down with the music.
+        mom = tm.moment_state(pos, prev_pos)
+        if mom:
+            if mom.get("gap"):
+                structure.gap_now = True
+            rel = mom.get("gap_release")
+            if rel is not None:
+                structure.drop_now = True
+                structure.drop_strength = max(0.4, float(rel))
+            riser = mom.get("riser")
+            if riser is not None:
+                structure.build_progress = max(structure.build_progress, float(riser))
+                structure.drop_imminent = True
+                eta = float(mom.get("riser_eta", -1.0))
+                if eta >= 0.0 and (structure.drop_eta_s < 0.0 or eta < structure.drop_eta_s):
+                    structure.drop_eta_s = eta
+            if mom.get("fill"):
+                structure.fill_now = True
+            fade = mom.get("fade")
+            if fade is not None:
+                structure.section_level *= max(0.25, 1.0 - 0.75 * float(fade))
+            drop = mom.get("drop")
+            if drop is not None:
+                structure.drop_now = True
+                structure.drop_strength = float(drop)
         return grid
 
     def _update_live_chroma(self, frame) -> None:

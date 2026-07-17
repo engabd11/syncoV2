@@ -192,6 +192,30 @@ class ModeParams:
     # right-hand lamps and fades from the left ones. 0 disables; frames
     # without pan (mono taps, pre-v4 maps) always render exactly as before.
     pan_gain: float = 0.0
+    # --- perceptual brightness curve -------------------------------------------
+    # Exponent applied to the music-driven brightness headroom above the floor
+    # at emit time. Perceived light follows ~cube-root of luminance while
+    # perceived loudness follows ~p^0.6 of amplitude, so a LINEAR mapping
+    # under-responds: the chorus never LOOKS much louder than the verse.
+    # >1 expands the visual dynamic range toward perceptual proportionality
+    # (endpoints preserved: full stays full, the floor stays the floor).
+    # 1.0 = the legacy linear mapping (Subtle's base==floor makes it inert
+    # there anyway; Movies stays linear on purpose — calm over contrast).
+    bri_gamma: float = 1.0
+    # --- melody follow (what to react to when there is no beat) ---------------
+    # In passages with no discernible beat (intros, bridges, ballads — rhythm
+    # confidence low) the room follows the LEAD line instead of falling to a
+    # flat wash: lead-note onsets (frame.note_beat — broadband-stream events
+    # that are not bass-dominant) drive a soft swell on the vocal-role lamps
+    # (all lamps when role-less). Crossfades out as rhythm confidence returns,
+    # so the verse→drop handover is seamless. 0 disables.
+    melody_gain: float = 0.0
+    # --- treble micro-motion (hi-hat ticks) ------------------------------------
+    # Tiny texture pops on the vocal-role / high lamps from the dedicated
+    # hi-hat/shaker onset stream (frame.high_beat), scaled by rhythm
+    # confidence so they only appear once a groove is established. Amplitude
+    # is deliberately small (≤ ~0.1): texture, never flashing. 0 disables.
+    tick_gain: float = 0.0
 
 
 MODE_PARAMS: dict[SyncMode, ModeParams] = {
@@ -228,6 +252,7 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         salience_gamma=1.3, width_min=0.15, kick_bass_floor=0.30,
         predrop_depth=0.30, phrase_bars=4, phrase_colour_shift=0.03,
         pan_gain=0.5,
+        bri_gamma=1.35, melody_gain=0.30, tick_gain=0.05,
     ),
     # The band on your lights: bass lights snap on kicks, guitar lights pop on
     # mid onsets, and vocal lights shimmer dimly with the singing — assignments
@@ -252,6 +277,7 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         salience_gamma=1.0, width_min=0.12, kick_bass_floor=0.35,
         predrop_depth=0.45, phrase_bars=4, phrase_colour_shift=0.05,
         pan_gain=0.6,
+        bri_gamma=1.45, melody_gain=0.40, tick_gain=0.10,
     ),
     # UNRESTRAINED (eye-safety limiter bypassed - explicit user choice, see
     # effects/safety.py). The SAME smooth dim<->bright SWING as Extreme - the
@@ -276,6 +302,7 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         salience_gamma=0.8, width_min=0.08, nobeat_flash=0.30,
         predrop_depth=0.60, phrase_bars=4, phrase_colour_shift=0.06,
         pan_gain=0.5,
+        bri_gamma=1.5, melody_gain=0.35, tick_gain=0.08,
     ),
     # UNRESTRAINED maximum club. The same quick dim<->bright SWING as Intense,
     # but a TRUE dark room: floor 0, so the quiet parts go black and every beat
@@ -298,6 +325,9 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         salience_gamma=0.6, width_min=0.05, nobeat_flash=0.20,
         predrop_depth=0.85, phrase_bars=4, phrase_colour_shift=0.08,
         pan_gain=0.4,
+        # The widest dark<->bright swing earns the strongest perceptual curve;
+        # no ticks — the true dark room stays clean between hits.
+        bri_gamma=1.6, melody_gain=0.25, tick_gain=0.0,
     ),
 }
 
@@ -331,6 +361,31 @@ def auto_mode_for_bpm(bpm: float, current: SyncMode) -> SyncMode:
     if bpm < low_edge:
         return SyncMode.SUBTLE
     if bpm > high_edge:
+        return SyncMode.HIGH
+    return SyncMode.MEDIUM
+
+
+def auto_mode_for_track(
+    bpm: float, onset_rate: float, energy_mean: float
+) -> SyncMode | None:
+    """Resolve Auto intensity from a track map's MUSICAL profile, not BPM alone.
+
+    A 120 BPM ballad and 120 BPM techno should not get the same level: the
+    score blends tempo with percussiveness (broadband onsets per second — how
+    much the track actually *hits*) and its mean loudness. Decided once per
+    track (the map is authoritative), so no hysteresis is needed; returns None
+    when the profile looks unmeasured (pre-v5 map) so the caller falls back to
+    the BPM ladder. Never returns Intense/Extreme — those stay manual-only.
+    """
+    if bpm <= 0 or onset_rate <= 0.0:
+        return None
+    tempo = min(1.0, max(0.0, (bpm - 85.0) / 50.0))       # 85..135 BPM -> 0..1
+    perc = min(1.0, onset_rate / 2.5)                      # ~2.5 hits/s = full
+    energy = min(1.0, max(0.0, energy_mean / 0.6))         # p95-normalised mean
+    score = 0.45 * tempo + 0.35 * perc + 0.20 * energy
+    if score < 0.35:
+        return SyncMode.SUBTLE
+    if score > 0.62:
         return SyncMode.HIGH
     return SyncMode.MEDIUM
 
@@ -655,6 +710,12 @@ def render(engine, frame) -> dict[int, tuple[RGB, float]]:
     env_mul = 0.6 + 0.4 * lvl
     wave_mul = 0.5 + 0.5 * lvl
     span = 0.4 + 0.6 * lvl
+    # Chorus recall: the track's recurring highest-energy section opens the
+    # full colour span and rolls slightly bigger waves — the same identity on
+    # every occurrence, so the chorus visibly IS the chorus each time.
+    if getattr(engine, "chorus_now", False):
+        span = min(1.0, span * 1.25)
+        wave_mul = min(1.0, wave_mul * 1.15)
     base_term = p.floor + (p.base - p.floor) * base_mul
     # The LedFx continuous layer fades in with loudness so silence rests dark.
     music = frame.energy / _MUSIC_GATE
@@ -702,6 +763,15 @@ def render(engine, frame) -> dict[int, tuple[RGB, float]]:
             # then shimmers with the singing on top - softened a touch, but never
             # the dim, starved layer it used to be.
             bri = 0.75 * bri + p.shimmer * vocal_drive * _shimmer(t, ch.channel_id)
+        if p.melody_gain:
+            # Melody follow: in beatless passages (the engine crossfades this in
+            # as rhythm confidence falls) the lead line's note onsets swell the
+            # room — vocal-role lamps carry it fully, the rest at half, so the
+            # song's story never drops to a flat wash between grooves.
+            ml = getattr(engine, "melody_level", 0.0)
+            if ml > 0.0:
+                w = 1.0 if (not has_roles or role == ROLE_VOCAL) else 0.5
+                bri += p.melody_gain * ml * w
         if p.spread:
             bri += p.spread * env.get(info["band"], 0.0)
         if p.height_freq:
@@ -732,7 +802,9 @@ def render(engine, frame) -> dict[int, tuple[RGB, float]]:
         # every lamp its own distinct hue (the apartment-sync look) instead of
         # near-neighbours on a smooth gradient.
         cpos = info["xrank"] * span * p.colour_spread
-        colour = engine.palette.sample(cpos + rot + engine.colour_phase)
+        colour = engine.palette.sample(
+            cpos + rot + engine.colour_phase + getattr(engine, "section_offset", 0.0)
+        )
         # Theme-faithful value: a dark palette swatch (dark silver, deep purple)
         # renders as dimmer light, so moody album art gives a moody show. The
         # engine's chroma pipeline renormalises colour, so the value must be
