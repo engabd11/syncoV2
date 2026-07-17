@@ -298,6 +298,22 @@ const CARD_CSS = `
   .hue-seg-label { position: relative; z-index: 1; white-space: nowrap; }
   .hue-seg-glow { position: absolute; inset: 0; opacity: .14; }
 
+  /* -- Auto enabled-rungs checklist (shown when Intensity = Auto) -- */
+  .hue-autolist { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .hue-autochip { position: relative; display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 10px; border-radius: 999px; border: 1px solid var(--hue-line);
+    background: #00000022; color: var(--hue-dim); font-family: var(--hk); font-size: 11px;
+    font-weight: 600; cursor: pointer; transition: .16s; user-select: none; }
+  .hue-autochip:hover { color: var(--hue-text); }
+  .hue-autochip.on { color: #fff; background: #ffffff10; }
+  .hue-autochip .hue-autotick { width: 13px; height: 13px; border-radius: 4px; flex: none;
+    border: 1px solid currentColor; display: inline-flex; align-items: center; justify-content: center;
+    font-size: 10px; line-height: 1; opacity: .5; }
+  .hue-autochip.on .hue-autotick { opacity: 1; }
+  .hue-autochip.live { box-shadow: 0 0 0 1px currentColor inset; }
+  .hue-autochip .hue-autolive { width: 6px; height: 6px; border-radius: 50%; background: currentColor;
+    box-shadow: 0 0 8px currentColor; }
+
   /* -- palette dots -- */
   .hue-dots { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; }
   .hue-dot { position: relative; border: none; border-radius: 50%; cursor: pointer; padding: 0; width: 26px; height: 26px;
@@ -629,6 +645,7 @@ class HueMusicSyncCard extends HTMLElement {
       colour: "aurora",
       brightness: 64,
       timing: -60,
+      autoLevels: ["subtle", "medium", "high"],
     };
 
     this._viz = new Viz(40);
@@ -1033,14 +1050,22 @@ class HueMusicSyncCard extends HTMLElement {
     const ba = swAttr.beat_anchor ?? mpAttr.beat_anchor;
     const beatAnchor = ba != null && Number.isFinite(Number(ba)) ? Number(ba) : null;
 
-    // When Auto intensity is active, the integration publishes the level it
-    // resolved to from the song's tempo (subtle/medium/high) so we can show it.
+    // When Auto intensity is active, the integration publishes the rung it
+    // resolved to from the music (subtle..extreme) so we can show it, plus the
+    // enabled set the picker may choose from (the checklist below the control).
     const autoMode = intensityVal === "auto" && swAttr.auto_mode
       ? String(swAttr.auto_mode) : null;
+    const liveAutoLevels =
+      Array.isArray(swAttr.auto_levels) && swAttr.auto_levels.length
+        ? swAttr.auto_levels.map((s) => String(s)) : null;
+    // Live state wins and seeds the optimistic copy the toggles update.
+    if (liveAutoLevels) this._ui.autoLevels = liveAutoLevels;
+    const autoLevels = liveAutoLevels || this._ui.autoLevels
+      || ["subtle", "medium", "high"];
 
     return {
       area, on,
-      intensity: { ...intensity, value: intensityVal, autoMode },
+      intensity: { ...intensity, value: intensityVal, autoMode, autoLevels },
       effect: { ...effect, value: effectVal },
       colour: {
         entity: colourEntity, value: colourVal, options: colourOptions,
@@ -1381,12 +1406,17 @@ class HueMusicSyncCard extends HTMLElement {
 
     const intensityHint = m.intensity.autoMode
       ? `Auto · ${titleize(m.intensity.autoMode)}` : null;
-    body.appendChild(
-      this._segField("Intensity", m.intensity.options, m.intensity.value, accent, (v) => {
+    const intensityField = this._segField(
+      "Intensity", m.intensity.options, m.intensity.value, accent, (v) => {
         this._callSelect(m.intensity.entity, v, "intensity");
         this._render();
-      }, true, intensityHint)
-    );
+      }, true, intensityHint);
+    // With Auto selected, offer the enabled-rungs checklist: the picker only
+    // climbs into a rung that is ticked (Intense/Extreme stay off by default).
+    if (m.intensity.value === "auto") {
+      intensityField.appendChild(this._autoLevels(m, accent));
+    }
+    body.appendChild(intensityField);
     body.appendChild(
       this._segField("Effect", m.effect.options, m.effect.value, accent, (v) => {
         this._callSelect(m.effect.entity, v, "effect");
@@ -1866,6 +1896,67 @@ class HueMusicSyncCard extends HTMLElement {
       seg.appendChild(b);
     });
     return seg;
+  }
+
+  // The Auto enabled-rungs checklist. Ticking Intense/Extreme lets the picker
+  // climb there on a big enough moment; the last ticked rung can't be removed
+  // (Auto always needs somewhere to sit).
+  _autoLevels(m, accent) {
+    const RUNGS = ["subtle", "medium", "high", "intense", "extreme"];
+    const selected = new Set(
+      (m.intensity.autoLevels || []).map((s) => String(s).toLowerCase())
+    );
+    const live = m.intensity.autoMode
+      ? String(m.intensity.autoMode).toLowerCase() : null;
+    const list = document.createElement("div");
+    list.className = "hue-autolist";
+    RUNGS.forEach((rung) => {
+      const on = selected.has(rung);
+      const isLive = on && rung === live;
+      const chip = document.createElement("button");
+      chip.className = "hue-autochip" + (on ? " on" : "") + (isLive ? " live" : "");
+      chip.type = "button";
+      if (on) chip.style.color = accent;
+      const tick = document.createElement("span");
+      tick.className = "hue-autotick";
+      tick.textContent = on ? "✓" : "";
+      chip.appendChild(tick);
+      const lab = document.createElement("span");
+      lab.textContent = titleize(rung);
+      chip.appendChild(lab);
+      if (isLive) {
+        // A small dot marks the rung Auto is sitting on right now.
+        const dot = document.createElement("span");
+        dot.className = "hue-autolive";
+        chip.appendChild(dot);
+        chip.title = "Currently active";
+      }
+      chip.addEventListener("click", () => {
+        const next = new Set(selected);
+        if (next.has(rung)) {
+          if (next.size <= 1) return;  // keep at least one rung enabled
+          next.delete(rung);
+        } else {
+          next.add(rung);
+        }
+        const levels = RUNGS.filter((r) => next.has(r));  // canonical order
+        this._callAutoLevels(m.area, levels);
+        this._render();
+      });
+      list.appendChild(chip);
+    });
+    return list;
+  }
+
+  _callAutoLevels(area, levels) {
+    // Optimistic: reflect the tick immediately, then persist via the service
+    // (which live-applies to a running session). Demo mode just updates the UI.
+    this._ui.autoLevels = levels;
+    if (area && area.switch && this._hass) {
+      this._hass.callService("hue_music_sync", "set_options", {
+        entity_id: area.switch, auto_levels: levels,
+      });
+    }
   }
 
   _dots(options, value, onChange) {

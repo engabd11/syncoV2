@@ -47,6 +47,7 @@ from .const import (
     ANALYSIS_SAMPLE_RATE,
     BANDS,
     CONF_AREAS,
+    CONF_AUTO_LEVELS,
     CONF_BRIGHTNESS,
     CONF_COLOUR,
     CONF_EFFECT,
@@ -59,6 +60,7 @@ from .const import (
     CONF_SUBSONIC_URL,
     CONF_SUBSONIC_USER,
     CONF_TIMING_MS,
+    DEFAULT_AUTO_LEVELS,
     DEFAULT_BRIGHTNESS,
     DEFAULT_COLOUR,
     DEFAULT_EFFECT,
@@ -76,7 +78,11 @@ from .const import (
     signal_area_update,
 )
 from .effects.engine import EffectEngine
-from .effects.modes import UNRESTRAINED_MODES, auto_mode_for_bpm
+from .effects.modes import (
+    UNRESTRAINED_MODES,
+    AutoIntensityPicker,
+    sanitize_auto_levels,
+)
 from .effects.safety import RELAXED_MAX_FLASHES_PER_S, FieldSafety
 from .hue.bridge import EntertainmentConfig, HueBridge
 from .hue.stream import DtlsStream, HueStreamEncoder
@@ -191,6 +197,9 @@ class AreaSettings:
     timing_ms: int = DEFAULT_TIMING_MS
     media_player: str | None = None
     latency_ms: int = DEFAULT_LATENCY_MS
+    # The rungs Auto may pick from (ascending, non-empty). Only meaningful when
+    # ``mode`` is Auto; ignored otherwise.
+    auto_levels: tuple[SyncMode, ...] = DEFAULT_AUTO_LEVELS
 
     @classmethod
     def from_dict(cls, data: dict) -> AreaSettings:
@@ -214,6 +223,9 @@ class AreaSettings:
             timing_ms=int(data.get(CONF_TIMING_MS, DEFAULT_TIMING_MS)),
             media_player=data.get(CONF_MEDIA_PLAYER),
             latency_ms=int(data.get(CONF_LATENCY_MS, DEFAULT_LATENCY_MS)),
+            auto_levels=sanitize_auto_levels(
+                data.get(CONF_AUTO_LEVELS, DEFAULT_AUTO_LEVELS)
+            ),
         )
 
     def to_dict(self) -> dict:
@@ -225,6 +237,7 @@ class AreaSettings:
             CONF_TIMING_MS: self.timing_ms,
             CONF_MEDIA_PLAYER: self.media_player,
             CONF_LATENCY_MS: self.latency_ms,
+            CONF_AUTO_LEVELS: [str(m) for m in self.auto_levels],
         }
 
 
@@ -327,6 +340,9 @@ class SyncSession:
         # track changes (a transient tempo unlock keeps the last level rather than
         # dipping) and defaults to Medium before any tempo has locked.
         self._auto_level: SyncMode = SyncMode.MEDIUM
+        # Musical Auto-intensity picker: turns the live feature stream into a
+        # rung, gated to the user's enabled set. Reset on every track change.
+        self._auto_picker = AutoIntensityPicker()
         self._beat_anchor: float | None = None  # stable downbeat ref for the card
         self._last_publish = 0.0
         # Background probe that upgrades the metadata fallback to a real tap.
@@ -433,6 +449,10 @@ class SyncSession:
             self._safety_relaxed.reset()
             self._was_unrestrained = self._unrestrained()
             self._last_safe_t = None
+        if settings.auto_levels != prev.auto_levels:
+            # Let a checklist change re-clamp the pick on the next frame instead
+            # of waiting out the dwell — toggling a rung feels immediate.
+            self._auto_picker.allow_immediate_repick()
         if settings.colour != prev.colour:
             self._apply_colour()
             # Re-extract album art if switching to Album (both guards, or the
@@ -458,18 +478,29 @@ class SyncSession:
                 self._reset_task.cancel()
             self._reset_task = self._hass.async_create_task(self._reset_source())
 
-    def _maybe_apply_auto_intensity(self, beatgrid: BeatGrid | None) -> None:
-        """When Auto intensity is selected, track the song's tempo to a level.
+    def _maybe_apply_auto_intensity(
+        self, frame, beatgrid: BeatGrid | None, dt: float
+    ) -> None:
+        """When Auto is selected, resolve the music to a rung and apply it.
 
-        Reads the locked BPM and pushes the resolved Subtle/Medium/High into the
-        engine when it changes. Until a fresh tempo lock exists (song start,
-        track change) the last level is held rather than dipping to a default.
+        Feeds the live features (loudness, salience, tempo, beat) to the musical
+        picker, which maps them to a rung and clamps it to the user's enabled
+        set (``settings.auto_levels``): calm passages sit low, and a big
+        moment climbs — up to Intense/Extreme when those rungs are enabled. The
+        picker owns its own smoothing/hysteresis, so this only reacts on an
+        actual change.
         """
         if self._settings.mode is not SyncMode.AUTO:
             return
-        if beatgrid is None or not beatgrid.locked or beatgrid.bpm <= 0:
-            return
-        target = auto_mode_for_bpm(beatgrid.bpm, self._auto_level)
+        bpm = beatgrid.bpm if beatgrid is not None and beatgrid.locked else 0.0
+        target = self._auto_picker.update(
+            dt,
+            energy=frame.energy,
+            salience=frame.salience,
+            bpm=bpm,
+            beat=frame.beat,
+            allowed=self._settings.auto_levels,
+        )
         if target is self._auto_level:
             return
         self._auto_level = target
@@ -520,6 +551,9 @@ class SyncSession:
         self._map_prev_pos = None
         self._map_section = None
         self._prefetch_key = None  # re-evaluate the next track after a jump
+        # The Auto picker is deliberately NOT reset here: its smoothing carries
+        # across the track boundary so the room transitions instead of dipping,
+        # and a loud tail bleeding into a quiet intro decays out within ~2 s.
 
     async def _reset_source(self) -> None:
         await self._cancel_meta_upgrade()
@@ -852,7 +886,7 @@ class SyncSession:
                     if map_grid is not None:
                         beatgrid = map_grid
                     self._last_beatgrid = beatgrid
-                    self._maybe_apply_auto_intensity(beatgrid)
+                    self._maybe_apply_auto_intensity(frame, beatgrid, period)
                     # Drum-pad mode (card taps drive the beats) auto-expires, so
                     # set it from the live window every frame before rendering.
                     self._engine.set_manual_only(now < self._drum_until)
@@ -954,9 +988,13 @@ class SyncSession:
             await self._safe_send(*send)  # else still filling the buffer; hold
 
     def _unrestrained(self) -> bool:
-        """True in the explicit club modes that bypass the flash limiter."""
+        """True in the explicit club modes that bypass the flash limiter.
+
+        Uses the *effective* mode so an Auto pick of Intense/Extreme runs the
+        same relaxed limiter as picking it by hand — Auto's Intense is Intense.
+        """
         return (
-            self._settings.mode in UNRESTRAINED_MODES
+            self._effective_mode(self._settings.mode) in UNRESTRAINED_MODES
             and self._settings.effect is not SyncEffect.MOVIES
         )
 
@@ -1392,6 +1430,9 @@ class SyncSession:
         # card can show e.g. "Auto · High".
         if self._settings.mode is SyncMode.AUTO:
             state["auto_mode"] = str(self._auto_level)
+            # The rungs Auto may pick from, so the card can show/drive the
+            # enabled-set checklist.
+            state["auto_levels"] = [str(m) for m in self._settings.auto_levels]
         if self._map_section is not None:
             # Current track-map section loudness (0..1) for dashboards.
             state["section_energy"] = round(self._map_section.energy, 2)

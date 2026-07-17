@@ -20,6 +20,7 @@ CONF_BRIDGE_CERT: Final = "bridge_certificate"
 
 # --- Per-area option keys ------------------------------------------------
 CONF_MODE: Final = "mode"
+CONF_AUTO_LEVELS: Final = "auto_levels"
 CONF_EFFECT: Final = "effect"
 CONF_COLOUR: Final = "colour"
 CONF_BRIGHTNESS: Final = "brightness"
@@ -140,7 +141,7 @@ class SyncMode(StrEnum):
     Parameters per mode live in ``effects.modes.MODE_PARAMS``.
     """
 
-    AUTO = "auto"  # pick Subtle/Medium/High from the song's tempo (see AUTO_BPM_*)
+    AUTO = "auto"  # pick a rung live from the music's intensity, gated to an enabled set
     SUBTLE = "subtle"  # seamless: steady level, colour just flows/shifts smoothly
     MEDIUM = "medium"  # gentle club: visible dimming, soft flashes on strong beats
     HIGH = "high"  # the band: per-instrument spatial split, kicks/guitar/vocals
@@ -173,6 +174,23 @@ DEFAULT_COLOUR: Final = ColorScheme.ALBUM_ART
 AUTO_BPM_LOW: Final = 95.0
 AUTO_BPM_HIGH: Final = 125.0
 AUTO_BPM_MARGIN: Final = 6.0
+
+# The intensity ladder in ascending order (Auto is the picker itself, not a
+# rung). The Auto picker maps a live musical-intensity signal to a rung via
+# ABSOLUTE thresholds, then gates the pick to the user's enabled set — so a
+# rung always means the same size of musical moment, and enabling Intense /
+# Extreme only unlocks the ceiling rather than rescaling everything below.
+INTENSITY_LADDER: Final = (
+    SyncMode.SUBTLE,
+    SyncMode.MEDIUM,
+    SyncMode.HIGH,
+    SyncMode.INTENSE,
+    SyncMode.EXTREME,
+)
+# Which rungs Auto may choose from until the user says otherwise. Subtle /
+# Medium / High keeps the historical behaviour (Intense / Extreme stay opt-in),
+# so an existing Auto user sees no change until they add a rung.
+DEFAULT_AUTO_LEVELS: Final = (SyncMode.SUBTLE, SyncMode.MEDIUM, SyncMode.HIGH)
 
 PLATFORMS: Final = ["switch", "select", "number", "button", "sensor"]
 

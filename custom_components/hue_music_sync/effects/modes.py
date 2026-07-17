@@ -59,7 +59,14 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from ..const import AUTO_BPM_HIGH, AUTO_BPM_LOW, AUTO_BPM_MARGIN, SyncMode
+from ..const import (
+    AUTO_BPM_HIGH,
+    AUTO_BPM_LOW,
+    AUTO_BPM_MARGIN,
+    DEFAULT_AUTO_LEVELS,
+    INTENSITY_LADDER,
+    SyncMode,
+)
 from ..color.palette import RGB
 
 
@@ -333,6 +340,174 @@ def auto_mode_for_bpm(bpm: float, current: SyncMode) -> SyncMode:
     if bpm > high_edge:
         return SyncMode.HIGH
     return SyncMode.MEDIUM
+
+
+# --- musical Auto intensity picker ------------------------------------------
+# A rung's ABSOLUTE upper edge on the 0..1 intensity signal. Because these are
+# fixed (not rescaled by how many rungs are enabled), "Intense" always means
+# the same size of musical moment: enabling it merely unlocks a ceiling the
+# signal was already reaching. Extreme has no upper edge (the top of the range).
+_LEVEL_EDGE: dict[SyncMode, float] = {
+    SyncMode.SUBTLE: 0.32,
+    SyncMode.MEDIUM: 0.55,
+    SyncMode.HIGH: 0.76,
+    SyncMode.INTENSE: 0.90,
+    SyncMode.EXTREME: 1.01,
+}
+# Signal margin you must cross past a rung's edge before the change commits
+# (anti-flicker on the band boundary), a floor on seconds between committed
+# switches (mode changes reset the flash-limiter anchor, so they must not
+# thrash), and the asymmetric smoothing on the raw signal: rise fast so a drop
+# reaches its rung within ~a second, fall slow so a brief dip doesn't drop the
+# room out of the chorus.
+_PICK_HYST = 0.05
+_PICK_DWELL_S = 2.0
+_PICK_ATTACK = 0.14   # per-frame EMA weight while the signal is rising
+_PICK_DECAY = 0.03    # per-frame EMA weight while it is falling
+# Beats/second that reads as fully percussive (fast 16-note-ish groove).
+_PICK_BEAT_FULL = 3.0
+# Tempo term: BPM mapped across a ballad..club-techno span.
+_PICK_BPM_LO = 85.0
+_PICK_BPM_HI = 150.0
+
+
+def _intensity_signal(energy: float, salience: float, tempo: float, perc: float) -> float:
+    """Blend live features into one 0..1 musical-intensity signal.
+
+    Loudness is the gate: ``salience`` (how big this moment is versus the rest
+    of the track — it spikes on drops/choruses) can only *amplify* a loud
+    moment, never manufacture intensity out of a quiet one, so a silent intro
+    can't trip Intense. Tempo and percussiveness add a modest steady-state lift
+    so a fast, busy track sits a rung higher than a sparse one at equal loudness.
+    """
+    loud = max(0.0, min(1.0, energy))
+    moment = loud * (0.55 + 0.45 * max(0.0, min(1.0, salience)))
+    raw = 0.68 * moment + 0.16 * max(0.0, min(1.0, tempo)) + 0.16 * max(0.0, min(1.0, perc))
+    return max(0.0, min(1.0, raw))
+
+
+class AutoIntensityPicker:
+    """Resolve Auto to a concrete rung from the music, gated to an enabled set.
+
+    Fed the live per-frame features, it maintains a smoothed intensity signal
+    and maps it to a rung by absolute thresholds, then clamps that to the rungs
+    the user enabled (``allowed``). Escalation to Intense/Extreme therefore
+    happens only on genuinely big moments AND only when those rungs are enabled;
+    otherwise the pick caps at the highest enabled rung, reproducing the classic
+    Subtle/Medium/High behaviour. Hysteresis + a dwell floor keep it from
+    flickering between rungs. This is purely a *selection* — it never changes how
+    any rung renders.
+    """
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        """Start fresh (session start). Seeds the signal mid-range so the room
+        opens around Medium and adapts, rather than ramping up from black."""
+        self._signal = 0.45  # ≈ Medium band, matching the historical default
+        self._beat_rate = 0.0
+        self._nat: SyncMode | None = None   # ungated natural rung (drives hysteresis)
+        self._level: SyncMode | None = None  # gated, emitted rung
+        self._since_switch = _PICK_DWELL_S   # allow the first pick immediately
+
+    @property
+    def level(self) -> SyncMode | None:
+        return self._level
+
+    def allow_immediate_repick(self) -> None:
+        """Clear the dwell so the next :meth:`update` may switch at once (used
+        when the enabled set changes so a checklist toggle feels instant)."""
+        self._since_switch = _PICK_DWELL_S
+
+    def update(
+        self,
+        dt: float,
+        *,
+        energy: float,
+        salience: float,
+        bpm: float,
+        beat: bool,
+        allowed: tuple[SyncMode, ...],
+    ) -> SyncMode:
+        """Advance one frame and return the rung Auto should be at now."""
+        # Percussiveness: a leaky-integrator estimate of beats/second (decays
+        # through quiet bridges, climbs on a busy groove). With time-constant
+        # tau, adding 1/tau per beat and bleeding rate*dt/tau per frame settles
+        # at the true beats/second for a steady groove.
+        tau = 1.5
+        self._beat_rate *= max(0.0, 1.0 - dt / tau)
+        if beat:
+            self._beat_rate += 1.0 / tau
+        perc = max(0.0, min(1.0, self._beat_rate / _PICK_BEAT_FULL))
+        tempo = (
+            max(0.0, min(1.0, (bpm - _PICK_BPM_LO) / (_PICK_BPM_HI - _PICK_BPM_LO)))
+            if bpm > 0.0 else 0.5
+        )
+        raw = _intensity_signal(energy, salience, tempo, perc)
+        alpha = _PICK_ATTACK if raw > self._signal else _PICK_DECAY
+        self._signal += (raw - self._signal) * alpha
+        self._since_switch += dt
+
+        self._nat = self._natural_rung(self._signal, self._nat)
+        target = self._gate(self._nat, allowed)
+        if target is not self._level and self._since_switch >= _PICK_DWELL_S:
+            self._level = target
+            self._since_switch = 0.0
+        elif self._level is None:
+            self._level = target  # first frame: adopt without waiting on dwell
+        return self._level
+
+    @staticmethod
+    def _natural_rung(signal: float, current: SyncMode | None) -> SyncMode:
+        """The rung the raw signal maps to, with a hysteresis dead-band.
+
+        Rising past a rung's edge needs ``+_PICK_HYST`` of headroom; falling
+        needs ``-_PICK_HYST`` below the rung below. Multi-rung jumps are allowed
+        in one step, so a drop can vault straight from Subtle to Intense.
+        """
+        cur = INTENSITY_LADDER.index(current) if current in INTENSITY_LADDER else 0
+        idx = cur if current is not None else 0
+        last = len(INTENSITY_LADDER) - 1
+        # Climb while comfortably over the current rung's ceiling.
+        while idx < last and signal > _LEVEL_EDGE[INTENSITY_LADDER[idx]] + _PICK_HYST:
+            idx += 1
+        # Fall while comfortably under the rung-below's ceiling.
+        while idx > 0 and signal < _LEVEL_EDGE[INTENSITY_LADDER[idx - 1]] - _PICK_HYST:
+            idx -= 1
+        return INTENSITY_LADDER[idx]
+
+    @staticmethod
+    def _gate(natural: SyncMode, allowed: tuple[SyncMode, ...]) -> SyncMode:
+        """Clamp a natural rung to the enabled set: the highest enabled rung at
+        or below it, or — if every enabled rung sits above it — the lowest."""
+        idxs = sorted(
+            INTENSITY_LADDER.index(m) for m in allowed if m in INTENSITY_LADDER
+        )
+        if not idxs:
+            idxs = [INTENSITY_LADDER.index(m) for m in DEFAULT_AUTO_LEVELS]
+        nat = INTENSITY_LADDER.index(natural)
+        at_or_below = [i for i in idxs if i <= nat]
+        return INTENSITY_LADDER[at_or_below[-1] if at_or_below else idxs[0]]
+
+
+def sanitize_auto_levels(levels) -> tuple[SyncMode, ...]:
+    """Normalise a user-supplied enabled set to valid, ordered, non-empty rungs.
+
+    Accepts SyncMode or str members, drops Auto and anything unknown, dedupes,
+    orders by the ladder, and falls back to the default set when nothing valid
+    remains — so a bad or empty selection can never leave Auto with no rung.
+    """
+    out: list[SyncMode] = []
+    for item in levels or ():
+        try:
+            m = SyncMode(item)
+        except ValueError:
+            continue
+        if m in INTENSITY_LADDER and m not in out:
+            out.append(m)
+    out.sort(key=INTENSITY_LADDER.index)
+    return tuple(out) if out else tuple(DEFAULT_AUTO_LEVELS)
 
 
 # Parameters for the Movies *effect* (not part of the intensity ladder).

@@ -105,6 +105,10 @@
           "name": "Mode",
           "description": "Intensity/rhythm mode to use."
         },
+        "auto_levels": {
+          "name": "Auto rungs",
+          "description": "With mode auto, the intensities the picker may choose from. It climbs into Intense/Extreme only if included and the moment earns it."
+        },
         "effect": {
           "name": "Effect",
           "description": "Renderer/effect style: music, movies or fireworks."
@@ -134,6 +138,10 @@
         "mode": {
           "name": "Mode",
           "description": "Intensity/rhythm mode to use."
+        },
+        "auto_levels": {
+          "name": "Auto rungs",
+          "description": "With mode auto, the intensities the picker may choose from. It climbs into Intense/Extreme only if included and the moment earns it."
         },
         "effect": {
           "name": "Effect",

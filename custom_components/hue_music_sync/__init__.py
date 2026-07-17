@@ -30,6 +30,7 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     CONF_APP_KEY,
+    CONF_AUTO_LEVELS,
     CONF_BRIDGE_CERT,
     CONF_BRIGHTNESS,
     CONF_CLIENT_KEY,
@@ -42,6 +43,7 @@ from .const import (
     CONF_SUBSONIC_URL,
     CONF_SUBSONIC_USER,
     DOMAIN,
+    INTENSITY_LADDER,
     PLATFORMS,
     SIGNAL_PREWARM,
     ColorScheme,
@@ -49,6 +51,7 @@ from .const import (
     SyncMode,
 )
 from .coordinator import SyncManager, trackmap_cache_dir
+from .effects.modes import sanitize_auto_levels
 from .hue.bridge import HueBridge, HueBridgeError
 
 _LOGGER = logging.getLogger(__name__)
@@ -446,6 +449,8 @@ def _register_services(hass: HomeAssistant) -> None:
         changes: dict = {}
         if CONF_MODE in call.data:
             changes["mode"] = SyncMode(call.data[CONF_MODE])
+        if CONF_AUTO_LEVELS in call.data:
+            changes["auto_levels"] = sanitize_auto_levels(call.data[CONF_AUTO_LEVELS])
         if CONF_EFFECT in call.data:
             changes["effect"] = SyncEffect(call.data[CONF_EFFECT])
         if CONF_COLOUR in call.data:
@@ -478,6 +483,10 @@ def _register_services(hass: HomeAssistant) -> None:
 
     options_fields = {
         vol.Optional(CONF_MODE): vol.In([str(m) for m in SyncMode]),
+        # The rungs Auto may pick from (only meaningful with mode=auto).
+        vol.Optional(CONF_AUTO_LEVELS): vol.All(
+            cv.ensure_list, [vol.In([str(m) for m in INTENSITY_LADDER])]
+        ),
         vol.Optional(CONF_EFFECT): vol.In([str(e) for e in SyncEffect]),
         vol.Optional(CONF_COLOUR): vol.In([str(c) for c in ColorScheme]),
         vol.Optional(CONF_BRIGHTNESS): vol.All(

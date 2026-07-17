@@ -21,6 +21,21 @@ activate:
             - high
             - intense
             - extreme
+    auto_levels:
+      name: Auto rungs
+      description: >-
+        With mode "auto", the intensities the picker may choose from. It climbs
+        into Intense/Extreme only if they are included AND the moment earns it.
+      required: false
+      selector:
+        select:
+          multiple: true
+          options:
+            - subtle
+            - medium
+            - high
+            - intense
+            - extreme
     effect:
       name: Effect
       description: Renderer/effect style — music, movies or fireworks.
@@ -96,6 +111,21 @@ set_options:
         select:
           options:
             - auto
+            - subtle
+            - medium
+            - high
+            - intense
+            - extreme
+    auto_levels:
+      name: Auto rungs
+      description: >-
+        With mode "auto", the intensities the picker may choose from. It climbs
+        into Intense/Extreme only if they are included AND the moment earns it.
+      required: false
+      selector:
+        select:
+          multiple: true
+          options:
             - subtle
             - medium
             - high
