@@ -298,21 +298,10 @@ const CARD_CSS = `
   .hue-seg-label { position: relative; z-index: 1; white-space: nowrap; }
   .hue-seg-glow { position: absolute; inset: 0; opacity: .14; }
 
-  /* -- Auto enabled-rungs checklist (shown when Intensity = Auto) -- */
-  .hue-autolist { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-  .hue-autochip { position: relative; display: inline-flex; align-items: center; gap: 6px;
-    padding: 6px 10px; border-radius: 999px; border: 1px solid var(--hue-line);
-    background: #00000022; color: var(--hue-dim); font-family: var(--hk); font-size: 11px;
-    font-weight: 600; cursor: pointer; transition: .16s; user-select: none; }
-  .hue-autochip:hover { color: var(--hue-text); }
-  .hue-autochip.on { color: #fff; background: #ffffff10; }
-  .hue-autochip .hue-autotick { width: 13px; height: 13px; border-radius: 4px; flex: none;
-    border: 1px solid currentColor; display: inline-flex; align-items: center; justify-content: center;
-    font-size: 10px; line-height: 1; opacity: .5; }
-  .hue-autochip.on .hue-autotick { opacity: 1; }
-  .hue-autochip.live { box-shadow: 0 0 0 1px currentColor inset; }
-  .hue-autochip .hue-autolive { width: 6px; height: 6px; border-radius: 50%; background: currentColor;
-    box-shadow: 0 0 8px currentColor; }
+  /* -- Auto enabled-rungs checklist (shown when Intensity = Auto). Reuses the
+     area-dropdown trigger/menu/row styling; only spacing differs. -- */
+  .hue-autorange { margin-top: 8px; }
+  .hue-autorange .hue-area-trigger { width: 100%; }
 
   /* -- palette dots -- */
   .hue-dots { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; }
@@ -613,27 +602,31 @@ class HueMusicSyncCard extends HTMLElement {
     this._demo = false;
     this._areaMenuOpen = false;   // is the area dropdown expanded?
     this._playerMenuOpen = false; // is the player dropdown expanded?
+    this._autoMenuOpen = false;   // is the Auto-rungs checklist expanded?
+    this._autoLevelsDirty = false; // a local rung toggle awaiting the echo-back
     this._areaAutoDone = false;   // have we defaulted the view to the active area yet?
     // Close the dropdowns when a pointer lands outside them. One persistent
     // document listener (added on connect) rather than per-open wiring, since a
     // re-render rebuilds the menu nodes; composedPath crosses the shadow boundary.
     this._onDocPointer = (e) => {
-      if (!this._areaMenuOpen && !this._playerMenuOpen) return;
+      if (!this._areaMenuOpen && !this._playerMenuOpen && !this._autoMenuOpen) return;
       const path = e.composedPath ? e.composedPath() : [];
       if (path.some((n) => n.classList && n.classList.contains("hue-area-dd"))) return;
       this._areaMenuOpen = false;
       this._playerMenuOpen = false;
+      this._autoMenuOpen = false;
       this._render();
     };
     // The menus are position:fixed (anchored to their triggers), so a page
     // scroll or resize would leave them floating detached; close them instead,
     // like a native <select>. Scrolls *inside* a menu itself are fine.
     this._onWinMove = (e) => {
-      if (!this._areaMenuOpen && !this._playerMenuOpen) return;
+      if (!this._areaMenuOpen && !this._playerMenuOpen && !this._autoMenuOpen) return;
       const path = e && e.composedPath ? e.composedPath() : [];
       if (path.some((n) => n.classList && n.classList.contains("hue-area-menu"))) return;
       this._areaMenuOpen = false;
       this._playerMenuOpen = false;
+      this._autoMenuOpen = false;
       this._render();
     };
 
@@ -856,6 +849,7 @@ class HueMusicSyncCard extends HTMLElement {
     window.removeEventListener("resize", this._onWinMove);
     this._areaMenuOpen = false;
     this._playerMenuOpen = false;
+    this._autoMenuOpen = false;
     if (this._io) {
       this._io.disconnect();
       this._io = null;
@@ -1058,9 +1052,18 @@ class HueMusicSyncCard extends HTMLElement {
     const liveAutoLevels =
       Array.isArray(swAttr.auto_levels) && swAttr.auto_levels.length
         ? swAttr.auto_levels.map((s) => String(s)) : null;
-    // Live state wins and seeds the optimistic copy the toggles update.
-    if (liveAutoLevels) this._ui.autoLevels = liveAutoLevels;
-    const autoLevels = liveAutoLevels || this._ui.autoLevels
+    // Optimistic: after a local toggle we keep showing the pending value until
+    // the integration echoes it back (both lists are ladder-ordered, so a plain
+    // join compares them), then live takes over again. Keeps the checkmarks
+    // instant without fighting the ~1 Hz attribute publish.
+    if (liveAutoLevels) {
+      if (this._autoLevelsDirty
+          && liveAutoLevels.join(",") === (this._ui.autoLevels || []).join(",")) {
+        this._autoLevelsDirty = false;
+      }
+      if (!this._autoLevelsDirty) this._ui.autoLevels = liveAutoLevels;
+    }
+    const autoLevels = this._ui.autoLevels || liveAutoLevels
       || ["subtle", "medium", "high"];
 
     return {
@@ -1414,7 +1417,7 @@ class HueMusicSyncCard extends HTMLElement {
     // With Auto selected, offer the enabled-rungs checklist: the picker only
     // climbs into a rung that is ticked (Intense/Extreme stay off by default).
     if (m.intensity.value === "auto") {
-      intensityField.appendChild(this._autoLevels(m, accent));
+      intensityField.appendChild(this._autoRangeDropdown(m, accent));
     }
     body.appendChild(intensityField);
     body.appendChild(
@@ -1762,6 +1765,7 @@ class HueMusicSyncCard extends HTMLElement {
       trigger.setAttribute("aria-expanded", this._areaMenuOpen ? "true" : "false");
       trigger.addEventListener("click", () => {
         this._areaMenuOpen = !this._areaMenuOpen;
+        this._autoMenuOpen = false;
         this._render();
       });
     }
@@ -1898,60 +1902,100 @@ class HueMusicSyncCard extends HTMLElement {
     return seg;
   }
 
-  // The Auto enabled-rungs checklist. Ticking Intense/Extreme lets the picker
-  // climb there on a big enough moment; the last ticked rung can't be removed
-  // (Auto always needs somewhere to sit).
-  _autoLevels(m, accent) {
+  // The Auto enabled-rungs control: a compact dropdown of checkable rungs,
+  // shown only when Intensity is Auto. Reuses the area/player popover machinery
+  // (fixed-position menu, outside-click close, viewport clamping) so it behaves
+  // and looks the same on the mobile and tablet cards. Ticking Intense/Extreme
+  // lets the picker climb there on a big enough moment; the last ticked rung
+  // can't be removed (Auto always needs somewhere to sit).
+  _autoRangeDropdown(m, accent) {
     const RUNGS = ["subtle", "medium", "high", "intense", "extreme"];
     const selected = new Set(
       (m.intensity.autoLevels || []).map((s) => String(s).toLowerCase())
     );
     const live = m.intensity.autoMode
       ? String(m.intensity.autoMode).toLowerCase() : null;
-    const list = document.createElement("div");
-    list.className = "hue-autolist";
-    RUNGS.forEach((rung) => {
-      const on = selected.has(rung);
-      const isLive = on && rung === live;
-      const chip = document.createElement("button");
-      chip.className = "hue-autochip" + (on ? " on" : "") + (isLive ? " live" : "");
-      chip.type = "button";
-      if (on) chip.style.color = accent;
-      const tick = document.createElement("span");
-      tick.className = "hue-autotick";
-      tick.textContent = on ? "✓" : "";
-      chip.appendChild(tick);
-      const lab = document.createElement("span");
-      lab.textContent = titleize(rung);
-      chip.appendChild(lab);
-      if (isLive) {
-        // A small dot marks the rung Auto is sitting on right now.
-        const dot = document.createElement("span");
-        dot.className = "hue-autolive";
-        chip.appendChild(dot);
-        chip.title = "Currently active";
-      }
-      chip.addEventListener("click", () => {
-        const next = new Set(selected);
-        if (next.has(rung)) {
-          if (next.size <= 1) return;  // keep at least one rung enabled
-          next.delete(rung);
-        } else {
-          next.add(rung);
-        }
-        const levels = RUNGS.filter((r) => next.has(r));  // canonical order
-        this._callAutoLevels(m.area, levels);
-        this._render();
-      });
-      list.appendChild(chip);
+
+    const dd = document.createElement("div");
+    dd.className = "hue-area-dd hue-autorange" + (this._autoMenuOpen ? " open" : "");
+
+    // Trigger: summarises the enabled rungs; opens the checklist.
+    const trigger = document.createElement("button");
+    trigger.className = "hue-area-trigger";
+    const name = document.createElement("span");
+    name.className = "hue-area-name";
+    const chosen = RUNGS.filter((r) => selected.has(r)).map(titleize);
+    name.textContent = "Auto range: " + (chosen.join(" · ") || "—");
+    const caret = document.createElement("span");
+    caret.className = "hue-area-caret";
+    caret.textContent = "▼";
+    trigger.append(name, caret);
+    trigger.setAttribute("aria-haspopup", "listbox");
+    trigger.setAttribute("aria-expanded", this._autoMenuOpen ? "true" : "false");
+    trigger.addEventListener("click", () => {
+      this._autoMenuOpen = !this._autoMenuOpen;
+      this._areaMenuOpen = false;
+      this._playerMenuOpen = false;
+      this._render();
     });
-    return list;
+    dd.appendChild(trigger);
+
+    if (this._autoMenuOpen) {
+      const menu = document.createElement("div");
+      menu.className = "hue-area-menu";
+      menu.setAttribute("role", "listbox");
+      menu.setAttribute("aria-multiselectable", "true");
+      RUNGS.forEach((rung) => {
+        const on = selected.has(rung);
+        const isLive = on && rung === live;
+        const row = document.createElement("button");
+        row.className = "hue-area-row" + (on ? " sel" : "");
+        row.setAttribute("role", "option");
+        row.setAttribute("aria-selected", on ? "true" : "false");
+        const rname = document.createElement("span");
+        rname.className = "hue-area-row-name";
+        rname.textContent = titleize(rung);
+        row.appendChild(rname);
+        if (isLive) {
+          // Marks the rung Auto is sitting on right now.
+          const badge = document.createElement("span");
+          badge.className = "hue-area-badge";
+          badge.textContent = "Now";
+          badge.style.color = accent;
+          row.appendChild(badge);
+        }
+        const check = document.createElement("span");
+        check.className = "hue-area-check";
+        check.textContent = on ? "✓" : "";
+        check.style.color = accent;
+        row.appendChild(check);
+        row.addEventListener("click", (e) => {
+          e.stopPropagation();  // toggling keeps the menu open
+          const next = new Set(selected);
+          if (next.has(rung)) {
+            if (next.size <= 1) return;  // keep at least one rung enabled
+            next.delete(rung);
+          } else {
+            next.add(rung);
+          }
+          const levels = RUNGS.filter((r) => next.has(r));  // canonical order
+          this._callAutoLevels(m.area, levels);
+          this._render();
+        });
+        menu.appendChild(row);
+      });
+      dd.appendChild(menu);
+      this._placeAreaMenu(trigger, menu);
+    }
+    return dd;
   }
 
   _callAutoLevels(area, levels) {
-    // Optimistic: reflect the tick immediately, then persist via the service
-    // (which live-applies to a running session). Demo mode just updates the UI.
+    // Optimistic: reflect the tick immediately (dirty until the integration
+    // echoes it back), then persist via the service (which live-applies to a
+    // running session). Demo mode just updates the UI.
     this._ui.autoLevels = levels;
+    this._autoLevelsDirty = true;
     if (area && area.switch && this._hass) {
       this._hass.callService("hue_music_sync", "set_options", {
         entity_id: area.switch, auto_levels: levels,
@@ -2167,6 +2211,7 @@ class HueMusicSyncCard extends HTMLElement {
     trigger.addEventListener("click", () => {
       this._playerMenuOpen = !this._playerMenuOpen;
       this._areaMenuOpen = false;
+      this._autoMenuOpen = false;
       if (this._playerMenuOpen) this._ensurePlayers(true); // fresh list at open
       this._render();
     });
@@ -2927,6 +2972,10 @@ class HueMusicSyncTabletCard extends HueMusicSyncCard {
     const selInt = m.intensity.options.find((o) => o.value === m.intensity.value);
     intField.appendChild(this._label("Intensity", intHint || (selInt ? selInt.label : "")));
     intField.appendChild(this._intensityPicker(m, accent));
+    // Auto: the enabled-rungs checklist, same control as the mobile card.
+    if (m.intensity.value === "auto") {
+      intField.appendChild(this._autoRangeDropdown(m, accent));
+    }
     right.appendChild(intField);
 
     // Effect - shared segmented control.

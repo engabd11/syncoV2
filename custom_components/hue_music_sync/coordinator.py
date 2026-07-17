@@ -890,7 +890,12 @@ class SyncSession:
                     # Drum-pad mode (card taps drive the beats) auto-expires, so
                     # set it from the live window every frame before rendering.
                     self._engine.set_manual_only(now < self._drum_until)
-                    colors = self._engine.render(frame, period, beatgrid, structure)
+                    # Honest wall-clock dt (clamped to 0.5x-2x the nominal frame
+                    # period): the engine's decays, waves and predrop timing stay
+                    # true under scheduler jitter instead of assuming a perfect
+                    # frame every time. A steady loop is unchanged.
+                    render_dt = min(2.0 * period, max(0.5 * period, dt))
+                    colors = self._engine.render(frame, render_dt, beatgrid, structure)
                     features = (
                         self._ws_features(frame) if self._ws_active() else None
                     )

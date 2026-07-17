@@ -273,9 +273,15 @@ class Analyzer:
         self._noise_floor = noise_floor
         self._buf = np.zeros(window, dtype=np.float32)
         self._hann = np.hanning(window).astype(np.float32)
+        # Zero-padded FFT (2x): halves the bin width to ~10.8 Hz so the sub-bass
+        # bands (20-60 Hz) actually resolve instead of the low filterbank bands
+        # being forced to share single coarse bins. Pure interpolation — no extra
+        # time resolution — and cheap at 50 fps. Every bin/band index below is
+        # derived from ``freqs`` (the padded grid), so they all adapt to it.
+        self._nfft = 2 * window
 
         # Precompute FFT bin index ranges per band.
-        freqs = np.fft.rfftfreq(window, 1.0 / sample_rate)
+        freqs = np.fft.rfftfreq(self._nfft, 1.0 / sample_rate)
         self._freqs = freqs.astype(np.float32)
         self._band_bins: dict[str, tuple[int, int]] = {}
         for name, (lo, hi) in BANDS.items():
@@ -380,8 +386,8 @@ class Analyzer:
             else:
                 buf[:-n] = buf[n:]
                 buf[-n:] = hop
-        mag_l = np.abs(np.fft.rfft(self._buf_l * self._hann)).astype(np.float32)
-        mag_r = np.abs(np.fft.rfft(self._buf_r * self._hann)).astype(np.float32)
+        mag_l = np.abs(np.fft.rfft(self._buf_l * self._hann, self._nfft)).astype(np.float32)
+        mag_r = np.abs(np.fft.rfft(self._buf_r * self._hann, self._nfft)).astype(np.float32)
         mel_l = band_means(mag_l, self._mel_starts, self._mel_counts)
         mel_r = band_means(mag_r, self._mel_starts, self._mel_counts)
         pan = np.clip((mel_r - mel_l) / (mel_r + mel_l + 1e-9), -1.0, 1.0)
@@ -411,7 +417,7 @@ class Analyzer:
             # instead of letting the per-band AGC amplify hiss/dither up to full.
             # Keep onset state coherent (no spurious beat on the next note) while
             # the AGC peaks decay on their own toward the floor.
-            spectrum = np.fft.rfft(self._buf * self._hann)
+            spectrum = np.fft.rfft(self._buf * self._hann, self._nfft)
             mag = np.abs(spectrum).astype(np.float32)
             self._prev_lin = band_means(mag, self._fb_starts, self._fb_counts)
             self._prev_log = log_spectrum(self._prev_lin)
@@ -438,7 +444,7 @@ class Analyzer:
                 salience=0.0,  # silent frames are maximally non-salient
             )
 
-        spectrum = np.fft.rfft(self._buf * self._hann)
+        spectrum = np.fft.rfft(self._buf * self._hann, self._nfft)
         mag = np.abs(spectrum).astype(np.float32)
         power = mag * mag
 

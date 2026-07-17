@@ -537,7 +537,11 @@ class EnvelopeExtractor:
         self._window = window
         self._hop = hop
         self._hann = np.hanning(window).astype(np.float32)
-        freqs = np.fft.rfftfreq(window, 1.0 / sample_rate)
+        # Zero-padded FFT (2x), matching the live analyzer — the shared
+        # filterbank/melbank/chroma layouts are built from the SAME bin grid,
+        # keeping live and replayed frames interchangeable.
+        self._nfft = 2 * window
+        freqs = np.fft.rfftfreq(self._nfft, 1.0 / sample_rate)
         self._fb_starts, self._fb_counts, self.n_bass, self.n_mid = (
             make_onset_filterbank(freqs.astype(np.float32))
         )
@@ -598,7 +602,9 @@ class EnvelopeExtractor:
         frames = np.lib.stride_tricks.sliding_window_view(buf, self._window)[
             :: self._hop
         ][:n_frames]
-        mags = np.abs(np.fft.rfft(frames * self._hann, axis=1)).astype(np.float32)
+        mags = np.abs(np.fft.rfft(frames * self._hann, self._nfft, axis=1)).astype(
+            np.float32
+        )
         out.extend(band_means(mags, self._mel_starts, self._mel_counts))
         return buf[n_frames * self._hop :].copy()
 
@@ -612,7 +618,7 @@ class EnvelopeExtractor:
             :: self._hop
         ][:n_frames]
         windowed = frames * self._hann
-        mags = np.abs(np.fft.rfft(windowed, axis=1)).astype(np.float32)
+        mags = np.abs(np.fft.rfft(windowed, self._nfft, axis=1)).astype(np.float32)
         lin = band_means(mags, self._fb_starts, self._fb_counts)
         logb = log_spectrum(lin)
         # Prepend the previous chunk's last frame so flux is continuous.
