@@ -103,6 +103,42 @@ def test_single_enabled_rung_is_pinned():
     assert level is SyncMode.MEDIUM
 
 
+# --- the selected set defines the operating range (the headline change) ------
+
+def test_floor_is_the_lowest_enabled_rung():
+    # With High as the lowest enabled rung, even a near-silent passage sits on
+    # High — never below it.
+    allowed = (SyncMode.HIGH, SyncMode.INTENSE, SyncMode.EXTREME)
+    level = _run(
+        AutoIntensityPicker(), allowed,
+        energy=0.2, salience=0.1, bpm=90, beat_period_s=1.0,
+    )
+    assert level is SyncMode.HIGH
+
+
+def test_top_enabled_rung_is_used_on_a_big_moment():
+    # A full drop reaches the highest enabled rung (here Extreme), i.e. the top
+    # of the range gets used rather than capping short.
+    allowed = (SyncMode.MEDIUM, SyncMode.HIGH, SyncMode.INTENSE, SyncMode.EXTREME)
+    level = _run(
+        AutoIntensityPicker(), allowed,
+        energy=1.0, salience=1.0, bpm=160, beat_period_s=0.25,
+    )
+    assert level is SyncMode.EXTREME
+
+
+def test_range_spreads_across_a_sparse_selection():
+    # A two-rung selection uses BOTH ends: quiet -> the low one, loud -> the high
+    # one, even when they're far apart on the ladder.
+    allowed = (SyncMode.MEDIUM, SyncMode.EXTREME)
+    quiet = _run(AutoIntensityPicker(), allowed,
+                 energy=0.3, salience=0.25, bpm=95, beat_period_s=0.9)
+    loud = _run(AutoIntensityPicker(), allowed,
+                energy=1.0, salience=1.0, bpm=160, beat_period_s=0.25)
+    assert quiet is SyncMode.MEDIUM
+    assert loud is SyncMode.EXTREME
+
+
 # --- anti-flicker: dwell + hysteresis ---------------------------------------
 
 def test_does_not_thrash_between_rungs():

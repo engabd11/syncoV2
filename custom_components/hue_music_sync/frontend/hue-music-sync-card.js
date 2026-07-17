@@ -1215,6 +1215,11 @@ class HueMusicSyncCard extends HTMLElement {
     const card = document.createElement("div");
     card.className = "hue-card";
     this._cardNode = card;
+    // Album/palette hue through the whole card (extends the hero wash past the
+    // divider into the controls), over the default dark gradient.
+    card.style.background = this._albumTintBackground(
+      pal.colors, "var(--hue-card)", "#121120"
+    );
     card.style.boxShadow = m.on
       ? `0 30px 80px -28px ${accent}77, 0 0 0 1px var(--hue-line)`
       : "0 0 0 1px var(--hue-line)";
@@ -2034,6 +2039,22 @@ class HueMusicSyncCard extends HTMLElement {
         entity_id: area.switch, auto_timing: on,
       });
     }
+  }
+
+  // Card background tinted by the album/palette colours: soft glows from the top
+  // corners that reach well down the card plus one rising from the bottom, over
+  // the base gradient — so the current song's hue bleeds through the WHOLE card
+  // (past the hero divider), not just the header band.
+  _albumTintBackground(wc, baseFrom, baseTo) {
+    const a = wc[0];
+    const b = wc[wc.length - 1] || wc[0];
+    const c = wc[1] || wc[0];
+    return (
+      `radial-gradient(115% 75% at 15% -8%, ${a}40 0%, transparent 60%),` +
+      `radial-gradient(110% 70% at 90% 0%, ${b}34 0%, transparent 58%),` +
+      `radial-gradient(130% 78% at 55% 114%, ${c}26 0%, transparent 62%),` +
+      `linear-gradient(180deg, ${baseFrom} 0%, ${baseTo} 100%)`
+    );
   }
 
   _dots(options, value, onChange) {
@@ -2886,10 +2907,9 @@ class HueMusicSyncTabletCard extends HueMusicSyncCard {
     const card = document.createElement("div");
     card.className = "hue-card hue-land";
     this._cardNode = card;
-    card.style.background =
-      `radial-gradient(70% 55% at 22% 0%, ${wc[0]}22 0%, transparent 52%),` +
-      `radial-gradient(60% 50% at 78% 0%, ${wc[wc.length - 1]}1c 0%, transparent 48%),` +
-      `linear-gradient(180deg, #171626 0%, #0f0e1c 100%)`;
+    // Album/palette hue through the whole landscape card, not just a faint band
+    // at the very top — the song's colour reads as a hue inside the card.
+    card.style.background = this._albumTintBackground(wc, "#171626", "#0f0e1c");
     card.style.boxShadow = m.on
       ? `0 34px 90px -28px ${accent}66, 0 0 0 1px var(--hue-line)`
       : "0 0 0 1px var(--hue-line)";

@@ -343,26 +343,26 @@ def auto_mode_for_bpm(bpm: float, current: SyncMode) -> SyncMode:
 
 
 # --- musical Auto intensity picker ------------------------------------------
-# A rung's ABSOLUTE upper edge on the 0..1 intensity signal. Because these are
-# fixed (not rescaled by how many rungs are enabled), "Intense" always means
-# the same size of musical moment: enabling it merely unlocks a ceiling the
-# signal was already reaching. Extreme has no upper edge (the top of the range).
-_LEVEL_EDGE: dict[SyncMode, float] = {
-    SyncMode.SUBTLE: 0.32,
-    SyncMode.MEDIUM: 0.55,
-    SyncMode.HIGH: 0.76,
-    SyncMode.INTENSE: 0.90,
-    SyncMode.EXTREME: 1.01,
-}
-# Signal margin you must cross past a rung's edge before the change commits
-# (anti-flicker on the band boundary), a floor on seconds between committed
-# switches (mode changes reset the flash-limiter anchor, so they must not
-# thrash), and the asymmetric smoothing on the raw signal: rise fast so a drop
-# reaches its rung within ~a second, fall slow so a brief dip doesn't drop the
-# room out of the chorus.
-_PICK_HYST = 0.05
-_PICK_DWELL_S = 2.0
-_PICK_ATTACK = 0.14   # per-frame EMA weight while the signal is rising
+# The intensity signal is mapped across the ENABLED set: the loud parts of a
+# song reach the highest enabled rung and the quiet parts sit on the lowest, so
+# the range you pick is the range you get (add Intense/Extreme and they get
+# used; make High the lowest and it becomes the floor). BPM/mood still decide
+# *where* in that range a moment lands, via the signal itself.
+#
+# The signal is first put on a 0..1 scale against the loudness window real music
+# actually occupies (near-silence .. a full drop) so every enabled rung is
+# reachable regardless of how many are enabled — a fast, busy track simply rides
+# higher in the band than a sparse one.
+_SIG_LO_REF = 0.25   # ~a quiet intro maps to the bottom of the enabled range
+_SIG_HI_REF = 0.88   # ~a full drop maps to the top of it
+# Anti-flicker dead-band on a band boundary (on the 0..1 normalised scale), a
+# floor on seconds between committed switches (kept long so a switch is never
+# rushed and the new rung has time to breathe), and the asymmetric smoothing on
+# the raw signal: rise reasonably quick so a drop is caught, fall slow so a
+# brief dip doesn't drop the room out of the chorus.
+_PICK_HYST = 0.07
+_PICK_DWELL_S = 3.5
+_PICK_ATTACK = 0.10   # per-frame EMA weight while the signal is rising
 _PICK_DECAY = 0.03    # per-frame EMA weight while it is falling
 # Beats/second that reads as fully percussive (fast 16-note-ish groove).
 _PICK_BEAT_FULL = 3.0
@@ -387,16 +387,16 @@ def _intensity_signal(energy: float, salience: float, tempo: float, perc: float)
 
 
 class AutoIntensityPicker:
-    """Resolve Auto to a concrete rung from the music, gated to an enabled set.
+    """Resolve Auto to a concrete rung from the music, spread over an enabled set.
 
-    Fed the live per-frame features, it maintains a smoothed intensity signal
-    and maps it to a rung by absolute thresholds, then clamps that to the rungs
-    the user enabled (``allowed``). Escalation to Intense/Extreme therefore
-    happens only on genuinely big moments AND only when those rungs are enabled;
-    otherwise the pick caps at the highest enabled rung, reproducing the classic
-    Subtle/Medium/High behaviour. Hysteresis + a dwell floor keep it from
-    flickering between rungs. This is purely a *selection* — it never changes how
-    any rung renders.
+    Fed the live per-frame features, it maintains a smoothed intensity signal and
+    maps it ACROSS the rungs the user enabled (``allowed``): the quietest parts
+    sit on the lowest enabled rung and the biggest moments reach the highest, so
+    enabling Intense/Extreme really does put them on the loud parts, and making
+    High the lowest makes High the floor. BPM/mood shape the signal, so they
+    decide where in that range each moment lands. A wide hysteresis dead-band and
+    a long dwell floor keep switches slow and unhurried. This is purely a
+    *selection* — it never changes how any rung renders.
     """
 
     def __init__(self) -> None:
@@ -404,11 +404,10 @@ class AutoIntensityPicker:
 
     def reset(self) -> None:
         """Start fresh (session start). Seeds the signal mid-range so the room
-        opens around Medium and adapts, rather than ramping up from black."""
-        self._signal = 0.45  # ≈ Medium band, matching the historical default
+        opens around the middle of the enabled range, not ramping up from black."""
+        self._signal = 0.56  # ≈ the middle of the real-music loudness window
         self._beat_rate = 0.0
-        self._nat: SyncMode | None = None   # ungated natural rung (drives hysteresis)
-        self._level: SyncMode | None = None  # gated, emitted rung
+        self._level: SyncMode | None = None  # emitted rung
         self._since_switch = _PICK_DWELL_S   # allow the first pick immediately
 
     @property
@@ -449,8 +448,7 @@ class AutoIntensityPicker:
         self._signal += (raw - self._signal) * alpha
         self._since_switch += dt
 
-        self._nat = self._natural_rung(self._signal, self._nat)
-        target = self._gate(self._nat, allowed)
+        target = self._resolve(self._signal, allowed)
         if target is not self._level and self._since_switch >= _PICK_DWELL_S:
             self._level = target
             self._since_switch = 0.0
@@ -458,37 +456,26 @@ class AutoIntensityPicker:
             self._level = target  # first frame: adopt without waiting on dwell
         return self._level
 
-    @staticmethod
-    def _natural_rung(signal: float, current: SyncMode | None) -> SyncMode:
-        """The rung the raw signal maps to, with a hysteresis dead-band.
+    def _resolve(self, signal: float, allowed: tuple[SyncMode, ...]) -> SyncMode:
+        """Map the signal onto a band of the enabled set, with hysteresis.
 
-        Rising past a rung's edge needs ``+_PICK_HYST`` of headroom; falling
-        needs ``-_PICK_HYST`` below the rung below. Multi-rung jumps are allowed
-        in one step, so a drop can vault straight from Subtle to Intense.
+        The signal is normalised against the real-music loudness window, then the
+        [0, 1] range is split into one equal band per enabled rung. A wide
+        dead-band on each boundary means a moment must move well past the edge
+        before the rung changes, so the pick is stable and unhurried.
         """
-        cur = INTENSITY_LADDER.index(current) if current in INTENSITY_LADDER else 0
-        idx = cur if current is not None else 0
-        last = len(INTENSITY_LADDER) - 1
-        # Climb while comfortably over the current rung's ceiling.
-        while idx < last and signal > _LEVEL_EDGE[INTENSITY_LADDER[idx]] + _PICK_HYST:
-            idx += 1
-        # Fall while comfortably under the rung-below's ceiling.
-        while idx > 0 and signal < _LEVEL_EDGE[INTENSITY_LADDER[idx - 1]] - _PICK_HYST:
-            idx -= 1
-        return INTENSITY_LADDER[idx]
-
-    @staticmethod
-    def _gate(natural: SyncMode, allowed: tuple[SyncMode, ...]) -> SyncMode:
-        """Clamp a natural rung to the enabled set: the highest enabled rung at
-        or below it, or — if every enabled rung sits above it — the lowest."""
-        idxs = sorted(
-            INTENSITY_LADDER.index(m) for m in allowed if m in INTENSITY_LADDER
-        )
-        if not idxs:
-            idxs = [INTENSITY_LADDER.index(m) for m in DEFAULT_AUTO_LEVELS]
-        nat = INTENSITY_LADDER.index(natural)
-        at_or_below = [i for i in idxs if i <= nat]
-        return INTENSITY_LADDER[at_or_below[-1] if at_or_below else idxs[0]]
+        rungs = sorted(
+            (m for m in allowed if m in INTENSITY_LADDER), key=INTENSITY_LADDER.index
+        ) or list(DEFAULT_AUTO_LEVELS)
+        n = len(rungs)
+        norm = (signal - _SIG_LO_REF) / (_SIG_HI_REF - _SIG_LO_REF)
+        norm = max(0.0, min(1.0, norm))
+        b = rungs.index(self._level) if self._level in rungs else min(n - 1, int(norm * n))
+        while b < n - 1 and norm > (b + 1) / n + _PICK_HYST:
+            b += 1
+        while b > 0 and norm < b / n - _PICK_HYST:
+            b -= 1
+        return rungs[b]
 
 
 def sanitize_auto_levels(levels) -> tuple[SyncMode, ...]:

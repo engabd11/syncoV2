@@ -498,11 +498,10 @@ class SyncSession:
         """When Auto is selected, resolve the music to a rung and apply it.
 
         Feeds the live features (loudness, salience, tempo, beat) to the musical
-        picker, which maps them to a rung and clamps it to the user's enabled
-        set (``settings.auto_levels``): calm passages sit low, and a big
-        moment climbs — up to Intense/Extreme when those rungs are enabled. The
-        picker owns its own smoothing/hysteresis, so this only reacts on an
-        actual change.
+        picker, which spreads them ACROSS the user's enabled set
+        (``settings.auto_levels``): calm passages sit on the lowest enabled rung,
+        big moments reach the highest. The picker owns its own smoothing,
+        hysteresis and dwell, so this only reacts on an actual change.
         """
         if self._settings.mode is not SyncMode.AUTO:
             return
@@ -518,12 +517,14 @@ class SyncSession:
         if target is self._auto_level:
             return
         self._auto_level = target
+        # Just swap the mode's parameters — the engine's brightness/colour state
+        # carries across so the room eases into the new rung. Crucially, DON'T
+        # reset the flash limiters here: that clears their slow anchor and makes
+        # the room visibly hang for a beat before it reacts. The one reset that
+        # is actually needed — when the switch crosses the strict<->relaxed
+        # limiter boundary (High<->Intense) — is handled in `_safe_send` off the
+        # `_unrestrained()` transition, so adjacent Auto switches stay seamless.
         self._engine.set_mode(target)
-        # Mirror apply_settings: clear the flash-limiters' frozen anchors so the
-        # new level settles to its own field instead of the previous level's.
-        self._safety.reset()
-        self._safety_relaxed.reset()
-        self._last_safe_t = None
 
     # -- drum-pad (manual beats) ----------------------------------------------
 
