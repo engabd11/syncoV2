@@ -726,6 +726,19 @@ class MusicAssistantSource:
         # tempo reset). Report the per-song id, not the constant flow-stream URL.
         return self._song_id or self._track_id
 
+    @property
+    def decoded_position(self) -> float | None:
+        """Song position (s) the analyser has decoded to, or None before a track.
+
+        This is the analyser's own playhead (decoder start + paced frames), used
+        by the timing calibrator against the player's reported audible position
+        to estimate the startup offset. Distinct from ``analysis_position`` on
+        the map source; the live tap has no such property, so callers fall back.
+        """
+        if self._track_id is None:
+            return None
+        return self._decode_start_pos + self._frames_emitted * self._frame_period
+
     async def read_frame(self) -> AnalysisFrame | None:
         """Read the next paced hop and turn it into analysis features."""
         pair = await self.read_hop_pair()

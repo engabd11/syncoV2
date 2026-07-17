@@ -36,6 +36,14 @@ activate:
             - high
             - intense
             - extreme
+    auto_timing:
+      name: Auto timing
+      description: >-
+        Auto-calibrate the light delay per song (cancels the variable
+        startup-hang lag) instead of using the manual timing offset.
+      required: false
+      selector:
+        boolean:
     effect:
       name: Effect
       description: Renderer/effect style — music, movies or fireworks.
@@ -131,6 +139,14 @@ set_options:
             - high
             - intense
             - extreme
+    auto_timing:
+      name: Auto timing
+      description: >-
+        Auto-calibrate the light delay per song (cancels the variable
+        startup-hang lag) instead of using the manual timing offset.
+      required: false
+      selector:
+        boolean:
     effect:
       name: Effect
       description: Renderer/effect style — music, movies or fireworks.

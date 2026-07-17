@@ -328,6 +328,11 @@ const CARD_CSS = `
     display: flex; align-items: center; justify-content: center; }
   .hue-step:hover { background: #ffffff18; }
   .hue-step:active { transform: scale(.92); }
+  .hue-step:disabled { cursor: default; }
+  .hue-step:disabled:hover { background: #ffffff0a; }
+  /* Auto-timing toggle: a compact "A" that lights up when calibration is on. */
+  .hue-timing-auto { font-size: 14px; font-weight: 800; }
+  .hue-timing-auto.on { border-color: transparent; }
   .hue-timing-readout { flex: 1; height: 34px; border-radius: 10px; background: #00000033;
     display: flex; align-items: baseline; justify-content: center; gap: 3px; }
   .hue-timing-num { font-size: 16px; font-weight: 800; font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
@@ -604,6 +609,7 @@ class HueMusicSyncCard extends HTMLElement {
     this._playerMenuOpen = false; // is the player dropdown expanded?
     this._autoMenuOpen = false;   // is the Auto-rungs checklist expanded?
     this._autoLevelsDirty = false; // a local rung toggle awaiting the echo-back
+    this._autoTimingDirty = false; // a local auto-timing toggle awaiting echo-back
     this._areaAutoDone = false;   // have we defaulted the view to the active area yet?
     // Close the dropdowns when a pointer lands outside them. One persistent
     // document listener (added on connect) rather than per-open wiring, since a
@@ -639,6 +645,7 @@ class HueMusicSyncCard extends HTMLElement {
       brightness: 64,
       timing: -60,
       autoLevels: ["subtle", "medium", "high"],
+      autoTiming: false,
     };
 
     this._viz = new Viz(40);
@@ -1066,6 +1073,18 @@ class HueMusicSyncCard extends HTMLElement {
     const autoLevels = this._ui.autoLevels || liveAutoLevels
       || ["subtle", "medium", "high"];
 
+    // Auto timing: on/off (optimistic like the rungs), plus the live calibrated
+    // correction and whether it has locked for this song.
+    if (swAttr.auto_timing != null) {
+      if (this._autoTimingDirty && !!swAttr.auto_timing === !!this._ui.autoTiming) {
+        this._autoTimingDirty = false;
+      }
+      if (!this._autoTimingDirty) this._ui.autoTiming = !!swAttr.auto_timing;
+    }
+    const autoTiming = !!this._ui.autoTiming;
+    const timingAutoMs = swAttr.timing_auto_ms != null ? Number(swAttr.timing_auto_ms) : null;
+    const timingLocked = !!swAttr.timing_locked;
+
     return {
       area, on,
       intensity: { ...intensity, value: intensityVal, autoMode, autoLevels },
@@ -1076,7 +1095,10 @@ class HueMusicSyncCard extends HTMLElement {
       },
       accent, bpm, beatAnchor,
       brightness: { entity: area.brightness, value: brightVal, min: brightMin, max: brightMax },
-      timing: { entity: area.timing, value: timingVal, min: timingMin, max: timingMax, step: timingStep },
+      timing: {
+        entity: area.timing, value: timingVal, min: timingMin, max: timingMax,
+        step: timingStep, auto: autoTiming, autoMs: timingAutoMs, locked: timingLocked,
+      },
       now,
       audioSource: swAttr.audio_source || null,
     };
@@ -2003,6 +2025,17 @@ class HueMusicSyncCard extends HTMLElement {
     }
   }
 
+  _callAutoTiming(area, on) {
+    // Optimistic like the rungs: reflect the toggle at once, persist via service.
+    this._ui.autoTiming = on;
+    this._autoTimingDirty = true;
+    if (area && area.switch && this._hass) {
+      this._hass.callService("hue_music_sync", "set_options", {
+        entity_id: area.switch, auto_timing: on,
+      });
+    }
+  }
+
   _dots(options, value, onChange) {
     const wrap = document.createElement("div");
     wrap.className = "hue-dots";
@@ -2103,20 +2136,41 @@ class HueMusicSyncCard extends HTMLElement {
   }
 
   _timing(m, accent) {
-    const { value, min, max, step, entity } = m.timing;
+    const { value, min, max, step, entity, auto, autoMs, locked } = m.timing;
     const clamp = (v) => Math.max(min, Math.min(max, v));
     const wrap = document.createElement("div");
     wrap.className = "hue-timing";
+
+    // Auto toggle: calibrate the light delay per song instead of the manual
+    // trim. When on, the steppers are disabled and the readout shows the live
+    // calibrated value.
+    const autoBtn = document.createElement("button");
+    autoBtn.className = "hue-step hue-timing-auto" + (auto ? " on" : "");
+    autoBtn.textContent = "A";
+    autoBtn.title = auto
+      ? "Auto timing on — the delay is calibrated per song"
+      : "Auto timing — calibrate the light delay per song";
+    autoBtn.setAttribute("aria-pressed", auto ? "true" : "false");
+    if (auto) { autoBtn.style.color = "#fff"; autoBtn.style.background = accent; }
+    autoBtn.addEventListener("click", () => {
+      this._callAutoTiming(m.area, !auto);
+      this._render();
+    });
 
     const mk = (sym, delta, label) => {
       const b = document.createElement("button");
       b.className = "hue-step";
       b.textContent = sym;
       b.setAttribute("aria-label", label);
-      b.addEventListener("click", () => {
-        this._callNumber(entity, clamp(value + delta), "timing");
-        this._render();
-      });
+      if (auto) {
+        b.disabled = true;
+        b.style.opacity = "0.4";
+      } else {
+        b.addEventListener("click", () => {
+          this._callNumber(entity, clamp(value + delta), "timing");
+          this._render();
+        });
+      }
       return b;
     };
 
@@ -2125,14 +2179,28 @@ class HueMusicSyncCard extends HTMLElement {
     readout.style.boxShadow = `inset 0 0 0 1px ${accent}33`;
     const num = document.createElement("span");
     num.className = "hue-timing-num";
-    num.style.color = value === 0 ? "var(--hue-dim)" : accent;
-    num.textContent = (value > 0 ? "+" : "") + value;
     const unit = document.createElement("span");
     unit.className = "hue-timing-unit";
-    unit.textContent = "ms";
+    if (auto) {
+      if (locked && autoMs != null) {
+        num.style.color = accent;
+        num.textContent = (autoMs > 0 ? "+" : "") + autoMs;
+        unit.textContent = "ms";
+      } else {
+        // Still settling on this song.
+        num.style.color = "var(--hue-dim)";
+        num.textContent = "Auto";
+        unit.textContent = "";
+      }
+    } else {
+      num.style.color = value === 0 ? "var(--hue-dim)" : accent;
+      num.textContent = (value > 0 ? "+" : "") + value;
+      unit.textContent = "ms";
+    }
     readout.appendChild(num);
     readout.appendChild(unit);
 
+    wrap.appendChild(autoBtn);
     wrap.appendChild(mk("-", -step, "Earlier"));
     wrap.appendChild(readout);
     wrap.appendChild(mk("+", step, "Later"));
@@ -2697,7 +2765,7 @@ const TABLET_CSS = `
 
   /* waveform scrubber */
   .hue-wave { position: relative; display: flex; align-items: center; gap: 2px; height: 46px;
-    cursor: pointer; margin: 10px 0 2px; touch-action: none; }
+    margin: 10px 0 2px; }
   .hue-wave-bar { flex: 1; min-width: 0; border-radius: 2px; transition: background .25s, box-shadow .25s; }
   .hue-wave-cursor { position: absolute; top: 0; bottom: 0; width: 2px; border-radius: 2px; background: #fff;
     box-shadow: 0 0 10px #fff, 0 0 2px #fff; transform: translateX(-50%); pointer-events: none; }
@@ -3049,7 +3117,9 @@ class HueMusicSyncTabletCard extends HueMusicSyncCard {
     return tx;
   }
 
-  /* -- waveform scrubber (stable pseudo-random silhouette; seeks the player) -- */
+  /* -- waveform (stable pseudo-random silhouette; view-only playhead + section
+     highlights). Deliberately NOT a scrubber: it must not seek the player, so a
+     stray tap can't jump the song. -- */
   _waveform(m, colors, accent) {
     const N = 68;
     if (!this._waveShape) {
@@ -3080,36 +3150,8 @@ class HueMusicSyncTabletCard extends HueMusicSyncCard {
     this._waveCursor = cursor;
     this._waveDur = m.now.duration || 0;
     this._waveLastIdx = -1;
-
-    // Seek the followed player (no-op without a player or a known duration).
-    const player = m.now.player;
-    const dur = this._waveDur;
-    if (player && dur > 0) {
-      const seekFrom = (clientX) => {
-        const r = wave.getBoundingClientRect();
-        let p = (clientX - r.left) / r.width;
-        p = Math.max(0, Math.min(1, p));
-        if (this._hass) {
-          this._hass.callService("media_player", "media_seek", {
-            entity_id: player, seek_position: Math.round(p * dur),
-          });
-        }
-      };
-      let seeking = false;
-      const onMove = (e) => { if (seeking) seekFrom(e.clientX); };
-      const onUp = () => {
-        seeking = false;
-        window.removeEventListener("pointermove", onMove);
-        window.removeEventListener("pointerup", onUp);
-      };
-      wave.addEventListener("pointerdown", (e) => {
-        seeking = true;
-        wave.setPointerCapture && wave.setPointerCapture(e.pointerId);
-        window.addEventListener("pointermove", onMove);
-        window.addEventListener("pointerup", onUp);
-        seekFrom(e.clientX);
-      });
-    }
+    // View-only: no pointer/seek handlers. The playhead + section highlights are
+    // driven by the live loop; the waveform never moves the track.
     return wave;
   }
 

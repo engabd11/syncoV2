@@ -103,7 +103,7 @@ An immersive now-playing header themed by the music itself — the blurred album
 - **Visualizer bars** — a real ~20 Hz feed of the analysis output, delayed through the same timing buffer as the lights; it renders exactly what the room is reacting to
 - **Room mirror** — every lamp at its real position, glowing in the exact colour being streamed to it, with rings marking its instrument role
 - **Area & Player dropdowns** — side-by-side titled selectors: one card controls several areas, and the lights can be pinned to any player (or Auto); menus open as floating popovers that scroll when the list is long
-- **Intensity selector** with live micro-animation previews, **colour palette dots**, **brightness slider** and a **timing-offset stepper** (±ms fine trim)
+- **Intensity selector** with live micro-animation previews, **colour palette dots**, **brightness slider** and a **timing-offset stepper** (±ms fine trim) with an **Auto** toggle that calibrates the per-song startup delay for you (locks a value early in each track; falls back to the manual trim when off)
 - **Beat Pads** — a full-page overlay of three tall Low / Mid / High tap columns, each driving a third of the room; while open, the automatic beats pause so *your* taps flash the lights; auto-releases when closed
 
 ### Behaviour
@@ -306,7 +306,7 @@ If anyone in the room may be photosensitive, stay on Auto/Subtle/Medium/High.
 ## Troubleshooting
 
 - **Card shows "Custom element doesn't exist"** — usually a stale cached app shell; reload the page once. The integration registers the card as a Lovelace resource automatically; if you removed that resource by hand, re-add `/hue_music_sync/hue-music-sync-card.js` under **Settings → Dashboards → Resources**, or reload the integration.
-- **Lights react late/early** — use the card's timing-offset stepper (±ms) to land the flashes exactly on the audible beat in your room.
+- **Lights react late/early** — use the card's timing-offset stepper (±ms) to land the flashes exactly on the audible beat in your room, or flip the timing **Auto** toggle to have the per-song startup delay calibrated automatically.
 - **"Metadata only" pill stays amber** — no tappable stream and no track map yet. Run **Analyse library** once, or configure the OpenSubsonic options so tracks can be fetched for analysis.
 - **First play of a new track reacts generically** — full offline analysis takes ~10 s on slower hardware; the show upgrades mid-song when it lands. `prewarm_library` removes this entirely.
 - **Position-coarse players (e.g. Sonos)** — ~500 ms position granularity reduces track-map timing precision; the timing stepper helps.

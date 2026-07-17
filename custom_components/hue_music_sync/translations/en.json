@@ -109,6 +109,10 @@
           "name": "Auto rungs",
           "description": "With mode auto, the intensities the picker may choose from. It climbs into Intense/Extreme only if included and the moment earns it."
         },
+        "auto_timing": {
+          "name": "Auto timing",
+          "description": "Auto-calibrate the light delay per song (cancels the variable startup-hang lag) instead of using the manual timing offset."
+        },
         "effect": {
           "name": "Effect",
           "description": "Renderer/effect style: music, movies or fireworks."
@@ -142,6 +146,10 @@
         "auto_levels": {
           "name": "Auto rungs",
           "description": "With mode auto, the intensities the picker may choose from. It climbs into Intense/Extreme only if included and the moment earns it."
+        },
+        "auto_timing": {
+          "name": "Auto timing",
+          "description": "Auto-calibrate the light delay per song (cancels the variable startup-hang lag) instead of using the manual timing offset."
         },
         "effect": {
           "name": "Effect",

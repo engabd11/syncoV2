@@ -48,6 +48,7 @@ from .const import (
     BANDS,
     CONF_AREAS,
     CONF_AUTO_LEVELS,
+    CONF_AUTO_TIMING,
     CONF_BRIGHTNESS,
     CONF_COLOUR,
     CONF_EFFECT,
@@ -61,6 +62,7 @@ from .const import (
     CONF_SUBSONIC_USER,
     CONF_TIMING_MS,
     DEFAULT_AUTO_LEVELS,
+    DEFAULT_AUTO_TIMING,
     DEFAULT_BRIGHTNESS,
     DEFAULT_COLOUR,
     DEFAULT_EFFECT,
@@ -83,6 +85,7 @@ from .effects.modes import (
     AutoIntensityPicker,
     sanitize_auto_levels,
 )
+from .timing import TimingCalibrator
 from .effects.safety import RELAXED_MAX_FLASHES_PER_S, FieldSafety
 from .hue.bridge import EntertainmentConfig, HueBridge
 from .hue.stream import DtlsStream, HueStreamEncoder
@@ -200,6 +203,8 @@ class AreaSettings:
     # The rungs Auto may pick from (ascending, non-empty). Only meaningful when
     # ``mode`` is Auto; ignored otherwise.
     auto_levels: tuple[SyncMode, ...] = DEFAULT_AUTO_LEVELS
+    # Auto timing: calibrate the per-song startup delay instead of manual trim.
+    auto_timing: bool = DEFAULT_AUTO_TIMING
 
     @classmethod
     def from_dict(cls, data: dict) -> AreaSettings:
@@ -226,6 +231,7 @@ class AreaSettings:
             auto_levels=sanitize_auto_levels(
                 data.get(CONF_AUTO_LEVELS, DEFAULT_AUTO_LEVELS)
             ),
+            auto_timing=bool(data.get(CONF_AUTO_TIMING, DEFAULT_AUTO_TIMING)),
         )
 
     def to_dict(self) -> dict:
@@ -238,6 +244,7 @@ class AreaSettings:
             CONF_MEDIA_PLAYER: self.media_player,
             CONF_LATENCY_MS: self.latency_ms,
             CONF_AUTO_LEVELS: [str(m) for m in self.auto_levels],
+            CONF_AUTO_TIMING: self.auto_timing,
         }
 
 
@@ -343,6 +350,9 @@ class SyncSession:
         # Musical Auto-intensity picker: turns the live feature stream into a
         # rung, gated to the user's enabled set. Reset on every track change.
         self._auto_picker = AutoIntensityPicker()
+        # Per-song light-timing calibrator (opt-in via settings.auto_timing):
+        # estimates the startup slippage and locks a delay correction per track.
+        self._timing_cal = TimingCalibrator()
         self._beat_anchor: float | None = None  # stable downbeat ref for the card
         self._last_publish = 0.0
         # Background probe that upgrades the metadata fallback to a real tap.
@@ -453,6 +463,10 @@ class SyncSession:
             # Let a checklist change re-clamp the pick on the next frame instead
             # of waiting out the dwell — toggling a rung feels immediate.
             self._auto_picker.allow_immediate_repick()
+        if settings.auto_timing and not prev.auto_timing:
+            # Newly enabled mid-song: measure from now instead of applying a
+            # stale value from a previous track.
+            self._timing_cal.reset()
         if settings.colour != prev.colour:
             self._apply_colour()
             # Re-extract album art if switching to Album (both guards, or the
@@ -554,6 +568,9 @@ class SyncSession:
         # The Auto picker is deliberately NOT reset here: its smoothing carries
         # across the track boundary so the room transitions instead of dipping,
         # and a loud tail bleeding into a quiet intro decays out within ~2 s.
+        # The timing calibrator, in contrast, IS per-song: the startup slippage
+        # is measured fresh each track.
+        self._timing_cal.reset()
 
     async def _reset_source(self) -> None:
         await self._cancel_meta_upgrade()
@@ -887,6 +904,8 @@ class SyncSession:
                         beatgrid = map_grid
                     self._last_beatgrid = beatgrid
                     self._maybe_apply_auto_intensity(frame, beatgrid, period)
+                    if self._settings.auto_timing and not self._timing_cal.locked:
+                        self._feed_timing_calibrator(beatgrid, period)
                     # Drum-pad mode (card taps drive the beats) auto-expires, so
                     # set it from the live window every frame before rendering.
                     self._engine.set_manual_only(now < self._drum_until)
@@ -978,7 +997,15 @@ class SyncSession:
             return
         lead_ms = getattr(self._source, "playback_lead_ms", 0) or 0
         base_ms = max(0, lead_ms - LIGHT_PIPELINE_MS) if lead_ms > 0 else TIMING_BUFFER_MS
-        delay_s = max(0.0, (base_ms + self._settings.timing_ms) / 1000.0)
+        # Auto timing (opt-in): the calibrator's per-song correction replaces the
+        # manual trim on top of the same baseline; falls back to the manual
+        # offset until it has a value (and on sources with no position data).
+        trim_ms = self._settings.timing_ms
+        if self._settings.auto_timing:
+            auto = self._timing_cal.offset_ms
+            if auto is not None:
+                trim_ms = auto
+        delay_s = max(0.0, (base_ms + trim_ms) / 1000.0)
         if delay_s <= 0.001:
             self._delay_buf.clear()
             await self._safe_send(colors, features)
@@ -1186,6 +1213,62 @@ class SyncSession:
             "Prefetching next-track map for %s (%s)", self._config.name, key
         )
         self._mapper.ensure(key, next_url)
+
+    def _audible_position(self) -> float | None:
+        """The player's reported audible position (s): media_position + elapsed.
+
+        Distinct from :meth:`_analysis_position` — this is where the *speakers*
+        are, never the analysis playhead — so the calibrator can compare the two.
+        """
+        src = self._source
+        if src is None:
+            return None
+        state = self._hass.states.get(src.entity_id)
+        if state is None or state.state != "playing":
+            return None
+        pos = state.attributes.get("media_position")
+        if pos is None:
+            return None
+        live = float(pos)
+        updated = state.attributes.get("media_position_updated_at")
+        if updated is not None:
+            try:
+                live += max(0.0, (dt_util.utcnow() - updated).total_seconds())
+            except (TypeError, ValueError):
+                pass
+        return live
+
+    def _feed_timing_calibrator(self, beatgrid: BeatGrid | None, dt: float) -> None:
+        """Sample the analyser-vs-audible gap into the per-song timing calibrator.
+
+        The analyser playhead is the live tap's decoded position (or a map
+        source's own analysis position); the audible reference is the player's
+        media position. ``expected_lead`` is the seek-ahead the source already
+        intends, so the no-hang deviation is ~0 and the working baseline stays.
+        """
+        src = self._source
+        if src is None:
+            return
+        analyzer_pos = getattr(src, "decoded_position", None)
+        if analyzer_pos is None:
+            analyzer_pos = getattr(src, "analysis_position", None)
+        lead_ms = getattr(src, "playback_lead_ms", 0) or 0
+        expected_lead_s = (
+            lead_ms if lead_ms > 0 else self._settings.latency_ms
+        ) / 1000.0
+        beat_period_s = (
+            60.0 / beatgrid.bpm
+            if beatgrid is not None and beatgrid.locked and beatgrid.bpm > 0
+            else None
+        )
+        self._timing_cal.update(
+            dt,
+            analyzer_pos=analyzer_pos,
+            audible_pos=self._audible_position(),
+            expected_lead_s=expected_lead_s,
+            playing=True,
+            beat_period_s=beat_period_s,
+        )
 
     def _analysis_position(self) -> float | None:
         """The track position our *analysis frames* currently correspond to.
@@ -1438,6 +1521,14 @@ class SyncSession:
             # The rungs Auto may pick from, so the card can show/drive the
             # enabled-set checklist.
             state["auto_levels"] = [str(m) for m in self._settings.auto_levels]
+        # Auto timing: surface the live calibrated correction + lock state so the
+        # card's Timing control can show "Auto ⟳ / Auto +120 ms".
+        if self._settings.auto_timing:
+            state["auto_timing"] = True
+            off = self._timing_cal.offset_ms
+            if off is not None:
+                state["timing_auto_ms"] = off
+            state["timing_locked"] = self._timing_cal.locked
         if self._map_section is not None:
             # Current track-map section loudness (0..1) for dashboards.
             state["section_energy"] = round(self._map_section.energy, 2)

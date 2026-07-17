@@ -27,6 +27,7 @@ CONF_BRIGHTNESS: Final = "brightness"
 CONF_MEDIA_PLAYER: Final = "media_player"
 CONF_LATENCY_MS: Final = "latency_ms"
 CONF_TIMING_MS: Final = "timing_ms"
+CONF_AUTO_TIMING: Final = "auto_timing"
 CONF_SNAPSERVER_HOST: Final = "snapserver_host"
 # OpenSubsonic / Navidrome library (optional): lets us fetch & analyse library
 # tracks directly when Music Assistant won't expose a tappable stream URL
@@ -96,6 +97,10 @@ MELBANK_FMAX: Final = 11000.0
 DEFAULT_RESTORE_LIGHTS: Final = False  # opt-in: restore exact pre-sync light state
 DEFAULT_BRIGHTNESS: Final = 1.0  # master brightness ceiling (0..1)
 DEFAULT_TIMING_MS: Final = 0  # +ve delays lights, -ve advances (within buffer)
+# Auto timing: when on, the per-song calibrator estimates the analyzer-vs-audible
+# offset at each song start and applies it in place of the manual timing offset,
+# cancelling the variable startup-hang lag. Opt-in; manual is unchanged when off.
+DEFAULT_AUTO_TIMING: Final = False
 TIMING_BUFFER_MS: Final = 200  # baseline delay buffer enabling -ve offsets
 # Estimated latency of the light pipeline itself, from the moment we emit a
 # frame to photons changing in the room: the bridge only relays to the bulbs

@@ -31,6 +31,7 @@ from homeassistant.util import dt as dt_util
 from .const import (
     CONF_APP_KEY,
     CONF_AUTO_LEVELS,
+    CONF_AUTO_TIMING,
     CONF_BRIDGE_CERT,
     CONF_BRIGHTNESS,
     CONF_CLIENT_KEY,
@@ -451,6 +452,8 @@ def _register_services(hass: HomeAssistant) -> None:
             changes["mode"] = SyncMode(call.data[CONF_MODE])
         if CONF_AUTO_LEVELS in call.data:
             changes["auto_levels"] = sanitize_auto_levels(call.data[CONF_AUTO_LEVELS])
+        if CONF_AUTO_TIMING in call.data:
+            changes["auto_timing"] = bool(call.data[CONF_AUTO_TIMING])
         if CONF_EFFECT in call.data:
             changes["effect"] = SyncEffect(call.data[CONF_EFFECT])
         if CONF_COLOUR in call.data:
@@ -487,6 +490,8 @@ def _register_services(hass: HomeAssistant) -> None:
         vol.Optional(CONF_AUTO_LEVELS): vol.All(
             cv.ensure_list, [vol.In([str(m) for m in INTENSITY_LADDER])]
         ),
+        # Opt-in per-song timing auto-calibration (only meaningful with a live tap).
+        vol.Optional(CONF_AUTO_TIMING): cv.boolean,
         vol.Optional(CONF_EFFECT): vol.In([str(e) for e in SyncEffect]),
         vol.Optional(CONF_COLOUR): vol.In([str(c) for c in ColorScheme]),
         vol.Optional(CONF_BRIGHTNESS): vol.All(
