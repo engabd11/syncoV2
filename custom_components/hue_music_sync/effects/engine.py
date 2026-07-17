@@ -130,26 +130,6 @@ _PREDROP_FALL = 0.04       # ease-out rate on timeout (drops snap to 0 instead)
 # and repeatable, so long steady sections evolve without feeling random.
 _PHRASE_JUMP = (1.0, 0.85, 1.15, 0.95)
 
-# Melody follow (ModeParams.melody_gain): lead-note onsets hold a swell that
-# decays over ~250 ms half-life, crossfaded in only while rhythm confidence is
-# below _MELODY_CONF — the handover between "follow the melody" and "follow
-# the beat" is continuous, never a visible mode switch.
-_MELODY_DECAY = 0.92
-_MELODY_CONF = 0.35
-
-# Colour-luminance compensation (Album colours v2 only — engine.lum_comp): at
-# equal Hue Bri a saturated blue emits far less light than amber/white, so the
-# palette choice would distort the loudness→brightness mapping. Half-strength
-# compensation (exponent 0.5) against a mid-luminance reference, clamped so
-# artistic dark/deep palettes keep their character.
-_LUM_REF = 0.5
-_LUM_MIN = 0.75
-_LUM_MAX = 1.5
-
-# Chorus recall: per-section-group palette offset (identity), an irrational-ish
-# step so distinct groups land on clearly distinct hue neighbourhoods.
-_SECTION_HUE_STEP = 0.13
-
 # Brightness and colour smoothing are per-mode (ModeParams.bri_attack/bri_decay
 # and colour_lerp): club modes snap up hard and fall fast; Movie eases gently.
 
@@ -184,19 +164,6 @@ class EffectEngine:
         # beat colour-jumps) are suppressed so the user's taps drive the beats;
         # the continuous colour/energy ambience keeps running underneath.
         self.manual_only = False
-        # Colour-luminance compensation is an Album-colours-v2-only behaviour
-        # (explicit user choice via the colour scheme); every other scheme
-        # renders exactly as before. Set by the coordinator with the scheme.
-        self.lum_comp = False
-        # Per-track dynamics profile (from the offline map's loudness-range
-        # statistic): compressed masters get their perceptual curve expanded,
-        # dynamic recordings get more flash headroom in quiet passages.
-        # Neutral until a map supplies a profile; reset on every track change.
-        self._track_gamma_mul = 1.0
-        self._loud_ref = _LOUD_REF
-        # Chorus recall: stable per-section-group palette offset + chorus flag.
-        self.section_offset = 0.0
-        self.chorus_now = False
         self._fireworks = FireworksEffect()
         self.set_channels(channels)
 
@@ -254,11 +221,6 @@ class EffectEngine:
         # Rhythm confidence 0..1 (see the _RHYTHM_* constants): does the song
         # currently have an actual beat? Gates the unlocked flash path.
         self._rhythm_conf: float = 0.0
-        # Melody-follow swell (see the _MELODY_* constants): lead-note onsets
-        # hold this up while no beat is discernible. melody_level is the
-        # rendered (confidence-crossfaded) value modes.render reads.
-        self._melody: float = 0.0
-        self.melody_level: float = 0.0
         # Pre-drop pull-down state (see the _PREDROP_* constants).
         self._predrop = 0.0          # rendered envelope 0..1
         self._predrop_commit = False
@@ -581,44 +543,6 @@ class EffectEngine:
         """Master brightness ceiling (0..1), scaling the mode's output."""
         self.brightness = max(0.0, min(1.0, brightness))
 
-    def set_track_profile(self, lra_db: float) -> None:
-        """Adapt reaction constants to this track's measured dynamics.
-
-        ``lra_db`` is the offline map's loudness-range statistic (p95-p10 of
-        the K-weighted frame loudness). A brick-walled master (~<5 dB) has
-        almost no real dynamics, so the perceptual brightness curve is
-        steepened to expand what little there is; a dynamic recording
-        (12+ dB) eases the curve back toward linear and lowers the loudness
-        reference so genuinely quiet-but-real beats still read. ``<= 0`` (an
-        old map / no map) keeps everything exactly at the defaults.
-        """
-        if lra_db <= 0.0:
-            self.reset_track_profile()
-            return
-        dyn = max(0.0, min(1.0, (lra_db - 5.0) / 7.0))  # 0 compressed .. 1 dynamic
-        self._track_gamma_mul = 1.25 - 0.35 * dyn
-        self._loud_ref = _LOUD_REF - 0.10 * dyn
-
-    def reset_track_profile(self) -> None:
-        """Back to neutral dynamics (track change / no map)."""
-        self._track_gamma_mul = 1.0
-        self._loud_ref = _LOUD_REF
-
-    def set_section_identity(self, group: int, chorus: bool) -> None:
-        """Give the current track-map section its stable visual identity.
-
-        Every occurrence of the same section group gets the same palette
-        offset — the chorus recall that makes repeated sections *look* like
-        the same part of the song — and the chorus flag opens the full colour
-        span (read by :func:`.modes.render`). ``group < 0`` clears both.
-        """
-        if group < 0:
-            self.section_offset = 0.0
-            self.chorus_now = False
-            return
-        self.section_offset = (_SECTION_HUE_STEP * group) % 1.0
-        self.chorus_now = chorus
-
     # -- drum-pad / manual beats ----------------------------------------------
 
     def set_manual_only(self, on: bool) -> None:
@@ -819,17 +743,6 @@ class EffectEngine:
         rhythm_gate = (
             p.nobeat_flash + (1.0 - p.nobeat_flash) * self._rhythm_conf
         )
-        # Melody follow: while no beat is discernible, the lead line's note
-        # onsets (broadband-stream events that are not bass-dominant — exactly
-        # what the visible beat paths mute) hold a soft swell. Crossfaded by
-        # rhythm confidence so a returning groove takes over seamlessly.
-        if frame.note_beat and p.melody_gain > 0.0:
-            lvl = min(1.0, frame.note_strength / 2.0) * amp_scale * music_gate
-            if lvl > self._melody:
-                self._melody = lvl
-        self._melody *= _MELODY_DECAY
-        melody_mix = max(0.0, min(1.0, (_MELODY_CONF - self._rhythm_conf) / _MELODY_CONF))
-        self.melody_level = self._melody * melody_mix
         # Pre-drop anticipation: in the final moments before a drop the room
         # pulls in (dimmer, tighter, desaturated) so the detonation lands out
         # of held-back tension. ``pd`` scales every application below; the
@@ -844,7 +757,7 @@ class EffectEngine:
         # proportionality dominates — a quiet pluck pulses small, the drop
         # slams full (salience saturates at 1, it never amplifies).
         loud_scale = min(
-            min(1.0, max(vis_bass, self._energy_env) / self._loud_ref),
+            min(1.0, max(vis_bass, self._energy_env) / _LOUD_REF),
             amp_scale,
         )
         # The highlight decision: rank this beat's accent against the recent
@@ -987,25 +900,9 @@ class EffectEngine:
             if not (grid_locked and beatgrid is not None and beatgrid.beat_in_bar == 0):
                 kick *= tighten
             midf *= tighten
-        # Scheduled moments from the track map (defaults neutral without one).
-        gap_now = structure is not None and structure.gap_now
-        fill_now = structure is not None and structure.fill_now
-        # Treble micro-motion: tiny texture ticks from the dedicated
-        # hi-hat/shaker onset stream, scaled by rhythm confidence so they only
-        # appear once a groove is established — texture, never flashing.
-        tick = 0.0
-        if p.tick_gain > 0.0 and frame.high_beat and not self.manual_only:
-            tick = (
-                p.tick_gain
-                * min(1.0, frame.high_strength / 2.0)
-                * self._rhythm_conf
-                * music_gate
-                * amp_scale
-            )
         # The full-room moment: the passage's very biggest hits take EVERY
         # light at once (vocal lights a touch softer), the way the reference
-        # shows punctuate a chorus. Ordinary highlights stay role-separated —
-        # except through a scheduled drum fill, where the whole band joins in.
+        # shows punctuate a chorus. Ordinary highlights stay role-separated.
         full_room = kick > 0.0 and highlight and acc_now >= p.full_room_accent
         lf = self._light_flash
         decay = p.flash_decay  # per-mode: lower = snappier firework fall
@@ -1013,7 +910,7 @@ class EffectEngine:
             lf[cid] *= decay
         if not self.manual_only and (kick > 0.0 or midf > 0.0):
             for cid, role in self.roles.items():
-                if full_room or fill_now:
+                if full_room:
                     f = kick * (0.85 if role == ROLE_VOCAL else 1.0)
                     if role == ROLE_MID:
                         f = max(f, midf)
@@ -1023,19 +920,6 @@ class EffectEngine:
                         lf[cid] = max(lf.get(cid, 0.0), midf)
                 elif kick > 0.0 and role == ROLE_BASS:
                     lf[cid] = max(lf.get(cid, 0.0), kick)
-        if tick > 0.0:
-            has_vocal = p.role_mix[2] > 0.0
-            for cid, role in self.roles.items():
-                info = self.cmap[cid]
-                # Vocal lamps carry the hats when roles exist; otherwise the
-                # treble corner of the room (high up, or the right/high end of
-                # the spectral axis in a flat layout).
-                if has_vocal:
-                    hit = role == ROLE_VOCAL
-                else:
-                    hit = info["nz"] > 0.55 or info["xrank"] >= 0.67
-                if hit:
-                    lf[cid] = max(lf.get(cid, 0.0), tick)
 
         # Structure choreography: builds desaturate (tension), drops swell, and
         # the section arc (from the track map) scales the show's whole range.
@@ -1049,15 +933,8 @@ class EffectEngine:
             drop = 0.0
             if structure.drop_now:
                 # A drop that detonates out of a held pre-drop swells bigger:
-                # the released depth is the tension it earned. The track map's
-                # ranked drop strength sizes it (the track's biggest drop
-                # detonates at full, minor section lifts stay proportionate);
-                # heuristic drops carry the neutral 1.0.
-                drop = (
-                    p.drop_boost
-                    * structure.drop_strength
-                    * (1.0 + 0.35 * self.predrop_released)
-                )
+                # the released depth is the tension it earned.
+                drop = p.drop_boost * (1.0 + 0.35 * self.predrop_released)
             self._swell = max(self._swell * 0.85, drop)
             alpha = 1.0 - math.exp(-dt / 2.0)
             self.section_level += (structure.section_level - self.section_level) * alpha
@@ -1069,30 +946,17 @@ class EffectEngine:
         colour_lerp = p.colour_lerp
         attack, decay = p.bri_attack, p.bri_decay
         slew = p.bri_slew  # max emitted brightness RISE per frame (anti-strobe)
-        # Perceptual brightness exponent for this frame: the mode's curve,
-        # steepened/eased by the track's measured dynamics (linear modes —
-        # Subtle/Movies — stay linear regardless of the profile).
-        gamma = p.bri_gamma * self._track_gamma_mul if p.bri_gamma > 1.0 else p.bri_gamma
         out: dict[int, RGB] = {}
         for cid, (target_color, target_b) in targets.items():
-            # Scheduled stop-gap (a DJ cut): the audio is silent for a beat or
-            # two between loud passages — snap the room straight to the floor
-            # so the cut reads crisp instead of being softened by the decay
-            # smoothing, and let the re-entry detonate out of true dark.
-            if gap_now:
-                target_b = p.floor
             # Pre-drop pull-down: compress the brightness HEADROOM above the
             # mode's floor (base == floor modes are provably untouched, and
             # the silence gate keeps priority since pd carries music_gate).
-            elif pd > 0.0:
+            if pd > 0.0:
                 target_b = p.floor + (target_b - p.floor) * (1.0 - pd)
-            overlay = 0.0 if gap_now else self._light_flash.get(cid, 0.0) + self._swell
+            overlay = self._light_flash.get(cid, 0.0) + self._swell
             prev_color, prev_b = self._state[cid]
             alpha = attack if target_b >= prev_b else decay
-            if gap_now:
-                new_b = target_b  # the cut is instant, not eased
-            else:
-                new_b = prev_b + (target_b - prev_b) * alpha
+            new_b = prev_b + (target_b - prev_b) * alpha
             blended = (
                 prev_color[0] + (target_color[0] - prev_color[0]) * colour_lerp,
                 prev_color[1] + (target_color[1] - prev_color[1]) * colour_lerp,
@@ -1124,28 +988,10 @@ class EffectEngine:
             # falls pass through freely so the room still dims quickly between
             # hits. bri_slew == 1.0 keeps the old instant snap (calm modes).
             b = min(1.0, new_b + overlay)
-            # Perceptual brightness curve: expand the music-driven headroom
-            # above the floor so loudness RATIOS render as perceived-brightness
-            # ratios (linear Bri under-responds — light perception is more
-            # compressive than hearing). Endpoints preserved: the floor is
-            # still the floor and a full-strength hit still reaches 1.0.
-            # Applied BEFORE the slew limiter so the emitted-rise cap (the
-            # anti-strobe contract) holds in the output domain.
-            if gamma != 1.0 and b > p.floor:
-                head = 1.0 - p.floor
-                if head > 1e-6:
-                    b = p.floor + head * ((b - p.floor) / head) ** gamma
             prev_emit = self._emit_b.get(cid, 0.0)
             if slew < 1.0 and b > prev_emit + slew:
                 b = prev_emit + slew
             self._emit_b[cid] = b
-            # Colour-luminance compensation (Album colours v2 only): equalise
-            # the light a saturated blue vs an amber actually emits at equal
-            # Bri, half-strength and clamped so dark palettes keep their mood.
-            if self.lum_comp:
-                y = 0.2126 * nc[0] + 0.7152 * nc[1] + 0.0722 * nc[2]
-                m_l = (_LUM_REF / max(y, 0.05)) ** 0.5
-                b = min(1.0, b * min(_LUM_MAX, max(_LUM_MIN, m_l)))
             b *= self.brightness
             out[cid] = (nc[0] * b, nc[1] * b, nc[2] * b)
         return out

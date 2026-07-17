@@ -99,19 +99,10 @@ def test_load_accepts_v2_and_rejects_unknown_formats(map_120: TrackMap, tmp_path
     map_120.save(src)
 
     v2 = tmp_path / "v2.npz"
-    _rewrite_format(
-        src, v2, 2.0,
-        drop=("onsets", "onset_accents", "diag",
-              "sec_group", "mom_kind", "mom_t0", "mom_t1", "mom_strength"),
-    )
+    _rewrite_format(src, v2, 2.0, drop=("onsets", "onset_accents", "diag"))
     back = TrackMap.load(v2)
     assert back is not None and back.usable  # v2 accepted
-    # Missing v3/v5 rows default safely: diag is zero-padded to the full
-    # 9-entry layout, moments stay empty and sections stay ungrouped.
-    assert back.diag.shape == (9,)
-    assert not back.diag.any()
-    assert back.mom_kind.size == 0
-    assert all(s.group == -1 for s in back.sections)
+    assert back.diag.shape == (6,)  # missing v3 rows default safely
 
     unknown = tmp_path / "v99.npz"
     _rewrite_format(src, unknown, 99.0)

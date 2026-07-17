@@ -98,12 +98,7 @@ def test_intense_is_alive_with_no_beatgrid_and_no_beats():
 def test_extreme_is_alive_with_no_beatgrid():
     frames = _frames(_music())
     room = _render_all(frames[30:], SyncMode.EXTREME)
-    # The perceptual brightness curve (bri_gamma) deliberately deepens the
-    # mid-levels in the true-dark-room mode — more contrast, dimmer between
-    # hits — so "alive" here means clearly lit peaks and real motion, not a
-    # high average.
-    assert room.mean() > 0.15
-    assert room.max() > 0.4
+    assert room.mean() > 0.25
     assert room.std() > 0.02
 
 

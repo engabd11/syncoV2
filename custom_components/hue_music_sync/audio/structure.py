@@ -49,20 +49,6 @@ class StructureState:
     # section's loudness relative to the track's peak (1.0 when unknown), so
     # choreography can save its full range for the chorus.
     section_level: float = 1.0
-    # --- scheduled "moments" (offline track-map timeline; defaults neutral) ---
-    # Inside a stop-gap (a DJ cut: the audio drops to silence for a fraction of
-    # a second between loud passages). The engine snaps the room to the floor
-    # so the cut reads crisp instead of being softened by the decay smoothing.
-    gap_now: bool = False
-    # Inside a drum fill (an onset-density burst in the last bar before a
-    # section boundary): every role joins the fill instead of staying split.
-    fill_now: bool = False
-    # How big this drop is relative to the track's biggest (scales the swell):
-    # 1.0 when unknown, so heuristic drops behave exactly as before.
-    drop_strength: float = 1.0
-    # The current section belongs to the track's recurring highest-energy
-    # section group (the chorus): the show opens its full colour span.
-    is_chorus: bool = False
 
 
 def _alpha(tau_s: float, dt: float) -> float:

@@ -3,7 +3,7 @@
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.12%2B-blue)
-![Version](https://img.shields.io/badge/version-1.23.0-informational)
+![Version](https://img.shields.io/badge/version-1.19.1-informational)
 
 Real-time music-reactive lighting for **Philips Hue Entertainment areas**, driven by **any Home Assistant media player — Music Assistant players first and foremost**. Beat detection, frequency analysis and spatial choreography stream straight to the bridge over the Hue Entertainment API (DTLS-encrypted, up to 50 Hz), and a bundled dashboard card mirrors the whole show live — no separate frontend install.
 
@@ -41,7 +41,7 @@ Hue Synco follows whatever is playing on your chosen media player and translates
 
 Every track is analysed once in the background — beats are located precisely, downbeats and section boundaries are found (verse, chorus, build, drop). During playback those events are **scheduled** ahead of time, so the choreography lands exactly on the beat rather than chasing it. A continuous spectral layer (a 16-band melbank spread spatially across the room) keeps every lamp alive between beats.
 
-What reacts matters as much as when: reactions are **proportional to the sound's perceived loudness** (K-weighted, like ears hear it — a quiet pluck gives a small dim pulse, the drop slams the room), brightness follows a **perceptual curve** so loudness ratios *look* like loudness ratios, and beats are keyed to **instruments, not vocals** — sung melodies and sustained tones are filtered out of the beat streams so the lights follow the music, not the singing. When there *is* no beat (an intro, a bridge, a ballad passage) the room follows the **lead melody line** instead, crossfading back to the groove as it returns. Each track's analysis also carries a scheduled **moments timeline** — stop-gaps snap the room to black and detonate on re-entry, risers build the whole build, drum fills pull every lamp in, ranked drops size their detonation, outro fades ride down with the music — plus **chorus recall**: repeated sections get the same visual identity, so the chorus visibly *is* the chorus every time it returns.
+What reacts matters as much as when: reactions are **proportional to the sound's real loudness** (a quiet pluck gives a small dim pulse, the drop slams the room) and are keyed to **instruments, not vocals** — sung melodies and sustained tones are filtered out of the beat streams so the lights follow the music, not the singing.
 
 You choose which player drives the lights — pick any player right from the card, or let the integration auto-follow whatever is playing (Music Assistant players preferred).
 
@@ -264,14 +264,11 @@ Hue Synco began life around Snapcast/Squeezelite before focusing on Music Assist
 Audio source ladder (per followed player, best available wins):
   Snapcast tap → MA/Sendspin stream decode → offline track map → metadata glow
         ↓
-Real-time analysis (5-band FFT, 16-bin melbank, SuperFlux onsets — kick /
-guitar / hi-hat / lead-note streams — tempo, K-weighted perceptual loudness
-salience + onset broadbandness for event selection)
+Real-time analysis (5-band FFT, 16-bin melbank, SuperFlux onsets, tempo,
+absolute-loudness salience + onset broadbandness for event selection)
         ↓
-Offline track map (beat grid, downbeats, section boundaries + similarity
-groups for chorus recall, a scheduled "moments" timeline — stop-gaps, ranked
-drops, risers, fills, outro fades — and a per-track dynamics profile;
-analysed once, then cached to disk so the same track reacts instantly next time)
+Offline track map (beat grid, downbeats, section boundaries — analysed once,
+then cached to disk so the same track reacts instantly next time)
         ↓
 Album art → CIELAB colour palette extraction
         ↓
