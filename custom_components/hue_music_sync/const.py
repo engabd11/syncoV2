@@ -171,20 +171,21 @@ DEFAULT_MODE: Final = SyncMode.HIGH
 DEFAULT_EFFECT: Final = SyncEffect.MUSIC
 DEFAULT_COLOUR: Final = ColorScheme.ALBUM_ART
 
-# Auto intensity: map the song's locked BPM to Subtle/Medium/High. Ballads sit
-# below AUTO_BPM_LOW, up-tempo tracks above AUTO_BPM_HIGH, everything between is
-# Medium. AUTO_BPM_MARGIN is a hysteresis dead-zone half-width so a track sitting
-# on a boundary doesn't oscillate between two levels. Intense/Extreme are never
-# chosen automatically - they stay manual-only.
+# Legacy BPM→Subtle/Medium/High mapping (``effects.modes.auto_mode_for_bpm``),
+# superseded by the musical ``AutoIntensityPicker`` but kept for reference/tests.
+# AUTO_BPM_MARGIN is a hysteresis dead-zone half-width so a track sitting on a
+# boundary doesn't oscillate between two levels.
 AUTO_BPM_LOW: Final = 95.0
 AUTO_BPM_HIGH: Final = 125.0
 AUTO_BPM_MARGIN: Final = 6.0
 
 # The intensity ladder in ascending order (Auto is the picker itself, not a
-# rung). The Auto picker maps a live musical-intensity signal to a rung via
-# ABSOLUTE thresholds, then gates the pick to the user's enabled set — so a
-# rung always means the same size of musical moment, and enabling Intense /
-# Extreme only unlocks the ceiling rather than rescaling everything below.
+# rung). The Auto picker maps a live musical-intensity signal onto the user's
+# enabled set, spread across *each song's own* dynamic range (measured offline —
+# see ``trackmap.build_intensity_profile``): the quiet parts sit on the lowest
+# enabled rung and the biggest moments reach the highest, so a song that breathes
+# uses every enabled rung while a flat one honestly stays compressed. Enabling
+# Intense / Extreme unlocks the ceiling; making High the lowest makes it the floor.
 INTENSITY_LADDER: Final = (
     SyncMode.SUBTLE,
     SyncMode.MEDIUM,

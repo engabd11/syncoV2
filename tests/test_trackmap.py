@@ -9,10 +9,13 @@ import pytest
 
 from hue_music_sync.audio.trackmap import (
     _MAX_ANALYSIS_ATTEMPTS,
+    IntensityProfile,
     MapResult,
+    TrackFeatures,
     TrackMap,
     TrackMapper,
     analyze_pcm,
+    build_intensity_profile,
 )
 from hue_music_sync.const import ANALYSIS_SAMPLE_RATE
 
@@ -327,6 +330,85 @@ def test_features_are_stored_and_normalised(map_120: TrackMap):
     loud = f.bands[f.energy > 0.5]
     assert loud.size and float(loud[:, :2].max()) > 0.5  # sub_bass/bass active
     assert float(loud[:, 4].mean()) < 0.3  # not treble
+
+
+# --- per-song Auto-intensity profile ----------------------------------------
+
+def _flat_features(n: int, level: float, bands_row) -> TrackFeatures:
+    z = np.zeros(n, dtype=np.float32)
+    return TrackFeatures(
+        bands=np.tile(np.asarray(bands_row, dtype=np.float32), (n, 1)),
+        energy=np.full(n, level, dtype=np.float32),
+        flux=z, bass_flux=z, mid_flux=z, centroid=z,
+    )
+
+
+def test_intensity_profile_is_derived_from_the_features(map_120: TrackMap):
+    prof = map_120.intensity_profile
+    assert isinstance(prof, IntensityProfile)
+    assert 0.0 <= prof.sig_lo <= prof.sig_hi <= 1.0
+    assert prof.dynamics == pytest.approx(0.0, abs=0.5) and prof.dynamics >= 0.0
+    assert -1.0 <= prof.tilt <= 1.0
+    # 120 BPM sits mid-tempo on the 85..150 span.
+    assert 0.4 < prof.tempo < 0.7
+
+
+def test_intensity_profile_recomputed_on_load_without_reanalysis(
+    map_120: TrackMap, tmp_path
+):
+    path = tmp_path / "m.npz"
+    map_120.save(path)
+    back = TrackMap.load(path)
+    assert back is not None and back.intensity_profile is not None
+    a, b = map_120.intensity_profile, back.intensity_profile
+    assert b.sig_lo == pytest.approx(a.sig_lo)
+    assert b.sig_hi == pytest.approx(a.sig_hi)
+    assert b.dynamics == pytest.approx(a.dynamics)
+    assert b.tilt == pytest.approx(a.tilt)
+
+
+def test_dynamic_song_has_more_dynamics_than_a_uniform_one(map_120: TrackMap):
+    # A quiet-intro / loud-chorus track breathes far more than steady kicks.
+    dyn = analyze_pcm(_song(bpm=124.0, seconds=60.0, quiet_until=30.0))
+    assert dyn is not None and dyn.intensity_profile is not None
+    assert dyn.intensity_profile.dynamics > map_120.intensity_profile.dynamics
+    assert dyn.intensity_profile.dynamics > 0.1  # genuinely spread
+
+
+def test_build_intensity_profile_flat_vs_dynamic():
+    n = 3000  # ~60 s at 50 fps
+    bass_heavy = (0.8, 0.8, 0.3, 0.3, 0.15)
+    beats = np.arange(0.0, 60.0, 0.5)  # 120 BPM
+    # Dynamic: energy swells quiet -> loud -> quiet.
+    t = np.linspace(0.0, 1.0, n)
+    energy = (0.12 + 0.85 * np.sin(np.pi * t) ** 2).astype(np.float32)
+    z = np.zeros(n, dtype=np.float32)
+    feat = TrackFeatures(
+        bands=np.tile(np.asarray(bass_heavy, dtype=np.float32), (n, 1)),
+        energy=energy, flux=z, bass_flux=z, mid_flux=z, centroid=z,
+    )
+    prof = build_intensity_profile(feat, 120.0, beats, 60.0)
+    assert prof is not None
+    assert prof.sig_hi > prof.sig_lo
+    assert prof.dynamics > 0.2          # a genuinely dynamic energy curve
+    assert prof.tilt > 0.0              # bass-heavy bands -> positive tilt
+    # Flat: constant energy -> near-zero true dynamics (stays compressed).
+    flat = build_intensity_profile(_flat_features(n, 0.6, bass_heavy), 120.0, beats, 60.0)
+    assert flat is not None
+    assert flat.dynamics < 0.05
+    # Too short to profile -> None (graceful).
+    assert build_intensity_profile(_flat_features(10, 0.6, bass_heavy), 120.0, beats, 0.2) is None
+    assert build_intensity_profile(None, 120.0, beats, 60.0) is None
+
+
+def test_frame_at_stamps_the_profile_on_playback_frames(map_120: TrackMap):
+    fr = map_120.frame_at(12.0)
+    assert fr is not None
+    prof = map_120.intensity_profile
+    assert fr.intensity_lo == pytest.approx(prof.sig_lo)
+    assert fr.intensity_hi == pytest.approx(prof.sig_hi)
+    assert fr.intensity_dynamics == pytest.approx(prof.dynamics)
+    assert fr.intensity_mood == pytest.approx(prof.mood)
 
 
 def test_frame_at_replays_beats_exactly_once(map_120: TrackMap):

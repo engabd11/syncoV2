@@ -5,7 +5,7 @@ the anti-flicker behaviour are unit-tested directly.
 
 from __future__ import annotations
 
-from hue_music_sync.const import DEFAULT_AUTO_LEVELS, SyncMode
+from hue_music_sync.const import DEFAULT_AUTO_LEVELS, INTENSITY_LADDER, SyncMode
 from hue_music_sync.effects.modes import (
     AutoIntensityPicker,
     sanitize_auto_levels,
@@ -26,9 +26,13 @@ def _run(
     beat_period_s: float = 0.4,
     seconds: float = 6.0,
     dt: float = 0.02,
+    profile: dict | None = None,
 ) -> SyncMode:
     """Drive the picker with a steady synthetic feature stream; return the
-    settled rung. Long enough to clear the dwell and the smoothing."""
+    settled rung. Long enough to clear the dwell and the smoothing. ``profile``
+    (a per-song ``lo``/``hi``/``dynamics``/``mood`` dict) is passed straight
+    through to :meth:`AutoIntensityPicker.update`; omit it for the fixed-window
+    (live-tap) path."""
     t = 0.0
     last_beat = -1e9
     level = None
@@ -37,11 +41,30 @@ def _run(
         if beat:
             last_beat = t
         level = picker.update(
-            dt, energy=energy, salience=salience, bpm=bpm, beat=beat, allowed=allowed
+            dt, energy=energy, salience=salience, bpm=bpm, beat=beat,
+            allowed=allowed, **(profile or {}),
         )
         t += dt
     assert level is not None
     return level
+
+
+def _settle_signal(
+    *, energy: float, salience: float, bpm: float, beat_period_s: float
+) -> float:
+    """The picker's own smoothed internal signal at steady state for a stream.
+
+    Used to anchor a synthetic song's ``lo``/``hi`` window to the very values the
+    live picker actually reaches, so the profile tests are self-consistent."""
+    p = AutoIntensityPicker()
+    t, last_beat, dt = 0.0, -1e9, 0.02
+    for _ in range(int(12.0 / dt)):
+        beat = (t - last_beat) >= beat_period_s
+        if beat:
+            last_beat = t
+        p.update(dt, energy=energy, salience=salience, bpm=bpm, beat=beat, allowed=ALL_RUNGS)
+        t += dt
+    return p._slow  # the section-level envelope the profile path maps
 
 
 # --- the enabled-set clamp is the headline behaviour ------------------------
@@ -198,3 +221,58 @@ def test_sanitize_drops_auto_and_unknown_and_falls_back_when_empty():
     assert sanitize_auto_levels(["auto", "bogus"]) == tuple(DEFAULT_AUTO_LEVELS)
     assert sanitize_auto_levels([]) == tuple(DEFAULT_AUTO_LEVELS)
     assert sanitize_auto_levels(None) == tuple(DEFAULT_AUTO_LEVELS)
+
+
+# --- per-song profile: song-scaled spread + mood (the headline improvement) --
+
+_QUIET = dict(energy=0.30, salience=0.30, bpm=92, beat_period_s=0.8)
+_LOUD = dict(energy=1.0, salience=1.0, bpm=150, beat_period_s=0.25)
+
+
+def test_all_five_rungs_are_used_across_a_dynamic_song():
+    # With a per-song window, a real quiet↔loud swing reaches BOTH ends of the
+    # full enabled set — the fix for "select all, only 3 react".
+    lo, hi = _settle_signal(**_QUIET), _settle_signal(**_LOUD)
+    prof = dict(lo=lo, hi=hi, dynamics=hi - lo, mood=0.0)
+    assert hi - lo > 0.26  # a genuinely dynamic song
+    quiet = _run(AutoIntensityPicker(), ALL_RUNGS, **_QUIET, profile=prof, seconds=14.0)
+    loud = _run(AutoIntensityPicker(), ALL_RUNGS, **_LOUD, profile=prof, seconds=14.0)
+    assert quiet is SyncMode.SUBTLE
+    assert loud is SyncMode.EXTREME
+
+
+def test_dynamics_knob_controls_the_spread():
+    # SAME quiet/loud trajectory + window; only the `dynamics` label differs.
+    lo, hi = _settle_signal(**_QUIET), _settle_signal(**_LOUD)
+    dynamic = dict(lo=lo, hi=hi, dynamics=hi - lo, mood=0.0)
+    flat = dict(lo=lo, hi=hi, dynamics=0.05, mood=0.0)
+    # A dynamic label spreads to both extremes...
+    assert _run(AutoIntensityPicker(), ALL_RUNGS, **_QUIET, profile=dynamic, seconds=14.0) is SyncMode.SUBTLE
+    assert _run(AutoIntensityPicker(), ALL_RUNGS, **_LOUD, profile=dynamic, seconds=14.0) is SyncMode.EXTREME
+    # ...a flat label stays compressed off the extremes (dynamics-honest).
+    q = _run(AutoIntensityPicker(), ALL_RUNGS, **_QUIET, profile=flat, seconds=14.0)
+    ld = _run(AutoIntensityPicker(), ALL_RUNGS, **_LOUD, profile=flat, seconds=14.0)
+    assert q is not SyncMode.SUBTLE
+    assert ld is not SyncMode.EXTREME
+
+
+def test_mood_slides_the_operating_point():
+    # Mood is a deterministic shift of the operating point: at the same mid-window
+    # signal, a bass-heavy/fast (+mood) song rides a rung up, a mellow one down.
+    # Resolved from a fresh picker (no hysteresis history) so it's the pure map.
+    order = INTENSITY_LADDER.index
+    sig, lo, hi, dyn = 0.55, 0.30, 0.80, 0.5  # mid of a dynamic window
+
+    def pick(mood: float) -> SyncMode:
+        return AutoIntensityPicker()._resolve(sig, ALL_RUNGS, lo, hi, dyn, mood)
+
+    assert order(pick(0.16)) > order(pick(0.0)) > order(pick(-0.16))
+
+
+def test_profile_never_leaves_the_enabled_set():
+    # The enabled-set clamp still holds with a per-song profile driving the pick.
+    prof = dict(lo=0.2, hi=0.9, dynamics=0.7, mood=0.16)
+    for allowed in (DEFAULT, WITH_INTENSE, (SyncMode.HIGH,), (SyncMode.SUBTLE, SyncMode.INTENSE)):
+        for kw in (_QUIET, _LOUD):
+            level = _run(AutoIntensityPicker(), allowed, **kw, profile=prof, seconds=14.0)
+            assert level in allowed

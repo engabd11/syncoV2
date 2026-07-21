@@ -506,6 +506,18 @@ class SyncSession:
         if self._settings.mode is not SyncMode.AUTO:
             return
         bpm = beatgrid.bpm if beatgrid is not None and beatgrid.locked else 0.0
+        # The song's own intensity profile (offline map playback stamps it on the
+        # frame; live tap / metadata leave the neutral defaults, so the picker
+        # keeps its fixed window). It spreads the enabled rungs across THIS song's
+        # quiet↔loud range and shades the pick by its mood.
+        prof_kw = {}
+        if frame.intensity_lo is not None and frame.intensity_hi is not None:
+            prof_kw = dict(
+                lo=frame.intensity_lo,
+                hi=frame.intensity_hi,
+                dynamics=frame.intensity_dynamics,
+                mood=frame.intensity_mood,
+            )
         target = self._auto_picker.update(
             dt,
             energy=frame.energy,
@@ -513,6 +525,7 @@ class SyncSession:
             bpm=bpm,
             beat=frame.beat,
             allowed=self._settings.auto_levels,
+            **prof_kw,
         )
         if target is self._auto_level:
             return

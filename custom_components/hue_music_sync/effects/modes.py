@@ -364,11 +364,33 @@ _PICK_HYST = 0.07
 _PICK_DWELL_S = 3.5
 _PICK_ATTACK = 0.10   # per-frame EMA weight while the signal is rising
 _PICK_DECAY = 0.03    # per-frame EMA weight while it is falling
+# Section-level smoothing used ONLY on the per-song-profile path: rung selection
+# should follow the song's *sections* (verse↔chorus↔drop), not individual beats.
+# Stretching a song's own quiet↔loud across the enabled set amplifies beat-to-
+# beat pumping, so mapping a much slower envelope keeps switches unhurried while
+# still reaching every rung on real section changes. Asymmetric like the fast
+# one (rise in ~1.2 s to catch a drop, fall over ~3.5 s so a brief dip doesn't
+# leave the chorus). The default (no-profile / live-tap) path is untouched — it
+# keeps mapping the fast ``_signal`` exactly as before.
+_PICK_SLOW_ATTACK = 0.017  # ~1.2 s rise at 50 fps
+_PICK_SLOW_DECAY = 0.006   # ~3.5 s fall at 50 fps
 # Beats/second that reads as fully percussive (fast 16-note-ish groove).
 _PICK_BEAT_FULL = 3.0
 # Tempo term: BPM mapped across a ballad..club-techno span.
 _PICK_BPM_LO = 85.0
 _PICK_BPM_HI = 150.0
+# Per-song "dynamics-honest" spread (only when a song intensity profile is
+# supplied). ``dynamics`` is the song's own quiet..loud signal span (see
+# ``trackmap.build_intensity_profile``): at/above this reference a song is
+# treated as fully dynamic and its quiet↔loud is stretched across the WHOLE
+# enabled range (so every selected rung gets used); below it the spread is
+# proportionally pulled back toward the (mood-shifted) centre so a flat,
+# constant-loudness track sits still instead of twitching between rungs. Kept
+# low so ordinary songs (which do breathe verse↔chorus) reach full spread.
+_PICK_DYN_REF = 0.26
+# Cap on how far the mood term (spectral tilt + tempo) may slide the operating
+# point away from centre: a moderate bias, never a takeover.
+_PICK_MOOD_MAX = 0.16
 
 
 def _intensity_signal(energy: float, salience: float, tempo: float, perc: float) -> float:
@@ -406,6 +428,7 @@ class AutoIntensityPicker:
         """Start fresh (session start). Seeds the signal mid-range so the room
         opens around the middle of the enabled range, not ramping up from black."""
         self._signal = 0.56  # ≈ the middle of the real-music loudness window
+        self._slow = 0.56    # section-level envelope (profile path only)
         self._beat_rate = 0.0
         self._level: SyncMode | None = None  # emitted rung
         self._since_switch = _PICK_DWELL_S   # allow the first pick immediately
@@ -428,8 +451,21 @@ class AutoIntensityPicker:
         bpm: float,
         beat: bool,
         allowed: tuple[SyncMode, ...],
+        lo: float = _SIG_LO_REF,
+        hi: float = _SIG_HI_REF,
+        dynamics: float | None = None,
+        mood: float = 0.0,
     ) -> SyncMode:
-        """Advance one frame and return the rung Auto should be at now."""
+        """Advance one frame and return the rung Auto should be at now.
+
+        ``lo``/``hi``/``dynamics``/``mood`` are the current song's intensity
+        profile (from :func:`trackmap.build_intensity_profile`, carried on the
+        frame): ``lo``/``hi`` are the song's own quiet..loud signal window,
+        ``dynamics`` how much it actually moves, ``mood`` a spectral+tempo shift
+        of the operating point. They default to the historical fixed window with
+        no per-song shaping, so live-tap / metadata frames (which carry no
+        profile) behave exactly as before.
+        """
         # Percussiveness: a leaky-integrator estimate of beats/second (decays
         # through quiet bridges, climbs on a busy groove). With time-constant
         # tau, adding 1/tau per beat and bleeding rate*dt/tau per frame settles
@@ -446,9 +482,14 @@ class AutoIntensityPicker:
         raw = _intensity_signal(energy, salience, tempo, perc)
         alpha = _PICK_ATTACK if raw > self._signal else _PICK_DECAY
         self._signal += (raw - self._signal) * alpha
+        slow_alpha = _PICK_SLOW_ATTACK if raw > self._slow else _PICK_SLOW_DECAY
+        self._slow += (raw - self._slow) * slow_alpha
         self._since_switch += dt
 
-        target = self._resolve(self._signal, allowed)
+        # A per-song profile maps the SECTION-level envelope (so the pick follows
+        # verse↔chorus↔drop, not beats); the live-tap path keeps the fast signal.
+        sig = self._slow if dynamics is not None else self._signal
+        target = self._resolve(sig, allowed, lo, hi, dynamics, mood)
         if target is not self._level and self._since_switch >= _PICK_DWELL_S:
             self._level = target
             self._since_switch = 0.0
@@ -456,20 +497,42 @@ class AutoIntensityPicker:
             self._level = target  # first frame: adopt without waiting on dwell
         return self._level
 
-    def _resolve(self, signal: float, allowed: tuple[SyncMode, ...]) -> SyncMode:
+    def _resolve(
+        self,
+        signal: float,
+        allowed: tuple[SyncMode, ...],
+        lo: float = _SIG_LO_REF,
+        hi: float = _SIG_HI_REF,
+        dynamics: float | None = None,
+        mood: float = 0.0,
+    ) -> SyncMode:
         """Map the signal onto a band of the enabled set, with hysteresis.
 
-        The signal is normalised against the real-music loudness window, then the
-        [0, 1] range is split into one equal band per enabled rung. A wide
-        dead-band on each boundary means a moment must move well past the edge
-        before the rung changes, so the pick is stable and unhurried.
+        The signal is first normalised against the loudness window ``lo..hi`` (the
+        song's own quiet..loud span when a profile is supplied, else the fixed
+        real-music window), then the [0, 1] range is split into one equal band per
+        enabled rung. A wide dead-band on each boundary means a moment must move
+        well past the edge before the rung changes, so the pick is stable.
+
+        When a song profile is supplied, the spread is **dynamics-honest**: a song
+        with real dynamics stretches its quiet↔loud across the whole enabled range
+        (every selected rung gets used), while a flat, constant-loudness track is
+        pulled back toward a mood-shifted centre instead of twitching between rungs.
+        With no profile (``dynamics is None``) the mapping is the historical
+        full-window one, unchanged.
         """
         rungs = sorted(
             (m for m in allowed if m in INTENSITY_LADDER), key=INTENSITY_LADDER.index
         ) or list(DEFAULT_AUTO_LEVELS)
         n = len(rungs)
-        norm = (signal - _SIG_LO_REF) / (_SIG_HI_REF - _SIG_LO_REF)
-        norm = max(0.0, min(1.0, norm))
+        span = max(1e-3, hi - lo)
+        norm = max(0.0, min(1.0, (signal - lo) / span))
+        if dynamics is not None:
+            # How much of the full range this song has earned (0 flat .. 1 dynamic).
+            w = max(0.0, min(1.0, dynamics / _PICK_DYN_REF))
+            mood = max(-_PICK_MOOD_MAX, min(_PICK_MOOD_MAX, mood))
+            center = max(0.15, min(0.85, 0.5 + mood))
+            norm = max(0.0, min(1.0, center + w * (norm - 0.5)))
         b = rungs.index(self._level) if self._level in rungs else min(n - 1, int(norm * n))
         while b < n - 1 and norm > (b + 1) / n + _PICK_HYST:
             b += 1

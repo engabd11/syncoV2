@@ -88,6 +88,17 @@ class AnalysisFrame:
     # Empty list means mono/unknown — every existing producer stays valid and
     # the engine renders exactly as before pan existed.
     pan: list[float] = field(default_factory=list)
+    # Per-song Auto-intensity shaping, stamped by offline map playback
+    # (:meth:`trackmap.TrackMap.frame_at` from its ``IntensityProfile``): the
+    # song's own quiet..loud signal window (``intensity_lo``/``intensity_hi``),
+    # how much it moves (``intensity_dynamics``), and a moderate spectral+tempo
+    # operating-point shift (``intensity_mood``). Defaults are neutral so frame
+    # producers with no profile (live tap, metadata) leave the Auto picker on its
+    # fixed window, exactly as before these existed.
+    intensity_lo: float | None = None
+    intensity_hi: float | None = None
+    intensity_dynamics: float | None = None
+    intensity_mood: float = 0.0
 
 
 # SuperFlux parameters, shared with the offline track-map analysis.

@@ -73,7 +73,7 @@ The followed player can be **pinned per area** (from the card's player dropdown 
 
 ### Choreography
 - **6 intensity modes** (Auto → Subtle → Medium → High → Intense → Extreme) sharing one unified renderer; the mode also sets how *picky* beat selection is — the mode **is** the sensitivity
-- **Auto intensity** — reads the music's live intensity (loudness, the size of the moment, tempo and how busy the beat is) and picks a rung for you, climbing on a drop and easing back in the quiet parts. A checklist on the card sets **which** rungs it may choose from, and the music is spread across *exactly that range*: the lowest enabled rung is the floor for the quiet parts, the highest is reached on the biggest moments — so add Intense/Extreme and they get used, or make High the lowest and it becomes the floor. Switches are slow and unhurried (long dwell, wide hysteresis) so a rung always has time to breathe
+- **Auto intensity** — reads the music's intensity (loudness, the size of the moment, tempo and how busy the beat is) and picks a rung for you, climbing on a drop and easing back in the quiet parts. A checklist on the card sets **which** rungs it may choose from, and each song is spread across *exactly that range*. The spread is measured **per song** from the offline analysis (free on the pre-warmed library, no re-analysis): a track that genuinely breathes verse↔chorus↔drop reaches every enabled rung — so *all* of them get involved, not just the middle few — while a flat, constant-loudness track honestly stays compressed instead of twitching. The song's **mood** (bass-heavy/club vs mellow/bright, fast vs slow) nudges the whole operating point up or down, so the pick matches the vibe. Selection follows the song's *sections*, not its beats, and switches are slow and unhurried (long dwell, wide hysteresis) so a rung always has time to breathe
 - **Instrument role assignment** — lights are split into bass, guitar and vocal roles, spread evenly around the room and re-dealt every few bars; scales cleanly from 1 to 10 lights
 - **3D spatial waves** — beat wavefronts sweep the room using the actual lamp positions from the entertainment area; lows to one side, highs to the other, treble to the higher lamps
 - **Beat highlight selection** — brightness pops only on beats that stand out against the recent 24-beat window
@@ -202,7 +202,7 @@ While an area is syncing, its switch also exposes now-playing, album-colour, tem
 
 | Mode | Flash limiter | Character |
 |---|---|---|
-| **Auto** | Strict | Follows the song's tempo and picks Subtle/Medium/High for you |
+| **Auto** | Follows the pick | Picks a rung live from the music, spread across the rungs you enable and scaled to *each song's* own dynamic range and mood — quiet parts sit low, drops reach the top |
 | **Subtle** | Strict | Gentle spatial gradient, soft colour drift, small beat steps |
 | **Medium** | Strict | Visible dimming, soft flashes on stronger beats, wide colour spread |
 | **High** | Strict | Per-instrument spatial split (bass/guitar/vocal), dynamically assigned to the instruments actually playing |

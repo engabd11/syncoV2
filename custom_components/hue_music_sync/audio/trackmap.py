@@ -51,6 +51,17 @@ from ..const import (
     MELBANK_BINS,
 )
 from ..util import redact_url
+# Picker tuning constants (single source of truth in the effects layer): the
+# offline intensity profile mirrors the live picker's smoothing/tempo/perc so
+# its percentile window matches what the live picker actually reaches. This is a
+# leaf import (effects.modes only depends on const + color) — no import cycle.
+from ..effects.modes import (
+    _PICK_BEAT_FULL,
+    _PICK_BPM_HI,
+    _PICK_BPM_LO,
+    _PICK_SLOW_ATTACK,
+    _PICK_SLOW_DECAY,
+)
 from .analyzer import (
     LONG_FLUX_FLOOR_FRAC,
     AnalysisFrame,
@@ -237,6 +248,135 @@ class TrackFeatures:
     pan: np.ndarray = field(default_factory=lambda: np.zeros((0, 0), dtype=np.int8))
 
 
+# Auto-intensity mood weights: how far the song's spectral tilt (bass-heavy vs
+# bright) and tempo slide the picker's operating point. Moderate by design — the
+# picker also hard-caps the total at ``_PICK_MOOD_MAX`` — so mood shades the pick
+# without overriding the loudness spread.
+_MOOD_TILT_W = 0.10   # bass-heavy (+tilt) rides up; bright (-tilt) sits calmer
+_MOOD_TEMPO_W = 0.08  # fast rides up; slow sits calmer
+# Floor on the song's normalisation window so a near-constant track can't divide
+# by ~0 (its small true ``dynamics`` still keeps it compressed — see the picker).
+_MIN_SIG_SPAN = 0.06
+
+
+@dataclass(slots=True)
+class IntensityProfile:
+    """Per-song Auto-intensity shaping, derived from the cached features.
+
+    Lets the Auto picker spread the enabled rungs across THIS song's own quiet↔
+    loud range (not one fixed global window), and slide the operating point by
+    the song's character. Cheap to derive from :class:`TrackFeatures`, so the
+    existing pre-warmed library gets it on load with **no re-analysis**.
+    """
+
+    sig_lo: float    # ~p10 of the song's smoothed intensity signal (window floor)
+    sig_hi: float    # ~p95 of it (window ceiling)
+    dynamics: float  # true p95-p10 span: how much the song actually moves (0..1)
+    tilt: float      # spectral balance, -1 (bright) .. +1 (bass-heavy), 0 neutral
+    tempo: float     # bpm mapped 0 (ballad) .. 1 (club) over _PICK_BPM_LO.._HI
+
+    @property
+    def mood(self) -> float:
+        """Combined spectral+tempo shift of the operating point (moderate)."""
+        return _MOOD_TILT_W * self.tilt + _MOOD_TEMPO_W * (self.tempo - 0.5) * 2.0
+
+
+def _asym_ema(x: np.ndarray, attack: float, decay: float) -> np.ndarray:
+    """Asymmetric EMA matching the live picker (fast attack, slow decay).
+
+    State-dependent coefficient, so it can't be a plain vectorised filter; the
+    loop runs once per map over the ~50 fps frame array, offline.
+    """
+    out = np.empty_like(x)
+    s = float(x[0]) if x.size else 0.0
+    for i in range(x.size):
+        a = attack if x[i] > s else decay
+        s += (float(x[i]) - s) * a
+        out[i] = s
+    return out
+
+
+def _beat_rate_curve(beat_times: np.ndarray, n: int) -> np.ndarray:
+    """Per-frame percussiveness (0..1): the leaky beats/sec the live picker uses.
+
+    Same time-constant (tau=1.5) and ``_PICK_BEAT_FULL`` scaling as
+    :meth:`AutoIntensityPicker.update`, driven by the map's own event times so a
+    replayed track's ``perc`` term matches its live one.
+    """
+    perc = np.zeros(n, dtype=np.float64)
+    if beat_times is None or len(beat_times) == 0 or n <= 0:
+        return perc
+    tau = 1.5
+    decay = max(0.0, 1.0 - _FRAME_PERIOD / tau)
+    flags = np.zeros(n, dtype=bool)
+    idx = np.clip((np.asarray(beat_times) / _FRAME_PERIOD).astype(int), 0, n - 1)
+    flags[idx] = True
+    rate = 0.0
+    for i in range(n):
+        rate *= decay
+        if flags[i]:
+            rate += 1.0 / tau
+        perc[i] = rate
+    return np.clip(perc / _PICK_BEAT_FULL, 0.0, 1.0)
+
+
+def build_intensity_profile(
+    features: "TrackFeatures | None",
+    bpm: float,
+    beat_times: np.ndarray,
+    duration: float,
+) -> "IntensityProfile | None":
+    """Derive a song's :class:`IntensityProfile` from its cached per-frame features.
+
+    Builds the *same* 0..1 intensity signal the live picker blends (loudness
+    gates, tempo + percussiveness lift), smooths it the same way, and takes the
+    song's own p10/p95 as the picker's normalisation window — so Auto spreads the
+    enabled rungs across THIS song's quiet↔loud span. ``dynamics`` (the true
+    p95-p10 spread) tells the picker how much of the range the song has earned;
+    ``tilt``/``tempo`` give the moderate mood shift. Pure function of the features
+    (no audio decode), so a pre-warmed library gets it for free on load.
+    """
+    if features is None:
+        return None
+    energy = np.clip(np.asarray(features.energy, dtype=np.float64), 0.0, 1.0)
+    n = energy.size
+    if n < 50:  # < ~1 s of frames: nothing meaningful to profile
+        return None
+    tempo = (
+        max(0.0, min(1.0, (bpm - _PICK_BPM_LO) / (_PICK_BPM_HI - _PICK_BPM_LO)))
+        if bpm > 0.0 else 0.5
+    )
+    perc = _beat_rate_curve(beat_times, n)
+    # Mirror of effects.modes._intensity_signal (energy is both loudness and
+    # salience for map playback — see frame_at), vectorised over the whole track.
+    moment = energy * (0.55 + 0.45 * energy)
+    raw = np.clip(0.68 * moment + 0.16 * tempo + 0.16 * perc, 0.0, 1.0)
+    # Section-level envelope (matches the picker's profile-path smoothing), so the
+    # window/dynamics describe verse↔chorus↔drop rather than beat-to-beat pumping.
+    sig = _asym_ema(raw, _PICK_SLOW_ATTACK, _PICK_SLOW_DECAY)
+    lo = float(np.percentile(sig, 10.0))
+    hi = float(np.percentile(sig, 95.0))
+    dynamics = max(0.0, hi - lo)  # true spread drives the dynamics-honest blend
+    if hi - lo < _MIN_SIG_SPAN:  # guard the normalisation window against ~0 span
+        mid = 0.5 * (lo + hi)
+        lo = max(0.0, mid - 0.5 * _MIN_SIG_SPAN)
+        hi = min(1.0, mid + 0.5 * _MIN_SIG_SPAN)
+    # Spectral tilt: energy-weighted band balance (bass vs treble), so a quiet
+    # intro doesn't skew the character. Bands are p95-normalised per band, so the
+    # mean reflects how often each band is loud. sub_bass+bass vs mid+high.
+    tilt = 0.0
+    bands = np.asarray(features.bands, dtype=np.float64)
+    if bands.ndim == 2 and bands.shape[0] == n and bands.shape[1] >= len(BANDS):
+        wsum = float(energy.sum()) + 1e-9
+        band_mean = (bands * energy[:, None]).sum(axis=0) / wsum
+        low = float(band_mean[0] + band_mean[1])            # sub_bass + bass
+        high = float(band_mean[3] + band_mean[4])           # mid + high
+        tilt = max(-1.0, min(1.0, (low - high) / (low + high + 1e-9)))
+    return IntensityProfile(
+        sig_lo=lo, sig_hi=hi, dynamics=dynamics, tilt=tilt, tempo=tempo
+    )
+
+
 @dataclass(slots=True)
 class TrackMap:
     """Precomputed beat/section schedule for one track."""
@@ -261,6 +401,23 @@ class TrackMap:
     # Numeric diagnostics core (MapDiagnostics.as_array layout); zeros on maps
     # loaded from pre-v3 cache files.
     diag: np.ndarray = field(default_factory=lambda: np.zeros(6))
+    # Per-song Auto-intensity shaping, derived from ``features`` at construction /
+    # load (see :func:`build_intensity_profile`). Not persisted — it's a pure
+    # function of the cached features, so old caches get it for free on load.
+    # None when there are no features to profile (frame_at then reports the
+    # neutral defaults and the picker falls back to its fixed window).
+    intensity_profile: "IntensityProfile | None" = None
+
+    def _derive_intensity_profile(self) -> "IntensityProfile | None":
+        """Compute this map's :class:`IntensityProfile` from its own features.
+
+        Uses the scheduled beats when the grid is trustworthy, else the detected
+        onsets — the same event set :meth:`frame_at` replays as the live ``beat``.
+        """
+        beat_times = self.beats if self.grid_usable else self.onsets
+        return build_intensity_profile(
+            self.features, self.bpm, beat_times, self.duration
+        )
 
     @property
     def grid_usable(self) -> bool:
@@ -355,7 +512,7 @@ class TrackMap:
                             z["f_pan"] if "f_pan" in z
                             else np.zeros((0, 0), dtype=np.int8)
                         ))
-                return cls(
+                tm = cls(
                     duration=float(meta[0]), bpm=float(meta[1]),
                     confidence=float(meta[2]), beats=z["beats"],
                     accents=z["accents"], downbeat=int(round(float(meta[3]))),
@@ -368,6 +525,10 @@ class TrackMap:
                         z["onset_accents"] if "onset_accents" in z else np.zeros(0)
                     ),
                     diag=z["diag"] if "diag" in z else np.zeros(6))
+                # Derived from the cached features (no re-analysis) so the existing
+                # pre-warmed library gets song-scaled Auto intensity on load.
+                tm.intensity_profile = tm._derive_intensity_profile()
+                return tm
         except (OSError, KeyError, ValueError, IndexError):
             return None
 
@@ -412,6 +573,7 @@ class TrackMap:
         mid_strength = 1.0 + 2.0 * float(self.mid_accents[m1 - 1]) if mid else 0.0
         bands = {name: float(v) for name, v in zip(BANDS, f.bands[i])}
         melbank = f.melbank[i].tolist() if f.melbank.shape[0] > i else []
+        prof = self.intensity_profile
         return AnalysisFrame(
             bands=bands,
             energy=float(f.energy[i]),
@@ -436,6 +598,12 @@ class TrackMap:
             salience=float(f.energy[i]),
             onset_width=float(f.width[i]) if f.width.shape[0] > i else 1.0,
             pan=(f.pan[i] / 127.0).tolist() if f.pan.shape[0] > i else [],
+            # Per-song Auto-intensity shaping (None/0 when this map has no
+            # profile, e.g. featureless — the picker then uses its fixed window).
+            intensity_lo=prof.sig_lo if prof is not None else None,
+            intensity_hi=prof.sig_hi if prof is not None else None,
+            intensity_dynamics=prof.dynamics if prof is not None else None,
+            intensity_mood=prof.mood if prof is not None else 0.0,
         )
 
     def grid_at(self, pos: float, prev_pos: float | None = None) -> BeatGrid | None:
@@ -1327,6 +1495,7 @@ def _finish_analysis(ex: EnvelopeExtractor) -> tuple[TrackMap | None, MapDiagnos
         onset_accents=onset_accents,
         diag=diag.as_array(),
     )
+    tm.intensity_profile = tm._derive_intensity_profile()
     return tm, diag
 
 
