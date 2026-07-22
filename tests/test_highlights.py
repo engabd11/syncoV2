@@ -165,12 +165,12 @@ def test_metadata_source_emits_no_beats():
 
 # --- comfort: beats swing smoothly, not as 1-frame strobes -----------------
 
-@pytest.mark.parametrize("mode", [SyncMode.HIGH, SyncMode.INTENSE])
+@pytest.mark.parametrize("mode", [SyncMode.HIGH, SyncMode.INTENSE, SyncMode.EXTREME])
 def test_beats_swing_smoothly_instead_of_strobing(mode):
-    # High/Intense keep the comfort slew limiter: each light's per-frame
+    # All club modes keep the comfort slew limiter: each light's per-frame
     # brightness RISE is capped at bri_slew, so a beat reads as a fast dim<->bright
-    # swing rather than a 1-frame strobe, while peaks still reach bright.
-    # (Extreme deliberately opts out — see test_extreme_snaps_bright_in_one_frame.)
+    # swing rather than a 1-frame strobe, while peaks still reach bright. (Extreme
+    # is a harder Intense — snappier, but still a swing, not an instant strobe.)
     eng = EffectEngine(_channels(5))
     eng.set_mode(mode)
     slew = MODE_PARAMS[mode].bri_slew
@@ -188,21 +188,6 @@ def test_beats_swing_smoothly_instead_of_strobing(mode):
                 peak = max(peak, m)
     assert worst_rise <= slew + 1e-6  # no harsh single-frame jump
     assert peak > 0.7  # but beats still swing up to bright
-
-
-def test_extreme_snaps_bright_in_one_frame():
-    # Extreme is the exception: the user wants sharp, fast, Samsung-style flashing,
-    # so the anti-strobe slew is OFF (bri_slew 1.0). A beat must reach bright in a
-    # single frame rather than swelling over several.
-    eng = EffectEngine(_channels(5))
-    eng.set_mode(SyncMode.EXTREME)
-    for _ in range(10):  # settle dark
-        eng.render(_quiet(), _DT, beatgrid=_grid(False, phase=0.5))
-    before = max(max(c) for c in
-                 eng.render(_quiet(), _DT, beatgrid=_grid(False, phase=0.5)).values())
-    on_beat = max(max(c) for c in
-                  eng.render(_quiet(), _DT, beatgrid=_grid(True, accent=1.0, beat_in_bar=0)).values())
-    assert on_beat - before > 0.5  # one frame from the tick, already bright
 
 
 # --- selectivity: only standout beats flash --------------------------------
@@ -248,17 +233,7 @@ def test_extreme_slams_bright_on_beats_and_falls_back_dark():
     assert max(max(c) for c in out.values()) < 0.08  # dark in silence
 
 
-# --- unified room colour that jumps every beat -----------------------------
-
-def test_extreme_room_is_one_unified_colour():
-    eng = EffectEngine(_channels(5))
-    eng.set_mode(SyncMode.EXTREME)
-    eng.set_scheme(ColorScheme.RAINBOW)  # worst case for unity (full spectrum)
-    out = None
-    for _ in range(10):
-        out = eng.render(_quiet(), _DT, beatgrid=_grid(False))
-    assert _room_hue_spread(out) < 0.02  # every lamp the same hue
-
+# --- colour jumps every beat -----------------------------------------------
 
 def test_extreme_colour_jumps_on_every_beat():
     # Colour is the primary motion: each beat advances the palette a lot more

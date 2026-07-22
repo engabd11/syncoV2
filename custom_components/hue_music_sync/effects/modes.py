@@ -42,24 +42,18 @@ The ladder — same pattern throughout, each rung harder, darker and more unifie
 * **High** — the one mode that keeps the per-instrument SPATIAL split: bass
   lights snap on kicks, guitar lights pop on mid onsets, vocal lights shimmer
   with the singing; roles rotate every few bars.
-* **Intense** — *unrestrained*: the same fast dim<->bright SWING as Extreme —
-  the room brightens on the beat over a few frames (a slew-limited swell, not a
-  1-frame strobe) and the colour shifts each hit — but with a HIGHER dark FLOOR
-  so it keeps a soft glow in the gaps instead of going black. The floor is the
-  deliberate, only-real difference from Extreme: gentler, more comfortable.
+* **Intense** — *unrestrained*: a fast dim<->bright SWING — the room brightens on
+  the beat over a few frames (a slew-limited swell, not a 1-frame strobe) and the
+  colour shifts each hit — over a soft glow that never quite goes black.
   Eye-safety limiter bypassed (see safety docs).
-* **Extreme** — *unrestrained* maximum club for heavy, fast, high-rhythm tracks
-  (think Metallica). A TRUE dark room (floor 0) where the instruments SPLIT
-  across the lamps — drums on some, guitar/snare on others — and a *fast* run of
-  either bounces across its own lamps one-by-one (opposing sides alternating)
-  instead of pumping the whole room, so fast drums land beat-for-beat with no
-  dropped hits. EVERY beat hits hard — big, mid or quiet — not just the loudest
-  moments: a hard ``beat_floor`` lifts a mid/quiet kick to a real flash so the
-  whole song reads, not only the top of its dynamic range. Flashing is SHARP and
-  instant (no anti-strobe slew) and the eye-safety limiter is bypassed entirely,
-  so the dim<->bright snap is as fast as the lights allow — the Samsung feel.
-  Nonsense low noise and sung vocals are filtered so only real hits flash. Only
-  the biggest accents (drops) unify every lamp; colour jumps the spectrum each hit.
+* **Extreme** — a HARDER Intense for heavy, fast, high-rhythm tracks (think
+  Metallica). The exact same character — the room breathes with the energy and
+  slams on the beat, one near-unified colour jumping each hit — but intensified in
+  every direction: a DARKER base (floor 0, dimmer glow) so beats slam out of
+  near-black, a HIGHER flash ceiling, a snappier swing + faster fade so it flashes
+  more often, and stricter noise/vocal rejection so only real hits fire. The
+  eye-safety limiter is bypassed entirely (see safety docs) so it can flash as
+  fast as the lights allow. Intense itself is unchanged.
 """
 
 from __future__ import annotations
@@ -176,18 +170,6 @@ class ModeParams:
     # The bass-content weight floor in kick_flash (was a hard-coded 0.4):
     # how much a bass-less onset may still flash.
     kick_bass_floor: float = 0.40
-    # HARDNESS: minimum fraction of a full flash that ANY qualified beat gets,
-    # regardless of how strong/loud it is. 0 keeps the fully proportional
-    # response (big beats slam, mid/quiet beats fade — the "only the top of the
-    # dynamic range shows" behaviour). Raising it lifts every detected/scheduled
-    # beat toward a full hit so mid and quiet beats read as real flashes, not dim
-    # wiggles — the relentless club/metal feel. The engine applies it as a
-    # ``max`` floor on the kick/mid flash (see EffectEngine._render_music) AFTER
-    # the rhythm-confidence gate, so a mid kick lands hard even before the tempo
-    # locks; it is scaled by the onset WIDTH gate, so narrowband (vocal/tonal)
-    # onsets stay muted and only real broadband hits are lifted. The biggest hits
-    # still slam via the proportional path (max keeps whichever is larger).
-    beat_floor: float = 0.0
     # Flash floor while the song has NO discernible beat (0..1): detected-onset
     # flashes and waves scale between this and full with the engine's
     # rhythm-confidence envelope (tempo lock, or broadband kicks while
@@ -219,16 +201,6 @@ class ModeParams:
     # right-hand lamps and fades from the left ones. 0 disables; frames
     # without pan (mono taps, pre-v4 maps) always render exactly as before.
     pan_gain: float = 0.0
-    # --- fast-beat spatial chase (Extreme) ------------------------------------
-    # Target per-region re-fire rate (Hz) for the beat CHASE. When a beat stream
-    # (kicks, or guitar/snare onsets) runs faster than this, its role lamps are
-    # split into groups that fire one-by-one across the room (opposing sides
-    # alternating) instead of the whole group flashing every hit — so a fast
-    # drum bounces left<->right beat-for-beat instead of hitting the whole-field
-    # flash cap and dropping beats. Slow streams (rate <= this) flash the whole
-    # role group together, exactly as before. 0 disables the chase entirely, so
-    # every other mode renders identically. See :func:`beat_group_count`.
-    beat_chase_hz: float = 0.0
 
 
 MODE_PARAMS: dict[SyncMode, ModeParams] = {
@@ -314,65 +286,39 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         predrop_depth=0.60, phrase_bars=4, phrase_colour_shift=0.06,
         pan_gain=0.5,
     ),
-    # UNRESTRAINED maximum club for heavy/fast tracks. A TRUE dark room (floor 0)
-    # where drums and guitar/snare take separate lamps and a fast stream of either
-    # CHASES across its own lamps (opposing sides alternating, sized by
-    # beat_chase_hz) rather than pumping the whole room. Flashing is SHARP and
-    # instant (bri_slew 1.0, fast flash_decay) and the eye-safety limiter is
-    # bypassed entirely (coordinator._bypass_limiter) for the fastest dim<->bright
-    # snap the lights allow. Noise and vocals are filtered (see below). Colour
-    # jumps the spectrum each hit; only the biggest accents (drops) unify all lamps.
+    # A HARDER Intense — the exact same character (the whole room breathes with
+    # the energy and slams on the beat, one near-unified colour jumping each hit)
+    # but intensified into "extreme": a DARKER base (floor 0, lower continuous
+    # glow) so beats slam out of near-black, a HIGHER flash ceiling (bigger
+    # beat_gain), a snappier swing + faster fade so it can flash more often, and
+    # stricter noise/vocal rejection (higher onset threshold + width gate, lower
+    # nobeat floor, less bass-less "noise" flash). The eye-safety limiter is
+    # bypassed ENTIRELY (coordinator._bypass_limiter, see the README warning) so
+    # it can flash as fast as the lights allow. Every value not intensified here
+    # is Intense's; Intense itself is unchanged.
     SyncMode.EXTREME: ModeParams(
-        base=0.0, floor=0.0, bass_gain=0.05, beat_gain=1.9, beat_threshold=1.1,
-        spread=0.0, colour_speed=0.06, shimmer=0.0, colour_sat=1.0,
-        colour_beat_step=0.0, colour_lerp=0.65, energy_gain=0.08,
-        # SHARP, FAST flashing — the Samsung/metal feel. The eye-safety limiter is
-        # bypassed entirely for Extreme (coordinator._bypass_limiter, see the
-        # README warning), so nothing softens it: the rise slew is off (bri_slew
-        # 1.0 = instant full snap in one frame, not a ~90ms swell) and the flash
-        # falls fast (low flash_decay + snappy bri_decay) so each beat reads as a
-        # distinct hit even on a single light through a fast drum run.
-        bri_attack=1.0, bri_decay=0.55,
-        bri_slew=1.0, flash_decay=0.55,
-        # A lower continuous floor (wave/melbank/energy) so every flash SLAMS out
-        # of a dim room (the hard black<->bright contrast) — a low glow stays so a
-        # held note isn't dead, but the hits pop. Pairs with the faster onset
-        # detection (analyzer ONSET_REFRACTORY_FRAMES) that finally lets fast
-        # double-bass register instead of showing as a dim continuous wiggle.
-        wave_gain=0.20, wave_speed=3.4, wave_width=0.24,
-        anticipation_ms=90, drop_boost=1.0, build_desat=0.60,
-        # The drums (bass) and guitar/snare (mid) get their own lamps and each
-        # fires its own onset, so instruments visibly occupy different lights;
-        # dynamic_roles hands the mid lamps back to bass on a track with no
-        # guitar, and the band rotates seats. No vocal share — a shimmer glow
-        # would lift the true-dark room.
-        role_mix=(0.6, 0.4, 0.0), mid_gain=1.6, mid_threshold=1.5,
-        dynamic_roles=True, role_rotate_beats=16, hard_snap=True,
-        # A fast run slams alternating left/right HALVES of the instrument's lamps
-        # (2 groups at ~8-12/s from beat_chase_hz 6) — the hard left<->right drum
-        # bounce, each hit a solid half rather than one dim lamp.
-        beat_chase_hz=6.0,
-        # RELENTLESS: no highlight selection (quantile 0 → every beat fires), a
-        # high weak_pulse, and a hard beat_floor so a mid/quiet kick lands as a
-        # real flash regardless of how it compares to the song's loudest hit —
-        # Extreme pounds EVERY beat (not just the top of the dynamic range), the
-        # downbeat hardest. beat_floor is width-gated in the engine so vocals /
-        # tonal onsets still stay muted.
-        accent_floor=0.15, weak_pulse=0.62, downbeat_pulse=0.75, beat_floor=0.5,
-        # Only the passage's very biggest accents (drops) take EVERY lamp — the
-        # unify-on-the-drop slam; ordinary beats stay half-slammed + chased.
-        highlight_quantile=0.0, colour_jump=0.20, colour_spread=0.0,
-        full_room_accent=0.9,
-        melbank_gain=0.12, melbank_floor=0.0, colour_flow=0.03, spectral_pop=0.5,
-        # Noise/vocal rejection: a real kick must carry genuine low end
-        # (kick_bass_floor low → a bass-less "low noise" onset barely flashes),
-        # narrowband/tonal onsets are trimmed (width_min up), and a beat-less
-        # passage flashes little (nobeat_flash down). mid_threshold above keeps
-        # sung vowels (lower-flux than a metal guitar chug) off the mid lamps.
-        salience_gamma=0.6, width_min=0.10, nobeat_flash=0.10,
-        kick_bass_floor=0.15,
-        predrop_depth=0.85, phrase_bars=4, phrase_colour_shift=0.08,
-        pan_gain=0.4,
+        base=0.0, floor=0.0, bass_gain=0.16, beat_gain=2.2, beat_threshold=1.3,
+        spread=0.0, colour_speed=0.05, shimmer=0.0, colour_sat=0.97,
+        colour_beat_step=0.0, colour_lerp=0.55, energy_gain=0.09,
+        bri_attack=1.0, bri_decay=0.45,
+        # Snappier swing + faster fade than Intense (0.22/0.82) so fast beats read
+        # as distinct hits and it can flash more often — still a swing, not a
+        # 1-frame strobe.
+        bri_slew=0.40, flash_decay=0.70,
+        wave_gain=0.42, wave_speed=2.4, wave_width=0.30,
+        anticipation_ms=90, drop_boost=1.0, build_desat=0.55,
+        role_mix=(1.0, 0.0, 0.0), hard_snap=True,
+        highlight_quantile=0.18, weak_pulse=0.42, downbeat_pulse=0.55,
+        colour_jump=0.16, colour_spread=0.22, full_room_accent=0.0,
+        # Darker base: no melbank floor and a lower continuous melbank/energy glow
+        # than Intense (0.42/0.06/0.16) so the room sits dim between hits.
+        melbank_gain=0.26, melbank_floor=0.0, colour_flow=0.05, spectral_pop=0.45,
+        # Reacts to noise less than Intense (1.0 / 0.08 / 0.30 / 0.40): a real
+        # kick must clear a higher onset threshold and carry real low end, and a
+        # beat-less passage barely flashes.
+        salience_gamma=0.8, width_min=0.12, nobeat_flash=0.15, kick_bass_floor=0.28,
+        predrop_depth=0.70, phrase_bars=4, phrase_colour_shift=0.06,
+        pan_gain=0.5,
     ),
 }
 
@@ -735,67 +681,6 @@ def band_for_rank(rank: int, count: int) -> str:
         return "bass"
     idx = int(rank / count * len(_BAND_ORDER))
     return _BAND_ORDER[min(idx, len(_BAND_ORDER) - 1)]
-
-
-def beat_group_count(rate_hz: float, n_lamps: int, target_hz: float) -> int:
-    """How many spatial groups to split a fast beat stream across.
-
-    The core of the Extreme chase. A fast instrument shouldn't pump the whole
-    room: the field-safety limiter caps whole-field flashing and drops the
-    surplus, so a fast drum on every lamp misses beats. Splitting its lamps into
-    ``G`` groups that fire one at a time makes each region re-fire at only
-    ``rate_hz / G`` — so sizing ``G`` to hold that near ``target_hz`` keeps every
-    region under the flash budget while the beat still lands (somewhere) every
-    single time, reading as movement across the room.
-
-    Slow streams — or a chase-less mode (``target_hz <= 0``) — return 1: the whole
-    group flashes together, exactly as before. Never exceeds the lamp count.
-    """
-    if target_hz <= 0.0 or n_lamps <= 1:
-        return 1
-    g = int(math.ceil(rate_hz / target_hz))
-    if g < 1:
-        return 1
-    return g if g < n_lamps else n_lamps
-
-
-def _chase_order(groups: int) -> list[int]:
-    """Bucket-visit order landing consecutive beats on opposite sides.
-
-    Alternating-ends: 0, G-1, 1, G-2, … so a two-group split reads as a clean
-    left<->right (two-drum) alternation and wider splits keep bouncing across the
-    room instead of sweeping one neighbour at a time.
-    """
-    lo, hi = 0, groups - 1
-    order: list[int] = []
-    while lo <= hi:
-        order.append(lo)
-        if hi != lo:
-            order.append(hi)
-        lo += 1
-        hi -= 1
-    return order
-
-
-def chase_bucket(ordered_ids: list[int], cursor: int, groups: int) -> set[int]:
-    """The lamp ids active on beat ``cursor`` for a ``groups``-way chase.
-
-    ``ordered_ids`` are one instrument's lamps in left->right order. They are cut
-    into ``groups`` near-equal contiguous buckets (any remainder falling to the
-    right-hand buckets) and the bucket at alternating-ends visit order ``cursor``
-    is returned. ``groups <= 1`` (slow beats, or the chase off) returns every
-    lamp, so the whole instrument flashes together as before.
-    """
-    n = len(ordered_ids)
-    if n == 0:
-        return set()
-    if groups <= 1:
-        return set(ordered_ids)
-    g = groups if groups < n else n
-    idx = _chase_order(g)[cursor % g]
-    start = idx * n // g
-    end = (idx + 1) * n // g
-    return set(ordered_ids[start:end])
 
 
 def _shimmer(t: float, cid: int) -> float:

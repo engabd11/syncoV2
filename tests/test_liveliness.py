@@ -96,13 +96,11 @@ def test_intense_is_alive_with_no_beatgrid_and_no_beats():
 
 
 def test_extreme_is_alive_with_no_beatgrid():
-    # Extreme deliberately sits darker BETWEEN hits now (hard black<->bright
-    # contrast — the user's "make it hard"), so the mean is lower than the other
-    # rungs; the guard is that it still clearly MOVES (swings) and keeps a low lit
-    # base rather than going dead.
+    # Extreme is a harder Intense: a darker base than Intense but still clearly
+    # alive — it swings hard with the beat and keeps a lit base, not dead.
     frames = _frames(_music())
     room = _render_all(frames[30:], SyncMode.EXTREME)
-    assert room.mean() > 0.18   # a low lit base, not dead
+    assert room.mean() > 0.25   # a lit base, not dead
     assert room.std() > 0.05    # and it swings hard with the beat
 
 

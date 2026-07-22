@@ -228,28 +228,6 @@ def test_narrowband_onsets_muted_per_mode():
     assert extreme_wide > 0.2  # …and slams in Extreme
 
 
-def _kick_strength(strength: float, width: float = 0.6) -> AnalysisFrame:
-    f = _bed(1.0, width)
-    f.beat = f.bass_beat = True
-    f.beat_strength = f.bass_strength = strength
-    return f
-
-
-def test_extreme_shows_mid_beats_not_just_the_loudest():
-    # The user's "it only takes the top half of the graph" fix (beat_floor): in
-    # Extreme a mid-strength kick must flash nearly as hard as the biggest hit —
-    # the whole dynamic range shows, not just the loud peaks — while a narrowband
-    # (vocal/tonal) onset still stays muted.
-    big = _beat_lift(SyncMode.EXTREME, _kick_strength(3.0), _bed(1.0, 0.6))
-    mid = _beat_lift(SyncMode.EXTREME, _kick_strength(1.3), _bed(1.0, 0.6))
-    narrow = _beat_lift(SyncMode.EXTREME, _kick_strength(1.3, 0.12), _bed(1.0, 0.12))
-    assert mid > 0.7             # a mid kick is a real, hard flash (not a dim wiggle)
-    assert mid > 0.85 * big      # nearly as hard as the biggest hit
-    assert narrow < 0.1          # narrowband stays muted (width-gated floor)
-
-    # High stays proportional/gentle — the hard floor is Extreme-only.
-    hi_mid = _beat_lift(SyncMode.HIGH, _kick_strength(1.3), _bed(1.0, 0.6))
-    assert hi_mid < mid          # Extreme's mid kick is clearly harder than High's
 
 
 def _grid(predicted: bool, accent: float = 0.9, phase: float = 0.3) -> BeatGrid:
