@@ -311,7 +311,7 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
     SyncMode.EXTREME: ModeParams(
         base=0.0, floor=0.0, bass_gain=0.05, beat_gain=1.9, beat_threshold=1.1,
         spread=0.0, colour_speed=0.06, shimmer=0.0, colour_sat=1.0,
-        colour_beat_step=0.0, colour_lerp=0.65, energy_gain=0.10,
+        colour_beat_step=0.0, colour_lerp=0.65, energy_gain=0.08,
         # SHARP, FAST flashing — the Samsung/metal feel. The eye-safety limiter is
         # bypassed entirely for Extreme (coordinator._bypass_limiter, see the
         # README warning), so nothing softens it: the rise slew is off (bri_slew
@@ -320,7 +320,12 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         # distinct hit even on a single light through a fast drum run.
         bri_attack=1.0, bri_decay=0.55,
         bri_slew=1.0, flash_decay=0.55,
-        wave_gain=0.28, wave_speed=3.4, wave_width=0.24,
+        # A lower continuous floor (wave/melbank/energy) so every flash SLAMS out
+        # of a dim room (the hard black<->bright contrast) — a low glow stays so a
+        # held note isn't dead, but the hits pop. Pairs with the faster onset
+        # detection (analyzer ONSET_REFRACTORY_FRAMES) that finally lets fast
+        # double-bass register instead of showing as a dim continuous wiggle.
+        wave_gain=0.20, wave_speed=3.4, wave_width=0.24,
         anticipation_ms=90, drop_boost=1.0, build_desat=0.60,
         # The drums (bass) and guitar/snare (mid) get their own lamps and each
         # fires its own onset, so instruments visibly occupy different lights;
@@ -329,17 +334,19 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         # would lift the true-dark room.
         role_mix=(0.6, 0.4, 0.0), mid_gain=1.6, mid_threshold=1.5,
         dynamic_roles=True, role_rotate_beats=16, hard_snap=True,
-        # A fast kick/guitar run bounces across ITS lamps (opposing sides
-        # alternating) instead of pumping the whole room and hitting the field
-        # flash cap: each region re-fires near this rate, so no beat is dropped.
-        beat_chase_hz=4.0,
-        accent_floor=0.15, weak_pulse=0.42, downbeat_pulse=0.65,
-        # Ordinary beats stay instrument-separated + chased; only the passage's
-        # very biggest accents (drops) take EVERY lamp — the unify-on-the-drop
-        # slam (was 0.0: every highlight slammed the whole room).
-        highlight_quantile=0.16, colour_jump=0.20, colour_spread=0.0,
+        # A fast run slams alternating left/right HALVES of the instrument's lamps
+        # (2 groups at ~8-12/s from beat_chase_hz 6) — the hard left<->right drum
+        # bounce, each hit a solid half rather than one dim lamp.
+        beat_chase_hz=6.0,
+        # RELENTLESS: no highlight selection (quantile 0 → every beat fires) and a
+        # high weak_pulse so even a buried/ordinary fast kick hits hard, not just
+        # the standouts — Extreme should pound every beat, the downbeat hardest.
+        accent_floor=0.15, weak_pulse=0.62, downbeat_pulse=0.75,
+        # Only the passage's very biggest accents (drops) take EVERY lamp — the
+        # unify-on-the-drop slam; ordinary beats stay half-slammed + chased.
+        highlight_quantile=0.0, colour_jump=0.20, colour_spread=0.0,
         full_room_accent=0.9,
-        melbank_gain=0.14, melbank_floor=0.0, colour_flow=0.03, spectral_pop=0.5,
+        melbank_gain=0.12, melbank_floor=0.0, colour_flow=0.03, spectral_pop=0.5,
         # Noise/vocal rejection: a real kick must carry genuine low end
         # (kick_bass_floor low → a bass-less "low noise" onset barely flashes),
         # narrowband/tonal onsets are trimmed (width_min up), and a beat-less

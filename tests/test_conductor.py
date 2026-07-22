@@ -139,11 +139,13 @@ def test_pulse_weight_non_highlights_still_tick_in_intense():
 
 
 def test_extreme_fires_every_beat_downbeat_hardest():
-    # Club style: Extreme now punches on EVERY beat (ordinary beats included),
-    # with the downbeat hardest and the top accents slamming anywhere in the bar.
+    # Relentless: Extreme pounds EVERY beat hard (no highlight selection, high
+    # weak_pulse), with the downbeat hardest and the top accents slamming anywhere.
     p = MODE_PARAMS[SyncMode.EXTREME]
-    assert 0.0 < pulse_weight(p, 0.3, 1, highlight=False) < 0.4  # ordinary beat ticks
-    assert pulse_weight(p, 0.3, 0, highlight=False) >= 0.55  # the "one" lands hard
+    ordinary = pulse_weight(p, 0.3, 1, highlight=False)  # an off-beat, low accent
+    downbeat = pulse_weight(p, 0.3, 0, highlight=False)  # the bar's "one"
+    assert ordinary > 0.4  # even an ordinary fast beat hits hard now (not a dim tick)
+    assert downbeat >= 0.7 and downbeat > ordinary  # the "one" lands hardest
     assert pulse_weight(p, 0.95, 2, highlight=True) > 0.5  # top accents slam anywhere
 
 

@@ -130,6 +130,14 @@ MID_FLUX_SHARE = 0.30
 # never confusing a swell with a hit.
 MID_MAX_ATTACK_FRAMES = 3
 MID_RISE_RATIO = 1.05  # energy growth per frame that still counts as "rising"
+# Minimum frames between successive onsets on one stream. At 50 fps, 3 frames
+# (~60 ms) lets fast double-bass / blast-beat metal through (~16 hits/s ceiling);
+# the old 6 (~120 ms, ~8 hits/s) dropped half of a 12/s double-bass run. The
+# rising-edge guard in ``_threshold_onset`` (flux must exceed the previous frame)
+# already blocks a single hit's decay tail from re-triggering, so the refractory
+# is only a floor on genuinely distinct onsets — shortening it is safe and does
+# not over-detect slower content (verified: identical detection at <=8/s).
+ONSET_REFRACTORY_FRAMES = 3
 # Absolute-loudness salience: a decaying peak of smoothed raw RMS is the
 # track-level "as loud as it gets" reference (O(1) stand-in for a rolling p95).
 # The ~60 ms pre-smoothing stops one transient spike from setting the
@@ -277,6 +285,7 @@ class Analyzer:
         hop: int = ANALYSIS_HOP,
         beat_sensitivity: float = 1.2,
         noise_floor: float = ANALYSIS_NOISE_FLOOR,
+        refractory: int = ONSET_REFRACTORY_FRAMES,
     ) -> None:
         self._sr = sample_rate
         self._window = window
@@ -353,7 +362,7 @@ class Analyzer:
         self._bass_hist: deque[float] = deque(maxlen=43)
         self._mid_hist: deque[float] = deque(maxlen=43)
         self._sensitivity = beat_sensitivity
-        self._refractory = 6  # min frames between beats (~120 ms)
+        self._refractory = refractory  # min frames between onsets (see the constant)
         self._since_beat = self._refractory
         self._since_bass = self._refractory
         self._since_mid = self._refractory

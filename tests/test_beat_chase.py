@@ -139,7 +139,9 @@ def test_slow_beats_flash_the_whole_room_in_extreme():
 
 def test_fast_kicks_chase_across_the_lamps():
     # A fast kick run must NOT flash the whole room every hit: it bounces across
-    # the lamps, landing somewhere every beat (nothing dropped) and moving.
+    # the lamps, landing somewhere every beat (nothing dropped) and moving. At
+    # this rate beat_chase_hz=6 splits into opposing HALVES (2 groups), so the
+    # flash alternates left<->right and covers the room over the cycle.
     eng = EffectEngine(_channels(6))
     eng.set_mode(SyncMode.EXTREME)
     sets: list[frozenset[int]] = []
@@ -157,7 +159,7 @@ def test_fast_kicks_chase_across_the_lamps():
 
     assert all(len(s) >= 1 for s in sets)     # every fast beat still lands
     assert all(len(s) < 6 for s in sets)      # never the whole room (separated)
-    assert len(set(sets)) >= 3                # the flash genuinely moves around
+    assert len(set(sets)) >= 2                # the flash alternates (moves around)
     assert len(set().union(*sets)) >= 4       # spread across the room
 
 
