@@ -48,9 +48,12 @@ The ladder — same pattern throughout, each rung harder, darker and more unifie
   so it keeps a soft glow in the gaps instead of going black. The floor is the
   deliberate, only-real difference from Extreme: gentler, more comfortable.
   Eye-safety limiter bypassed (see safety docs).
-* **Extreme** — *unrestrained* maximum club: the same quick swing, but a TRUE
-  dark room (floor 0) — the quiet parts go black and every beat brightens the
-  whole room out of the dark, colour jumping the spectrum each hit. Widest
+* **Extreme** — *unrestrained* maximum club: the same quick swing and a TRUE
+  dark room (floor 0), but now the instruments SPLIT across the lamps — drums on
+  some, guitar/snare on others — and a *fast* run of either bounces across its
+  own lamps one-by-one (opposing sides alternating) instead of pumping the whole
+  room, so fast drums land beat-for-beat with no dropped hits. Only the biggest
+  accents (drops) unify every lamp. Colour jumps the spectrum each hit; widest
   dark<->bright range of the ladder; still a smooth swell, never a strobe.
 """
 
@@ -199,6 +202,16 @@ class ModeParams:
     # right-hand lamps and fades from the left ones. 0 disables; frames
     # without pan (mono taps, pre-v4 maps) always render exactly as before.
     pan_gain: float = 0.0
+    # --- fast-beat spatial chase (Extreme) ------------------------------------
+    # Target per-region re-fire rate (Hz) for the beat CHASE. When a beat stream
+    # (kicks, or guitar/snare onsets) runs faster than this, its role lamps are
+    # split into groups that fire one-by-one across the room (opposing sides
+    # alternating) instead of the whole group flashing every hit — so a fast
+    # drum bounces left<->right beat-for-beat instead of hitting the whole-field
+    # flash cap and dropping beats. Slow streams (rate <= this) flash the whole
+    # role group together, exactly as before. 0 disables the chase entirely, so
+    # every other mode renders identically. See :func:`beat_group_count`.
+    beat_chase_hz: float = 0.0
 
 
 MODE_PARAMS: dict[SyncMode, ModeParams] = {
@@ -284,11 +297,12 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         predrop_depth=0.60, phrase_bars=4, phrase_colour_shift=0.06,
         pan_gain=0.5,
     ),
-    # UNRESTRAINED maximum club. The same quick dim<->bright SWING as Intense,
-    # but a TRUE dark room: floor 0, so the quiet parts go black and every beat
-    # brightens the whole room out of the dark (a fast smoothed swell, no longer
-    # a 1-frame strobe), colour jumping the spectrum each hit. Rides the energy
-    # widest of the ladder; one unified room, no instrument split.
+    # UNRESTRAINED maximum club. The same quick dim<->bright SWING as Intense in
+    # a TRUE dark room (floor 0), but drums and guitar/snare take separate lamps
+    # and a fast stream of either CHASES across its own lamps (opposing sides
+    # alternating, sized by beat_chase_hz) rather than pumping the whole room —
+    # so fast beats never hit the whole-field flash cap and drop. Colour jumps
+    # the spectrum each hit; only the biggest accents (drops) unify every lamp.
     SyncMode.EXTREME: ModeParams(
         base=0.0, floor=0.0, bass_gain=0.06, beat_gain=1.8, beat_threshold=1.0,
         spread=0.0, colour_speed=0.06, shimmer=0.0, colour_sat=1.0,
@@ -297,11 +311,24 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         bri_slew=0.24, flash_decay=0.80,
         wave_gain=0.50, wave_speed=3.4, wave_width=0.24,
         anticipation_ms=90, drop_boost=1.0, build_desat=0.60,
-        role_mix=(1.0, 0.0, 0.0), hard_snap=True,
+        # The drums (bass) and guitar/snare (mid) get their own lamps and each
+        # fires its own onset, so instruments visibly occupy different lights;
+        # dynamic_roles hands the mid lamps back to bass on a track with no
+        # guitar, and the band rotates seats. No vocal share — a shimmer glow
+        # would lift the true-dark room.
+        role_mix=(0.6, 0.4, 0.0), mid_gain=1.6, mid_threshold=1.2,
+        dynamic_roles=True, role_rotate_beats=16, hard_snap=True,
+        # A fast kick/guitar run bounces across ITS lamps (opposing sides
+        # alternating) instead of pumping the whole room and hitting the field
+        # flash cap: each region re-fires near this rate, so no beat is dropped.
+        beat_chase_hz=4.0,
         accent_floor=0.15, weak_pulse=0.42, downbeat_pulse=0.65,
+        # Ordinary beats stay instrument-separated + chased; only the passage's
+        # very biggest accents (drops) take EVERY lamp — the unify-on-the-drop
+        # slam (was 0.0: every highlight slammed the whole room).
         highlight_quantile=0.16, colour_jump=0.20, colour_spread=0.0,
-        full_room_accent=0.0,
-        melbank_gain=0.14, melbank_floor=0.0, colour_flow=0.03, spectral_pop=0.45,
+        full_room_accent=0.9,
+        melbank_gain=0.14, melbank_floor=0.0, colour_flow=0.03, spectral_pop=0.5,
         salience_gamma=0.6, width_min=0.05, nobeat_flash=0.20,
         predrop_depth=0.85, phrase_bars=4, phrase_colour_shift=0.08,
         pan_gain=0.4,
@@ -667,6 +694,67 @@ def band_for_rank(rank: int, count: int) -> str:
         return "bass"
     idx = int(rank / count * len(_BAND_ORDER))
     return _BAND_ORDER[min(idx, len(_BAND_ORDER) - 1)]
+
+
+def beat_group_count(rate_hz: float, n_lamps: int, target_hz: float) -> int:
+    """How many spatial groups to split a fast beat stream across.
+
+    The core of the Extreme chase. A fast instrument shouldn't pump the whole
+    room: the field-safety limiter caps whole-field flashing and drops the
+    surplus, so a fast drum on every lamp misses beats. Splitting its lamps into
+    ``G`` groups that fire one at a time makes each region re-fire at only
+    ``rate_hz / G`` — so sizing ``G`` to hold that near ``target_hz`` keeps every
+    region under the flash budget while the beat still lands (somewhere) every
+    single time, reading as movement across the room.
+
+    Slow streams — or a chase-less mode (``target_hz <= 0``) — return 1: the whole
+    group flashes together, exactly as before. Never exceeds the lamp count.
+    """
+    if target_hz <= 0.0 or n_lamps <= 1:
+        return 1
+    g = int(math.ceil(rate_hz / target_hz))
+    if g < 1:
+        return 1
+    return g if g < n_lamps else n_lamps
+
+
+def _chase_order(groups: int) -> list[int]:
+    """Bucket-visit order landing consecutive beats on opposite sides.
+
+    Alternating-ends: 0, G-1, 1, G-2, … so a two-group split reads as a clean
+    left<->right (two-drum) alternation and wider splits keep bouncing across the
+    room instead of sweeping one neighbour at a time.
+    """
+    lo, hi = 0, groups - 1
+    order: list[int] = []
+    while lo <= hi:
+        order.append(lo)
+        if hi != lo:
+            order.append(hi)
+        lo += 1
+        hi -= 1
+    return order
+
+
+def chase_bucket(ordered_ids: list[int], cursor: int, groups: int) -> set[int]:
+    """The lamp ids active on beat ``cursor`` for a ``groups``-way chase.
+
+    ``ordered_ids`` are one instrument's lamps in left->right order. They are cut
+    into ``groups`` near-equal contiguous buckets (any remainder falling to the
+    right-hand buckets) and the bucket at alternating-ends visit order ``cursor``
+    is returned. ``groups <= 1`` (slow beats, or the chase off) returns every
+    lamp, so the whole instrument flashes together as before.
+    """
+    n = len(ordered_ids)
+    if n == 0:
+        return set()
+    if groups <= 1:
+        return set(ordered_ids)
+    g = groups if groups < n else n
+    idx = _chase_order(g)[cursor % g]
+    start = idx * n // g
+    end = (idx + 1) * n // g
+    return set(ordered_ids[start:end])
 
 
 def _shimmer(t: float, cid: int) -> float:

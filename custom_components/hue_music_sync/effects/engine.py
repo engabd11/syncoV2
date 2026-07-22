@@ -35,7 +35,9 @@ from .modes import (
     assign_roles,
     band_for_rank,
     beat_colour_advance,
+    beat_group_count,
     beat_pulse,
+    chase_bucket,
     event_gates,
     kick_flash,
     mid_flash,
@@ -53,6 +55,13 @@ from .spatial import (
 )
 
 _FLASH_DECAY = 0.80  # default per-frame fade of the beat flash (modes override)
+
+# Time-constant of the per-stream beats/second estimate driving the Extreme
+# fast-beat chase (ModeParams.beat_chase_hz). A leaky integrator with this tau
+# settles at the true beats/second for a steady groove (add 1/tau per hit, bleed
+# dt/tau per frame) and decays through the gaps, so a run of fast hits reads as
+# a high rate and spreads across more lamps, while an isolated beat does not.
+_BEAT_RATE_TAU = 1.2
 
 # Below this loudness the track is treated as silent: all beat reactions (flash,
 # colour jump, waves) fade out and stop, so only real audio ever moves the
@@ -237,6 +246,15 @@ class EffectEngine:
         self._mel_slow: list[float] = []
         self._mel_transient: list[float] = []
         self._light_flash: dict[int, float] = {}
+        # Fast-beat chase (Extreme, ModeParams.beat_chase_hz): a leaky-integrator
+        # beats/second estimate per instrument stream (kick, mid) plus a cursor
+        # that advances on each hit, so a fast run of one instrument is split
+        # across its lamps and bounces side-to-side instead of pumping the whole
+        # room (which would hit the field-safety flash cap and drop beats).
+        self._kick_rate: float = 0.0
+        self._mid_rate: float = 0.0
+        self._kick_cursor: int = 0
+        self._mid_cursor: int = 0
         # Last emitted per-light brightness, for the rise slew-rate limiter that
         # turns a beat into a fast SWING instead of a 1-frame strobe (bri_slew).
         self._emit_b: dict[int, float] = {}
@@ -794,6 +812,20 @@ class EffectEngine:
             ph = beatgrid.phase % 0.5
             if min(ph, 0.5 - ph) > _EIGHTH_PHASE:
                 mid_strength = 0.0
+        # Fast-beat chase bookkeeping (Extreme, ModeParams.beat_chase_hz): track
+        # each instrument stream's beats/second and advance its cursor on a real,
+        # audible hit, so a fast run of that instrument spreads across its lamps
+        # (applied in the per-light flash loop below). Gated on the silence gate
+        # so a stray scheduled beat on a paused track can't spin the estimate up.
+        rate_decay = max(0.0, 1.0 - dt / _BEAT_RATE_TAU)
+        self._kick_rate *= rate_decay
+        self._mid_rate *= rate_decay
+        if beat_now and music_gate > 0.5:
+            self._kick_rate += 1.0 / _BEAT_RATE_TAU
+            self._kick_cursor += 1
+        if mid_strength > 0.0 and music_gate > 0.5:
+            self._mid_rate += 1.0 / _BEAT_RATE_TAU
+            self._mid_cursor += 1
         # Advance the palette position. Colour-jump modes make colour the
         # PRIMARY motion (the apartment-sync look): the whole room snaps to a
         # new palette position on EVERY beat — a big spectrum-spanning jump —
@@ -904,6 +936,24 @@ class EffectEngine:
         # light at once (vocal lights a touch softer), the way the reference
         # shows punctuate a chorus. Ordinary highlights stay role-separated.
         full_room = kick > 0.0 and highlight and acc_now >= p.full_room_accent
+        # Fast-beat chase: split each instrument's flash across ITS OWN lamps so a
+        # fast run bounces side-to-side (opposing buckets on successive beats)
+        # instead of flashing the whole role group every hit — the whole-group
+        # flash is what pumps the field and drops beats at the flash cap. With the
+        # chase off (beat_chase_hz == 0) or the stream slow, the active set is the
+        # whole role group so behaviour is unchanged. The full-room slam (biggest
+        # accents / drops) bypasses the chase entirely — every lamp fires.
+        active_bass: set[int] | None = None
+        active_mid: set[int] | None = None
+        if p.beat_chase_hz > 0.0 and not full_room:
+            if kick > 0.0:
+                bass_ids = [c for c in self._rank_ids if self.roles.get(c) == ROLE_BASS]
+                g = beat_group_count(self._kick_rate, len(bass_ids), p.beat_chase_hz)
+                active_bass = chase_bucket(bass_ids, self._kick_cursor, g)
+            if midf > 0.0:
+                mid_ids = [c for c in self._rank_ids if self.roles.get(c) == ROLE_MID]
+                g = beat_group_count(self._mid_rate, len(mid_ids), p.beat_chase_hz)
+                active_mid = chase_bucket(mid_ids, self._mid_cursor, g)
         lf = self._light_flash
         decay = p.flash_decay  # per-mode: lower = snappier firework fall
         for cid in lf:
@@ -916,10 +966,11 @@ class EffectEngine:
                         f = max(f, midf)
                     lf[cid] = max(lf.get(cid, 0.0), f)
                 elif role == ROLE_MID:
-                    if midf > 0.0:
+                    if midf > 0.0 and (active_mid is None or cid in active_mid):
                         lf[cid] = max(lf.get(cid, 0.0), midf)
                 elif kick > 0.0 and role == ROLE_BASS:
-                    lf[cid] = max(lf.get(cid, 0.0), kick)
+                    if active_bass is None or cid in active_bass:
+                        lf[cid] = max(lf.get(cid, 0.0), kick)
 
         # Structure choreography: builds desaturate (tension), drops swell, and
         # the section arc (from the track map) scales the show's whole range.

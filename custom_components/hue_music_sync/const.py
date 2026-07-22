@@ -151,7 +151,7 @@ class SyncMode(StrEnum):
     MEDIUM = "medium"  # gentle club: visible dimming, soft flashes on strong beats
     HIGH = "high"  # the band: per-instrument spatial split, kicks/guitar/vocals
     INTENSE = "intense"  # club: whole room follows energy + bursts on every beat, colour jumps
-    EXTREME = "extreme"  # max club: whole room dark<->full-bright with energy, fireworks every beat
+    EXTREME = "extreme"  # max club: dark room, instruments split across lamps, fast beats chase side-to-side
 
 
 class SyncEffect(StrEnum):
