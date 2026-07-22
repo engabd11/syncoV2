@@ -287,16 +287,18 @@ class SyncSession:
         self._stream = DtlsStream(host, app_key, client_key)
         self._engine = EffectEngine(config.channels)
         # Final safety stage (whole-field flash limiter + red guard). Every
-        # emitted frame passes through ONE of these: the strict WCAG limiter
-        # normally, or the relaxed high-budget limiter in the club modes
-        # (Intense/Extreme with a non-Movies effect) — transparent on real
-        # music, but a hard cap on pathological strobe output. There is no
-        # fully-unlimited path.
+        # emitted frame passes through the strict WCAG limiter normally, or the
+        # relaxed high-budget limiter in Intense — transparent on real music, a
+        # hard cap on pathological strobe output. EXTREME bypasses the limiter
+        # entirely (the explicit "no limits" club mode, see _bypass_limiter and
+        # the README photosensitivity warning), so its flashing is as sharp and
+        # fast as the pipeline allows.
         self._safety = FieldSafety()
         self._safety_relaxed = FieldSafety(
             max_flashes_per_s=RELAXED_MAX_FLASHES_PER_S, calm_gated=False
         )
         self._was_unrestrained = False
+        self._was_bypass = False
         self._last_safe_t: float | None = None
         # Predictive beat grid + musical-structure trackers, fed the analyzer's
         # feature stream so the engine can anticipate beats and ride builds/drops.
@@ -1034,13 +1036,27 @@ class SyncSession:
             await self._safe_send(*send)  # else still filling the buffer; hold
 
     def _unrestrained(self) -> bool:
-        """True in the explicit club modes that bypass the flash limiter.
+        """True in the explicit club modes that run the relaxed flash limiter.
 
         Uses the *effective* mode so an Auto pick of Intense/Extreme runs the
         same relaxed limiter as picking it by hand — Auto's Intense is Intense.
         """
         return (
             self._effective_mode(self._settings.mode) in UNRESTRAINED_MODES
+            and self._settings.effect is not SyncEffect.MOVIES
+        )
+
+    def _bypass_limiter(self) -> bool:
+        """True in Extreme (non-Movies): the flash limiter is skipped entirely.
+
+        Extreme is the explicit "no limits" club mode (README photosensitivity
+        warning) tuned for heavy, fast tracks — the user wants the sharpest,
+        fastest flashing the lights can do, so the final whole-field limiter
+        does not touch the frame. Every other mode (Intense included) keeps its
+        limiter.
+        """
+        return (
+            self._effective_mode(self._settings.mode) is SyncMode.EXTREME
             and self._settings.effect is not SyncEffect.MOVIES
         )
 
@@ -1053,12 +1069,21 @@ class SyncSession:
         now = time.monotonic()
         dt = 0.025 if self._last_safe_t is None else max(0.0, now - self._last_safe_t)
         self._last_safe_t = now
+        bypass = self._bypass_limiter()
         unrestrained = self._unrestrained()
-        limiter = self._safety_relaxed if unrestrained else self._safety
-        if unrestrained != self._was_unrestrained:
-            limiter.reset()  # field history is stale after switching limiters
-        colors = limiter.process(colors, dt)
+        if bypass:
+            # Extreme: no limiter at all. Keep the limiters' field history clean
+            # so they engage correctly if the user switches back to another mode.
+            if not self._was_bypass:
+                self._safety.reset()
+                self._safety_relaxed.reset()
+        else:
+            limiter = self._safety_relaxed if unrestrained else self._safety
+            if unrestrained != self._was_unrestrained or self._was_bypass:
+                limiter.reset()  # field history is stale after a limiter/bypass switch
+            colors = limiter.process(colors, dt)
         self._was_unrestrained = unrestrained
+        self._was_bypass = bypass
         # Split large areas across packets (the bridge caps a packet at ~10 lights).
         for frame in self._encoder.build_packets(colors):
             await self._stream.send(frame)

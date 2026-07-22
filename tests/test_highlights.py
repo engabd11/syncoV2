@@ -165,12 +165,12 @@ def test_metadata_source_emits_no_beats():
 
 # --- comfort: beats swing smoothly, not as 1-frame strobes -----------------
 
-@pytest.mark.parametrize("mode", [SyncMode.HIGH, SyncMode.INTENSE, SyncMode.EXTREME])
+@pytest.mark.parametrize("mode", [SyncMode.HIGH, SyncMode.INTENSE])
 def test_beats_swing_smoothly_instead_of_strobing(mode):
-    # Item 1: Intense/Extreme used to slam full-bright in a single frame (a
-    # strobe). The slew limiter must cap each light's per-frame brightness RISE
-    # at bri_slew, so a beat reads as a fast dim<->bright swing, while peaks
-    # still reach bright over the swell.
+    # High/Intense keep the comfort slew limiter: each light's per-frame
+    # brightness RISE is capped at bri_slew, so a beat reads as a fast dim<->bright
+    # swing rather than a 1-frame strobe, while peaks still reach bright.
+    # (Extreme deliberately opts out — see test_extreme_snaps_bright_in_one_frame.)
     eng = EffectEngine(_channels(5))
     eng.set_mode(mode)
     slew = MODE_PARAMS[mode].bri_slew
@@ -188,6 +188,21 @@ def test_beats_swing_smoothly_instead_of_strobing(mode):
                 peak = max(peak, m)
     assert worst_rise <= slew + 1e-6  # no harsh single-frame jump
     assert peak > 0.7  # but beats still swing up to bright
+
+
+def test_extreme_snaps_bright_in_one_frame():
+    # Extreme is the exception: the user wants sharp, fast, Samsung-style flashing,
+    # so the anti-strobe slew is OFF (bri_slew 1.0). A beat must reach bright in a
+    # single frame rather than swelling over several.
+    eng = EffectEngine(_channels(5))
+    eng.set_mode(SyncMode.EXTREME)
+    for _ in range(10):  # settle dark
+        eng.render(_quiet(), _DT, beatgrid=_grid(False, phase=0.5))
+    before = max(max(c) for c in
+                 eng.render(_quiet(), _DT, beatgrid=_grid(False, phase=0.5)).values())
+    on_beat = max(max(c) for c in
+                  eng.render(_quiet(), _DT, beatgrid=_grid(True, accent=1.0, beat_in_bar=0)).values())
+    assert on_beat - before > 0.5  # one frame from the tick, already bright
 
 
 # --- selectivity: only standout beats flash --------------------------------

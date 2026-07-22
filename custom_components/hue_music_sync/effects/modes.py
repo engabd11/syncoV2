@@ -48,13 +48,16 @@ The ladder — same pattern throughout, each rung harder, darker and more unifie
   so it keeps a soft glow in the gaps instead of going black. The floor is the
   deliberate, only-real difference from Extreme: gentler, more comfortable.
   Eye-safety limiter bypassed (see safety docs).
-* **Extreme** — *unrestrained* maximum club: the same quick swing and a TRUE
-  dark room (floor 0), but now the instruments SPLIT across the lamps — drums on
-  some, guitar/snare on others — and a *fast* run of either bounces across its
-  own lamps one-by-one (opposing sides alternating) instead of pumping the whole
-  room, so fast drums land beat-for-beat with no dropped hits. Only the biggest
-  accents (drops) unify every lamp. Colour jumps the spectrum each hit; widest
-  dark<->bright range of the ladder; still a smooth swell, never a strobe.
+* **Extreme** — *unrestrained* maximum club for heavy, fast, high-rhythm tracks
+  (think Metallica). A TRUE dark room (floor 0) where the instruments SPLIT
+  across the lamps — drums on some, guitar/snare on others — and a *fast* run of
+  either bounces across its own lamps one-by-one (opposing sides alternating)
+  instead of pumping the whole room, so fast drums land beat-for-beat with no
+  dropped hits. Flashing is SHARP and instant (no anti-strobe slew) and the
+  eye-safety limiter is bypassed entirely, so the dim<->bright snap is as fast
+  as the lights allow — the Samsung feel. Nonsense low noise and sung vocals are
+  filtered so only real hits flash. Only the biggest accents (drops) unify every
+  lamp; colour jumps the spectrum each hit.
 """
 
 from __future__ import annotations
@@ -297,26 +300,34 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         predrop_depth=0.60, phrase_bars=4, phrase_colour_shift=0.06,
         pan_gain=0.5,
     ),
-    # UNRESTRAINED maximum club. The same quick dim<->bright SWING as Intense in
-    # a TRUE dark room (floor 0), but drums and guitar/snare take separate lamps
-    # and a fast stream of either CHASES across its own lamps (opposing sides
-    # alternating, sized by beat_chase_hz) rather than pumping the whole room —
-    # so fast beats never hit the whole-field flash cap and drop. Colour jumps
-    # the spectrum each hit; only the biggest accents (drops) unify every lamp.
+    # UNRESTRAINED maximum club for heavy/fast tracks. A TRUE dark room (floor 0)
+    # where drums and guitar/snare take separate lamps and a fast stream of either
+    # CHASES across its own lamps (opposing sides alternating, sized by
+    # beat_chase_hz) rather than pumping the whole room. Flashing is SHARP and
+    # instant (bri_slew 1.0, fast flash_decay) and the eye-safety limiter is
+    # bypassed entirely (coordinator._bypass_limiter) for the fastest dim<->bright
+    # snap the lights allow. Noise and vocals are filtered (see below). Colour
+    # jumps the spectrum each hit; only the biggest accents (drops) unify all lamps.
     SyncMode.EXTREME: ModeParams(
-        base=0.0, floor=0.0, bass_gain=0.06, beat_gain=1.8, beat_threshold=1.0,
+        base=0.0, floor=0.0, bass_gain=0.05, beat_gain=1.9, beat_threshold=1.1,
         spread=0.0, colour_speed=0.06, shimmer=0.0, colour_sat=1.0,
-        colour_beat_step=0.0, colour_lerp=0.65, energy_gain=0.12,
-        bri_attack=1.0, bri_decay=0.42,
-        bri_slew=0.24, flash_decay=0.80,
-        wave_gain=0.50, wave_speed=3.4, wave_width=0.24,
+        colour_beat_step=0.0, colour_lerp=0.65, energy_gain=0.10,
+        # SHARP, FAST flashing — the Samsung/metal feel. The eye-safety limiter is
+        # bypassed entirely for Extreme (coordinator._bypass_limiter, see the
+        # README warning), so nothing softens it: the rise slew is off (bri_slew
+        # 1.0 = instant full snap in one frame, not a ~90ms swell) and the flash
+        # falls fast (low flash_decay + snappy bri_decay) so each beat reads as a
+        # distinct hit even on a single light through a fast drum run.
+        bri_attack=1.0, bri_decay=0.55,
+        bri_slew=1.0, flash_decay=0.55,
+        wave_gain=0.28, wave_speed=3.4, wave_width=0.24,
         anticipation_ms=90, drop_boost=1.0, build_desat=0.60,
         # The drums (bass) and guitar/snare (mid) get their own lamps and each
         # fires its own onset, so instruments visibly occupy different lights;
         # dynamic_roles hands the mid lamps back to bass on a track with no
         # guitar, and the band rotates seats. No vocal share — a shimmer glow
         # would lift the true-dark room.
-        role_mix=(0.6, 0.4, 0.0), mid_gain=1.6, mid_threshold=1.2,
+        role_mix=(0.6, 0.4, 0.0), mid_gain=1.6, mid_threshold=1.5,
         dynamic_roles=True, role_rotate_beats=16, hard_snap=True,
         # A fast kick/guitar run bounces across ITS lamps (opposing sides
         # alternating) instead of pumping the whole room and hitting the field
@@ -329,19 +340,25 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         highlight_quantile=0.16, colour_jump=0.20, colour_spread=0.0,
         full_room_accent=0.9,
         melbank_gain=0.14, melbank_floor=0.0, colour_flow=0.03, spectral_pop=0.5,
-        salience_gamma=0.6, width_min=0.05, nobeat_flash=0.20,
+        # Noise/vocal rejection: a real kick must carry genuine low end
+        # (kick_bass_floor low → a bass-less "low noise" onset barely flashes),
+        # narrowband/tonal onsets are trimmed (width_min up), and a beat-less
+        # passage flashes little (nobeat_flash down). mid_threshold above keeps
+        # sung vowels (lower-flux than a metal guitar chug) off the mid lamps.
+        salience_gamma=0.6, width_min=0.10, nobeat_flash=0.10,
+        kick_bass_floor=0.15,
         predrop_depth=0.85, phrase_bars=4, phrase_colour_shift=0.08,
         pan_gain=0.4,
     ),
 }
 
-# Modes that run the RELAXED flash limiter (a high budget that real music never
-# hits — see safety.RELAXED_MAX_FLASHES_PER_S) instead of the strict WCAG one.
-# An explicit, documented user choice: these are club modes meant to go as hard
-# as the Hue pipeline can on musical content, but pathological strobe output is
-# still hard-capped — there is no fully-unlimited path. Subtle/Medium/High and
-# the Movies effect always get the strict limiter. See the photosensitivity
-# warning in the README.
+# The club modes that opt out of the strict WCAG flash limiter — an explicit,
+# documented user choice (see the README photosensitivity warning). INTENSE runs
+# the RELAXED limiter (a high budget real music never hits, see
+# safety.RELAXED_MAX_FLASHES_PER_S, still hard-capping pathological strobe).
+# EXTREME goes further and bypasses the limiter ENTIRELY (coordinator.
+# _bypass_limiter) for the sharpest, fastest flashing — the one fully-unlimited
+# path. Subtle/Medium/High and the Movies effect always get the strict limiter.
 UNRESTRAINED_MODES = frozenset({SyncMode.INTENSE, SyncMode.EXTREME})
 
 

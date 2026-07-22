@@ -8,12 +8,13 @@ where a "flash" is a pair of opposing luminance changes of ≥10% of max, and
 treats **saturated red** more strictly still.
 
 :class:`FieldSafety` enforces those limits as the final stage before encoding
-for every renderer (Music, Movies, Fireworks, idle glow). The **Intense** and
-**Extreme** club modes (see ``modes.UNRESTRAINED_MODES``) run a *relaxed*
-limiter instead of the WCAG one: a much higher flash budget
+for every renderer (Music, Movies, Fireworks, idle glow). **Intense** runs a
+*relaxed* limiter instead of the WCAG one: a much higher flash budget
 (:data:`RELAXED_MAX_FLASHES_PER_S`) that never engages on real music but still
-hard-caps true strobe output — there is no fully-unlimited path. Those modes
-remain unsuitable for photosensitive viewers (see the README's warning);
+hard-caps true strobe output. **Extreme** goes further — at the user's explicit
+request it BYPASSES the limiter entirely (``coordinator._bypass_limiter``) so
+its sharp, fast flashing is untouched; it is the one fully-unlimited path.
+Both remain unsuitable for photosensitive viewers (see the README's warning);
 Subtle, Medium, High and the Movies effect always get the strict limiter.
 When engaged it is deliberately transparent on well-behaved content —
 it only acts when the aggregate field actually starts to strobe — and degrades

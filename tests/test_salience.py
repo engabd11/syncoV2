@@ -215,13 +215,17 @@ def test_low_salience_beats_render_proportionally_small():
 
 
 def test_narrowband_onsets_muted_per_mode():
-    # A narrow (vocal-like) onset: High mutes it, Extreme lets it through dim.
+    # A narrow (vocal/tonal-like) onset must be muted so it never flashes: High
+    # cut it already, and Extreme now does too (the user's 'no vocal flashes').
+    # A broadband hit still flashes in both.
     high = _beat_lift(SyncMode.HIGH, _kick_frame(width=0.11), _bed(1.0, 0.11))
     extreme = _beat_lift(SyncMode.EXTREME, _kick_frame(width=0.11), _bed(1.0, 0.11))
     wide = _beat_lift(SyncMode.HIGH, _kick_frame(width=0.6), _bed(1.0, 0.6))
+    extreme_wide = _beat_lift(SyncMode.EXTREME, _kick_frame(width=0.6), _bed(1.0, 0.6))
     assert high <= 0.05  # muted: no flash above the continuous bed
+    assert extreme <= 0.05  # Extreme mutes narrowband (vocal/tonal) onsets too now
     assert wide > high + 0.2  # a broadband hit still flashes in High
-    assert extreme > 0.1  # the loosest mode still reacts
+    assert extreme_wide > 0.2  # …and slams in Extreme
 
 
 def _grid(predicted: bool, accent: float = 0.9, phase: float = 0.3) -> BeatGrid:

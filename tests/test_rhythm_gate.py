@@ -114,24 +114,16 @@ def test_conf_decays_when_the_beat_stops():
 # --- the gate on the unlocked flash path --------------------------------------
 
 
-def test_extreme_flashes_soften_without_beat_evidence():
-    # Identical narrow false onsets; the only difference is prior rhythm
-    # evidence. With none, the flash must sit near the nobeat_flash floor of
-    # the charged run's flash.
-    onsets = [_frame(bass_beat=(i % 25 == 0), onset_width=0.12) for i in range(100)]
+def test_extreme_rejects_narrow_noise_but_fires_on_real_kicks():
+    # The user's 'stop flashing on noise/vocals': narrow, tonal/vocal-like onsets
+    # with no rhythm evidence must NOT flash Extreme — the width gate, the raised
+    # beat threshold and the low nobeat floor reject them outright — while a
+    # broadband kick still slams.
+    narrow = [_frame(bass_beat=(i % 25 == 0), onset_width=0.12) for i in range(100)]
+    assert _run(_engine(SyncMode.EXTREME), narrow) <= 0.05  # noise/vocals: rejected
 
-    cold = _engine(SyncMode.EXTREME)
-    cold_peak = _run(cold, onsets)
-
-    warm = _engine(SyncMode.EXTREME)
-    grid = _locked_grid()
-    for _ in range(150):  # charge confidence with a locked grid first
-        warm.render(_frame(), _DT, beatgrid=grid)
-    warm._light_flash.clear()
-    warm_peak = _run(warm, onsets)
-
-    assert cold_peak > 0.0  # the floor still reacts, softly
-    assert warm_peak > cold_peak * 2.5  # cold is strongly attenuated
+    real = [_frame(bass_beat=(i % 25 == 0), onset_width=0.55) for i in range(100)]
+    assert _run(_engine(SyncMode.EXTREME), real) > 0.4  # broadband kicks fire hard
 
 
 def test_locked_scheduled_path_is_untouched():
