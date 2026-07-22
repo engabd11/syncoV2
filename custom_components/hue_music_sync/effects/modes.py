@@ -53,11 +53,13 @@ The ladder — same pattern throughout, each rung harder, darker and more unifie
   across the lamps — drums on some, guitar/snare on others — and a *fast* run of
   either bounces across its own lamps one-by-one (opposing sides alternating)
   instead of pumping the whole room, so fast drums land beat-for-beat with no
-  dropped hits. Flashing is SHARP and instant (no anti-strobe slew) and the
-  eye-safety limiter is bypassed entirely, so the dim<->bright snap is as fast
-  as the lights allow — the Samsung feel. Nonsense low noise and sung vocals are
-  filtered so only real hits flash. Only the biggest accents (drops) unify every
-  lamp; colour jumps the spectrum each hit.
+  dropped hits. EVERY beat hits hard — big, mid or quiet — not just the loudest
+  moments: a hard ``beat_floor`` lifts a mid/quiet kick to a real flash so the
+  whole song reads, not only the top of its dynamic range. Flashing is SHARP and
+  instant (no anti-strobe slew) and the eye-safety limiter is bypassed entirely,
+  so the dim<->bright snap is as fast as the lights allow — the Samsung feel.
+  Nonsense low noise and sung vocals are filtered so only real hits flash. Only
+  the biggest accents (drops) unify every lamp; colour jumps the spectrum each hit.
 """
 
 from __future__ import annotations
@@ -174,6 +176,18 @@ class ModeParams:
     # The bass-content weight floor in kick_flash (was a hard-coded 0.4):
     # how much a bass-less onset may still flash.
     kick_bass_floor: float = 0.40
+    # HARDNESS: minimum fraction of a full flash that ANY qualified beat gets,
+    # regardless of how strong/loud it is. 0 keeps the fully proportional
+    # response (big beats slam, mid/quiet beats fade — the "only the top of the
+    # dynamic range shows" behaviour). Raising it lifts every detected/scheduled
+    # beat toward a full hit so mid and quiet beats read as real flashes, not dim
+    # wiggles — the relentless club/metal feel. The engine applies it as a
+    # ``max`` floor on the kick/mid flash (see EffectEngine._render_music) AFTER
+    # the rhythm-confidence gate, so a mid kick lands hard even before the tempo
+    # locks; it is scaled by the onset WIDTH gate, so narrowband (vocal/tonal)
+    # onsets stay muted and only real broadband hits are lifted. The biggest hits
+    # still slam via the proportional path (max keeps whichever is larger).
+    beat_floor: float = 0.0
     # Flash floor while the song has NO discernible beat (0..1): detected-onset
     # flashes and waves scale between this and full with the engine's
     # rhythm-confidence envelope (tempo lock, or broadband kicks while
@@ -338,10 +352,13 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         # (2 groups at ~8-12/s from beat_chase_hz 6) — the hard left<->right drum
         # bounce, each hit a solid half rather than one dim lamp.
         beat_chase_hz=6.0,
-        # RELENTLESS: no highlight selection (quantile 0 → every beat fires) and a
-        # high weak_pulse so even a buried/ordinary fast kick hits hard, not just
-        # the standouts — Extreme should pound every beat, the downbeat hardest.
-        accent_floor=0.15, weak_pulse=0.62, downbeat_pulse=0.75,
+        # RELENTLESS: no highlight selection (quantile 0 → every beat fires), a
+        # high weak_pulse, and a hard beat_floor so a mid/quiet kick lands as a
+        # real flash regardless of how it compares to the song's loudest hit —
+        # Extreme pounds EVERY beat (not just the top of the dynamic range), the
+        # downbeat hardest. beat_floor is width-gated in the engine so vocals /
+        # tonal onsets still stay muted.
+        accent_floor=0.15, weak_pulse=0.62, downbeat_pulse=0.75, beat_floor=0.5,
         # Only the passage's very biggest accents (drops) take EVERY lamp — the
         # unify-on-the-drop slam; ordinary beats stay half-slammed + chased.
         highlight_quantile=0.0, colour_jump=0.20, colour_spread=0.0,

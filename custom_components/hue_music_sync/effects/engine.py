@@ -919,12 +919,26 @@ class EffectEngine:
                 )
         else:
             kick = kick_flash(p, vis_strength, vis_bass) * flash_scale * rhythm_gate
+        midf = mid_flash(p, mid_strength)
+        if not grid_locked:
+            midf *= rhythm_gate
+        # HARDNESS floor (ModeParams.beat_floor — the relentless club/metal feel):
+        # lift a qualified beat to at least this fraction of a full flash so mid
+        # and quiet kicks read as real hits, not dim wiggles. Applied here (after
+        # the rhythm gate, before the loudness/silence gate) so the START of a
+        # fast fill lands hard even before the tempo locks, and scaled by the
+        # onset WIDTH gate so only real broadband hits are lifted — narrowband
+        # (vocal/tonal) onsets stay muted. ``max`` keeps the biggest hits' slam.
+        if p.beat_floor > 0.0:
+            wfloor = p.beat_floor * width_gate
+            if kick > 0.0:
+                kick = max(kick, p.beat_gain * wfloor)
+            if midf > 0.0:
+                midf = max(midf, p.mid_gain * wfloor)
         # Silence gate (item 2: vanish in a gap) × loudness scale (item 3: a
         # fading beat brightens only as much as its height).
         kick *= music_gate * loud_scale
-        midf = mid_flash(p, mid_strength) * music_gate * loud_scale
-        if not grid_locked:
-            midf *= rhythm_gate
+        midf *= music_gate * loud_scale
         # Pre-drop tightening: hold the pulse back through the pull-down —
         # except the bar's downbeat, so the room never loses the count.
         if pd > 0.0:
