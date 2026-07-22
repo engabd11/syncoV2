@@ -46,14 +46,14 @@ The ladder — same pattern throughout, each rung harder, darker and more unifie
   the beat over a few frames (a slew-limited swell, not a 1-frame strobe) and the
   colour shifts each hit — over a soft glow that never quite goes black.
   Eye-safety limiter bypassed (see safety docs).
-* **Extreme** — a HARDER Intense for heavy, fast, high-rhythm tracks (think
-  Metallica). The exact same character — the room breathes with the energy and
-  slams on the beat, one near-unified colour jumping each hit — but intensified in
-  every direction: a DARKER base (floor 0, dimmer glow) so beats slam out of
-  near-black, a HIGHER flash ceiling, a snappier swing + faster fade so it flashes
-  more often, and stricter noise/vocal rejection so only real hits fire. The
-  eye-safety limiter is bypassed entirely (see safety docs) so it can flash as
-  fast as the lights allow. Intense itself is unchanged.
+* **Extreme** — Intense SCALED to a wider range: a more intense Intense. It
+  reacts, swings and colours *exactly* like Intense (same reactivity, same
+  onset thresholds, same smooth swing, same breathing) — nothing about the
+  behaviour changes — but the range it plays over is stretched: a DARKER base
+  (floor 0 and a dimmer continuous glow, so quiet passages and the gaps between
+  hits fall dim instead of Intense's soft glow) and a HIGHER flash ceiling
+  (bigger beat pop) so the hits slam harder out of that dark. The eye-safety
+  limiter is bypassed entirely (see safety docs). Intense itself is unchanged.
 """
 
 from __future__ import annotations
@@ -286,38 +286,32 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         predrop_depth=0.60, phrase_bars=4, phrase_colour_shift=0.06,
         pan_gain=0.5,
     ),
-    # A HARDER Intense — the exact same character (the whole room breathes with
-    # the energy and slams on the beat, one near-unified colour jumping each hit)
-    # but intensified into "extreme": a DARKER base (floor 0, lower continuous
-    # glow) so beats slam out of near-black, a HIGHER flash ceiling (bigger
-    # beat_gain), a snappier swing + faster fade so it can flash more often, and
-    # stricter noise/vocal rejection (higher onset threshold + width gate, lower
-    # nobeat floor, less bass-less "noise" flash). The eye-safety limiter is
-    # bypassed ENTIRELY (coordinator._bypass_limiter, see the README warning) so
-    # it can flash as fast as the lights allow. Every value not intensified here
-    # is Intense's; Intense itself is unchanged.
+    # Intense, SCALED to a wider range — a more intense Intense. EVERY behaviour
+    # is Intense's, byte-for-byte (the same smooth swing, the same reactivity and
+    # onset thresholds, the same colour jumps and breathing) so it reacts and
+    # FEELS exactly like Intense — only the range it plays over is stretched: a
+    # DARKER base (floor 0 and a lower continuous glow, so quiet passages and the
+    # gaps between hits fall dim instead of Intense's soft glow) and a HIGHER
+    # flash ceiling (bigger beat_gain) so beats slam harder out of that dark.
+    # The eye-safety limiter is bypassed entirely (coordinator._bypass_limiter,
+    # see the README warning). Intense itself is unchanged.
     SyncMode.EXTREME: ModeParams(
-        base=0.0, floor=0.0, bass_gain=0.16, beat_gain=2.2, beat_threshold=1.3,
+        # Deltas from Intense: base/floor 0 (was 0.05/0.10), beat_gain 2.1 (1.7),
+        # melbank/energy/wave lowered for the dark base (0.42/0.16/0.55), and no
+        # melbank floor (0.06). Everything else is Intense's value verbatim.
+        base=0.0, floor=0.0, bass_gain=0.16, beat_gain=2.1, beat_threshold=1.0,
         spread=0.0, colour_speed=0.05, shimmer=0.0, colour_sat=0.97,
-        colour_beat_step=0.0, colour_lerp=0.55, energy_gain=0.09,
-        bri_attack=1.0, bri_decay=0.45,
-        # Snappier swing + faster fade than Intense (0.22/0.82) so fast beats read
-        # as distinct hits and it can flash more often — still a swing, not a
-        # 1-frame strobe.
-        bri_slew=0.40, flash_decay=0.70,
+        colour_beat_step=0.0, colour_lerp=0.55, energy_gain=0.10,
+        bri_attack=1.0, bri_decay=0.40,
+        bri_slew=0.22, flash_decay=0.82,
         wave_gain=0.42, wave_speed=2.4, wave_width=0.30,
-        anticipation_ms=90, drop_boost=1.0, build_desat=0.55,
+        anticipation_ms=90, drop_boost=0.80, build_desat=0.50,
         role_mix=(1.0, 0.0, 0.0), hard_snap=True,
         highlight_quantile=0.18, weak_pulse=0.42, downbeat_pulse=0.55,
         colour_jump=0.16, colour_spread=0.22, full_room_accent=0.0,
-        # Darker base: no melbank floor and a lower continuous melbank/energy glow
-        # than Intense (0.42/0.06/0.16) so the room sits dim between hits.
-        melbank_gain=0.26, melbank_floor=0.0, colour_flow=0.05, spectral_pop=0.45,
-        # Reacts to noise less than Intense (1.0 / 0.08 / 0.30 / 0.40): a real
-        # kick must clear a higher onset threshold and carry real low end, and a
-        # beat-less passage barely flashes.
-        salience_gamma=0.8, width_min=0.12, nobeat_flash=0.15, kick_bass_floor=0.28,
-        predrop_depth=0.70, phrase_bars=4, phrase_colour_shift=0.06,
+        melbank_gain=0.25, melbank_floor=0.0, colour_flow=0.05, spectral_pop=0.45,
+        salience_gamma=0.8, width_min=0.08, nobeat_flash=0.30,
+        predrop_depth=0.60, phrase_bars=4, phrase_colour_shift=0.06,
         pan_gain=0.5,
     ),
 }
