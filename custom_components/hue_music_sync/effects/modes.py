@@ -52,7 +52,10 @@ The ladder — same pattern throughout, each rung harder, darker and more unifie
   behaviour changes — but the range it plays over is stretched: a DARKER base
   (floor 0 and a dimmer continuous glow, so quiet passages and the gaps between
   hits fall dim instead of Intense's soft glow) and a HIGHER flash ceiling
-  (bigger beat pop) so the hits slam harder out of that dark. The eye-safety
+  (bigger beat pop) so the hits slam harder out of that dark. Because that dark
+  base would otherwise reveal the continuous layer pumping on non-beat content,
+  the breathing layer is smoothed and beat-less passages barely flash, so vocals,
+  intros/outros and fading beats stay calm instead of strobing. The eye-safety
   limiter is bypassed entirely (see safety docs). Intense itself is unchanged.
 """
 
@@ -302,7 +305,14 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         base=0.0, floor=0.0, bass_gain=0.16, beat_gain=2.1, beat_threshold=1.0,
         spread=0.0, colour_speed=0.05, shimmer=0.0, colour_sat=0.97,
         colour_beat_step=0.0, colour_lerp=0.55, energy_gain=0.10,
-        bri_attack=1.0, bri_decay=0.40,
+        # ANTI-STROBE (Extreme's dark base reveals it where Intense's bright base
+        # hid it): the continuous "breathing" layer is SMOOTHED (bri_attack 0.4
+        # vs Intense's 1.0) so it no longer snaps up on every loud vocal note /
+        # amplitude bump and strobe out of the dark — the beat FLASH is added
+        # after this smoothing so it stays sharp. And a beat-less passage (vocals,
+        # intro/outro, a fading beat) barely flashes (nobeat_flash 0.12 vs 0.30),
+        # so only real, rhythmic hits light the room, not the vocal layer.
+        bri_attack=0.4, bri_decay=0.40,
         bri_slew=0.22, flash_decay=0.82,
         wave_gain=0.42, wave_speed=2.4, wave_width=0.30,
         anticipation_ms=90, drop_boost=0.80, build_desat=0.50,
@@ -310,7 +320,7 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         highlight_quantile=0.18, weak_pulse=0.42, downbeat_pulse=0.55,
         colour_jump=0.16, colour_spread=0.22, full_room_accent=0.0,
         melbank_gain=0.25, melbank_floor=0.0, colour_flow=0.05, spectral_pop=0.45,
-        salience_gamma=0.8, width_min=0.08, nobeat_flash=0.30,
+        salience_gamma=0.8, width_min=0.08, nobeat_flash=0.12,
         predrop_depth=0.60, phrase_bars=4, phrase_colour_shift=0.06,
         pan_gain=0.5,
     ),
