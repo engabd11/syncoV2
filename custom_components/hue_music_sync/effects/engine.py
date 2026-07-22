@@ -734,6 +734,21 @@ class EffectEngine:
         vis_strength, vis_bass, grid_locked = self._visible_event(
             frame, beatgrid, width_gate
         )
+        # Onset-flux gate (ModeParams.flux_gate): a beat only counts where a REAL
+        # transient happened. A scheduled grid beat — especially from an offline
+        # track map that force-fits a tempo grid across the WHOLE song — keeps
+        # ticking through a tail / breakdown after the drums have stopped, so the
+        # engine would flash, jump colour and roll waves on those phantom beats
+        # ("predictive beats" the user does not want). Gating vis_strength by the
+        # frame's actual bass onset flux mutes them at the source (a held tone /
+        # vocal has ~no flux, a real drum spikes) so EVERYTHING downstream —
+        # flash, colour jump, highlight ranking, waves — only fires on real hits.
+        # 0 disables (every other mode is untouched).
+        if p.flux_gate > 0.0:
+            lo = 0.35 * p.flux_gate
+            vis_strength *= max(
+                0.0, min(1.0, (frame.bass_flux - lo) / max(1e-6, p.flux_gate - lo))
+            )
         # Does the song currently have an actual beat? While the grid is
         # unlocked (no rhythm found), detected-onset flashes and waves soften
         # toward the mode's nobeat_flash floor, so beat-less passages breathe
@@ -794,6 +809,13 @@ class EffectEngine:
             ph = beatgrid.phase % 0.5
             if min(ph, 0.5 - ph) > _EIGHTH_PHASE:
                 mid_strength = 0.0
+        # Same onset-flux gate on the mid stream (guitar/snare): a scheduled mid
+        # beat with no real mid-band transient (a held tone) is muted.
+        if p.flux_gate > 0.0 and mid_strength > 0.0:
+            lo = 0.35 * p.flux_gate
+            mid_strength *= max(
+                0.0, min(1.0, (frame.mid_flux - lo) / max(1e-6, p.flux_gate - lo))
+            )
         # Advance the palette position. Colour-jump modes make colour the
         # PRIMARY motion (the apartment-sync look): the whole room snaps to a
         # new palette position on EVERY beat — a big spectrum-spanning jump —

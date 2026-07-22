@@ -177,6 +177,9 @@ def _bed(salience: float = 1.0, width: float = 1.0) -> AnalysisFrame:
         energy=0.5,
         salience=salience,
         onset_width=width,
+        # Onset flux present so a scheduled/detected beat clears Extreme's flux
+        # gate; a no-beat frame still flashes nothing.
+        bass_flux=1.0, mid_flux=1.0,
     )
 
 

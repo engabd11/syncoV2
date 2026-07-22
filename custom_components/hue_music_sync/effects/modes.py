@@ -173,6 +173,17 @@ class ModeParams:
     # The bass-content weight floor in kick_flash (was a hard-coded 0.4):
     # how much a bass-less onset may still flash.
     kick_bass_floor: float = 0.40
+    # ONSET-FLUX gate (0 disables). A *scheduled* beat (from the offline track
+    # map's tempo grid, or the causal tracker) fires on the grid even where no
+    # real onset happened — an offline map force-fits a grid across the WHOLE
+    # song, so it keeps ticking beats through a tail/breakdown after the drums
+    # have stopped, and the engine flashes each one (the "strobing after the
+    # last beat" bug). Gating the flash by the frame's actual onset flux
+    # (bass_flux for the kick, mid_flux for the mid) suppresses those phantom
+    # beats — a real drum has a flux spike, a held tone / vocal does not — so a
+    # flash only lands on a genuine transient PEAK. This value is the flux level
+    # that earns a full flash; below ~0.3x of it the flash is fully muted.
+    flux_gate: float = 0.0
     # Flash floor while the song has NO discernible beat (0..1): detected-onset
     # flashes and waves scale between this and full with the engine's
     # rhythm-confidence envelope (tempo lock, or broadband kicks while
@@ -324,7 +335,7 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         highlight_quantile=0.18, weak_pulse=0.42, downbeat_pulse=0.55,
         colour_jump=0.16, colour_spread=0.22, full_room_accent=0.0,
         melbank_gain=0.20, melbank_floor=0.0, colour_flow=0.05, spectral_pop=0.12,
-        salience_gamma=0.8, width_min=0.12, nobeat_flash=0.06,
+        salience_gamma=0.8, width_min=0.12, nobeat_flash=0.06, flux_gate=0.40,
         predrop_depth=0.60, phrase_bars=4, phrase_colour_shift=0.06,
         pan_gain=0.5,
     ),

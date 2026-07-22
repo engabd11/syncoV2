@@ -95,7 +95,7 @@ def _kick(strength: float = 2.5) -> AnalysisFrame:
     return AnalysisFrame(
         bands={"sub_bass": 1.0, "bass": 1.0, "low_mid": 0.2, "mid": 0.2, "high": 0.1},
         energy=0.9, beat=True, beat_strength=strength,
-        bass_beat=True, bass_strength=strength,
+        bass_beat=True, bass_strength=strength, bass_flux=1.0,
     )
 
 
@@ -105,7 +105,7 @@ def _guitar_hit(strength: float = 2.2) -> AnalysisFrame:
         bands={"sub_bass": 0.1, "bass": 0.1, "low_mid": 1.0, "mid": 1.0, "high": 0.4},
         energy=0.7, beat=True, beat_strength=strength,
         bass_beat=False, bass_strength=0.0,
-        mid_beat=True, mid_strength=strength,
+        mid_beat=True, mid_strength=strength, mid_flux=1.0,
     )
 
 
@@ -201,12 +201,14 @@ def test_dynamic_roles_skip_absent_instruments_and_follow_present_ones():
         return AnalysisFrame(
             bands={"sub_bass": 0.9, "bass": 0.9, "low_mid": 0.0, "mid": 0.0, "high": 0.0},
             energy=0.7, bass_beat=True, bass_strength=2.0, beat=True, beat_strength=2.0,
+            bass_flux=1.0,
         )
 
     def full_band() -> AnalysisFrame:
         return AnalysisFrame(
             bands={"sub_bass": 0.8, "bass": 0.8, "low_mid": 0.8, "mid": 0.8, "high": 0.8},
             energy=0.8, bass_beat=True, bass_strength=2.0, beat=True, beat_strength=2.0,
+            bass_flux=1.0, mid_flux=1.0,
         )
 
     # Play a long bass-only passage (let presence settle + several rotations).

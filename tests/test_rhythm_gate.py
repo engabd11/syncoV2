@@ -43,6 +43,8 @@ def _frame(
         energy=energy,
         bass_beat=bass_beat,
         bass_strength=2.0 if bass_beat else 0.0,
+        # Onset flux present so a real / scheduled beat clears Extreme's flux gate.
+        bass_flux=1.0,
         melbank=[0.3] * 16,
         salience=1.0,
         onset_width=onset_width,

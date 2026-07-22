@@ -31,9 +31,11 @@ def _channels(n: int = 5) -> list[EntertainmentChannel]:
 
 
 def _quiet() -> AnalysisFrame:
+    # Carries onset flux so a scheduled grid beat passes Extreme's flux gate (a
+    # real beat has a flux spike); with no beat this frame flashes nothing.
     return AnalysisFrame(
         bands={"sub_bass": 0.2, "bass": 0.2, "low_mid": 0.2, "mid": 0.2, "high": 0.1},
-        energy=0.4,
+        energy=0.4, bass_flux=1.0, mid_flux=1.0,
     )
 
 
@@ -138,7 +140,8 @@ def test_fade_out_beats_brighten_with_the_beat_height():
         for _ in range(40):  # settle the loudness envelope at this level
             eng.render(AnalysisFrame(bands=bands(loud), energy=loud), _DT)
         kick = AnalysisFrame(bands=bands(loud), energy=loud, beat=True,
-                             beat_strength=2.5, bass_beat=True, bass_strength=2.5)
+                             beat_strength=2.5, bass_beat=True, bass_strength=2.5,
+                             bass_flux=1.0)
         peak = max(max(c) for c in eng.render(kick, _DT).values())
         for _ in range(8):  # swell
             out = eng.render(AnalysisFrame(bands=bands(loud), energy=loud), _DT)
