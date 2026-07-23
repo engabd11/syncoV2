@@ -32,7 +32,6 @@ from .modes import (
     ROLE_MID,
     ROLE_VOCAL,
     _melbank_drive,
-    _pan_weighted_mean,
     accent_knee,
     assign_roles,
     band_for_rank,
@@ -138,6 +137,31 @@ _PHRASE_JUMP = (1.0, 0.85, 1.15, 0.95)
 # Pleasant fallback palette when no album art is available (e.g. live radio).
 _FALLBACK_SCHEME = ColorScheme.SUNSET
 
+# Extreme spectral rotation: how the flash's per-band peak grows past a plain
+# average. The glow blends the band's mean level with its hottest bin so one
+# loud instrument in a lamp's band lifts that lamp (detail reads) without the
+# other bins washing it out.
+_EXT_GLOW_PEAKINESS = 0.5  # 0 = pure mean, 1 = pure hottest-bin
+
+
+def _spectral_bands(n: int, bins: int) -> list[tuple[int, int]]:
+    """``n`` contiguous, near-equal ``[lo, hi)`` melbank bands spanning low→high.
+
+    Unlike the smooth *overlapping* glow windows (:func:`spatial.melbank_window`),
+    these are tight and (near) non-overlapping so each lamp cleanly owns ONE
+    instrument at a time — the separation the rotating Extreme map needs. With
+    fewer lamps than bins (a Hue area is ≤10 lamps, the melbank is 16 bins) every
+    band gets at least one bin.
+    """
+    n = max(1, n)
+    edges = [int(round(j * bins / n)) for j in range(n + 1)]
+    out: list[tuple[int, int]] = []
+    for j in range(n):
+        lo = min(edges[j], bins - 1)
+        hi = min(bins, max(lo + 1, edges[j + 1]))
+        out.append((lo, hi))
+    return out
+
 
 class EffectEngine:
     """Renders entertainment frames from audio features and the active mode."""
@@ -201,7 +225,14 @@ class EffectEngine:
                 ],
                 "mel_lo": mel_lo,
                 "mel_hi": mel_hi,
+                "side": 2.0 * nx - 1.0,  # stereo side (-1 left .. +1 right)
             }
+        # Extreme rotating spectral map (see _render_extreme): n contiguous bands
+        # spanning low→high, assigned to lamps by rank + a rotation that advances
+        # over time, so the spectrum rotates around the room (every lamp takes
+        # turns on every instrument) while all bands stay covered at every instant.
+        self._ext_bands = _spectral_bands(n, MELBANK_BINS)
+        self._spectral_rot = 0.0
         self._waves = []
         self._wave_armed = True
         # Rolling accents of recent beats: the highlight ranking context.
@@ -238,6 +269,12 @@ class EffectEngine:
         # spectrum, so any instrument in any frequency range drives the lights.
         self._mel_slow: list[float] = []
         self._mel_transient: list[float] = []
+        # Previous frame's melbank + its per-bin positive flux (rise vs the last
+        # frame): the groove-catcher. Unlike the slow-baseline transient (which
+        # absorbs a steady pattern and goes quiet), flux re-fires on every attack,
+        # yet is ~0 on a held tone (no rise) so sustained content never strobes.
+        self._mel_prev: list[float] = []
+        self._mel_flux: list[float] = []
         self._light_flash: dict[int, float] = {}
         # Last emitted per-light brightness, for the rise slew-rate limiter that
         # turns a beat into a fast SWING instead of a 1-frame strobe (bri_slew).
@@ -373,17 +410,29 @@ class EffectEngine:
         mel = frame.melbank
         if not mel:
             self._mel_transient = []
+            self._mel_flux = []
             return
         if len(self._mel_slow) != len(mel):
             self._mel_slow = list(mel)
+        if len(self._mel_prev) != len(mel):
+            self._mel_prev = list(mel)
         tr: list[float] = []
+        fx: list[float] = []
         slow = self._mel_slow
+        prev = self._mel_prev
         for i, v in enumerate(mel):
             s = slow[i]
             s += (v - s) * (_MEL_SLOW_RISE if v > s else _MEL_SLOW_FALL)
             slow[i] = s
             tr.append(v - s if v > s else 0.0)
+            # Per-bin positive flux: rise vs the previous frame. Fires on EVERY
+            # attack in a steady groove (each hit rises again after its decay),
+            # and stays ~0 on a held tone, so the room reads the whole song's
+            # detail without strobing sustained content.
+            fx.append(v - prev[i] if v > prev[i] else 0.0)
+            prev[i] = v
         self._mel_transient = tr
+        self._mel_flux = fx
 
     @property
     def role_offset(self) -> int:
@@ -641,59 +690,121 @@ class EffectEngine:
         return self._render_music(frame, dt, beatgrid, structure)
 
     def _render_extreme(self, frame: AnalysisFrame, dt: float) -> dict[int, RGB]:
-        """Extreme, rebuilt from scratch: **the song is a graph** and each lamp
-        reflects its own slice of that graph.
+        """Extreme: **the song is a graph** and each lamp reflects a slice of it.
 
-        The lamps are spread left→right across the audio spectrum (LedFx
-        "Wavelength"): the leftmost rides the lowest frequencies, the rightmost
-        the highest, so instruments naturally SEPARATE in space — a kick lights
-        the low lamps, a snare/guitar the mids, a cymbal the highs. Stereo pan
-        pulls each lamp's slice toward its side of the room, so a panned part
-        lights the matching side (the 3D/spatial distribution).
+        The melbank is split into contiguous bands spanning low→high, assigned to
+        the lamps left→right so instruments SEPARATE in space — a kick lights the
+        low lamps, a snare/guitar the mids, a cymbal the highs. Stereo pan pulls a
+        band toward its side of the room. Each lamp's brightness is two parts:
 
-        Each lamp's brightness is two proportional parts:
+        * a smooth GLOW = its band's loudness (mean lifted toward the hottest bin,
+          so one loud instrument reads instead of being averaged into a wash), and
+        * a PEAK FLASH ∝ a fresh attack in the band, sized in direct proportion.
+          The attack is max(novelty transient, groove flux): the transient catches
+          big surprising peaks (a drop), the flux re-fires on EVERY hit of a steady
+          pattern the transient would otherwise absorb — so the room reads the
+          whole song's detail, not just its biggest beats.
 
-        * a smooth GLOW = that band's loudness (how high the graph sits there),
-          so the room tracks the music going louder/quieter, and
-        * a PEAK FLASH = a fresh transient in that band (how far the graph just
-          jumped up), sized in direct proportion — a big peak flashes bright, a
-          small one dim — added on top of the smoothed glow so it stays sharp.
+        The lamp↔band map ROTATES slowly over time (grid-free, loudness-scaled),
+        so every lamp takes turns on every instrument — the whole room plays the
+        song — while all bands stay covered at each instant.
 
-        There is NO beat grid, no scheduled/predicted beat, no onset gating: a
-        held tone or vocal has no fresh transient so it only glows (never
-        strobes), a song tail simply fades as its loudness does, and every real
-        hit — at any tempo — flashes exactly as big as it actually is.
+        There is NO beat grid, no scheduled/predicted beat, no onset gating: a held
+        tone has no fresh attack so it only glows (never strobes), a tail fades as
+        its loudness does, and every real hit — at any tempo — flashes as big as
+        it actually is.
         """
         p = self.active_params
         self._update_env(frame)
-        self._update_mel_transient(frame)
+        self._update_mel_transient(frame)  # fills _mel_transient AND _mel_flux
         music_gate = min(1.0, self._loud / _SILENCE_GATE) if _SILENCE_GATE > 0 else 1.0
         # Colour: a smooth spatial gradient that only DRIFTS (loudness-scaled),
-        # never jumps on a beat — colour never strobes, brightness carries the beat.
+        # never jumps on a beat — colour never strobes, brightness carries the song.
         self.colour_phase += (p.colour_speed + p.colour_flow * frame.energy) * dt * music_gate
 
-        tr = self._mel_transient  # per-bin fresh-attack transients (the peaks)
+        mel = frame.melbank
+        tr = self._mel_transient  # per-bin novelty transient (the big, surprising peaks)
+        fx = self._mel_flux       # per-bin flux (the groove — re-fires on every hit)
         pan = getattr(frame, "pan", None)
+        bands = self._ext_bands
+        n = len(self._rank_ids)
+        usepan = p.pan_gain > 0.0 and bool(pan) and bool(mel) and len(pan) >= len(mel)
+
+        # Advance the spectral rotation: grid-free (time only, scaled by the music
+        # gate so it freezes in silence), so it adds no phantom/predicted beats.
+        # The whole low→high map slides one lamp at a time around the room — every
+        # lamp takes turns on every instrument — while all bands stay covered.
+        if n > 1 and p.rotate_rate > 0.0:
+            self._spectral_rot = (self._spectral_rot + p.rotate_rate * dt * music_gate) % n
+        rot = self._spectral_rot
+
+        def _pan_w(k: int, side: float) -> float:
+            w = 1.0 + p.pan_gain * pan[k] * side
+            return 0.0 if w < 0.0 else 2.0 if w > 2.0 else w
+
+        def band_glow(lo: int, hi: int, side: float) -> float:
+            # Band loudness with the hottest bin lifted in (mean+peak blend), so
+            # one loud instrument in the band reads instead of being averaged away.
+            if not mel or hi <= lo or hi > len(mel):
+                return 0.0
+            tot = 0.0
+            mx = 0.0
+            for k in range(lo, hi):
+                val = mel[k] * (_pan_w(k, side) if usepan else 1.0)
+                tot += val
+                if val > mx:
+                    mx = val
+            mean = tot / (hi - lo)
+            return (1.0 - _EXT_GLOW_PEAKINESS) * mean + _EXT_GLOW_PEAKINESS * mx
+
+        def band_peak(lo: int, hi: int, side: float) -> float:
+            # The lamp flashes on the strongest ATTACKING bin in its band (max,
+            # not mean — so a single instrument drives the lamp fully). The attack
+            # is max(novelty transient, groove flux): the transient catches big,
+            # surprising peaks (a drop), the flux catches every hit of a steady
+            # pattern the transient would absorb — max, not sum, so a single hit
+            # isn't double-counted and the flash stays proportional to its height.
+            if hi <= lo:
+                return 0.0
+            mx = 0.0
+            for k in range(lo, hi):
+                r = tr[k] if k < len(tr) else 0.0
+                if k < len(fx):
+                    fxk = p.mel_flux_gain * fx[k]
+                    if fxk > r:
+                        r = fxk
+                r *= _pan_w(k, side) if usepan else 1.0
+                if r > mx:
+                    mx = r
+            return mx
+
         lf = self._light_flash
         for cid in lf:  # per-lamp peak flash fades each frame
             lf[cid] *= p.flash_decay
 
         colour_lerp = p.colour_lerp
+        have_bands = bool(mel) and bool(bands)
         out: dict[int, RGB] = {}
-        for ch in self.channels:
-            cid = ch.channel_id
+        for rank_i, cid in enumerate(self._rank_ids):
             info = self.cmap[cid]
-            lo, hi = info["mel_lo"], info["mel_hi"]
-            # GLOW: this lamp's band loudness (pan-weighted toward its side).
-            level = _melbank_drive(frame, self._env, info, p.pan_gain)
-            # PEAK: a fresh transient in this lamp's band, pan-weighted the same.
-            peak = 0.0
-            if tr and hi > lo:
-                if p.pan_gain > 0.0 and pan and len(pan) >= hi:
-                    side = 2.0 * info["nx"] - 1.0
-                    peak = _pan_weighted_mean(tr, pan, lo, hi, side, p.pan_gain)
-                else:
-                    peak = sum(tr[lo:hi]) / (hi - lo)
+            side = info["side"]
+            if have_bands:
+                # Rotating band assignment with a crossfade between the two bands
+                # the lamp is straddling, so redistribution reads as smooth
+                # movement rather than a jarring reshuffle.
+                pos = (rank_i + rot) % n
+                b0 = int(pos) % n
+                frac = pos - int(pos)
+                b1 = (b0 + 1) % n
+                lo0, hi0 = bands[b0]
+                lo1, hi1 = bands[b1]
+                level = (1.0 - frac) * band_glow(lo0, hi0, side) + frac * band_glow(lo1, hi1, side)
+                peak = (1.0 - frac) * band_peak(lo0, hi0, side) + frac * band_peak(lo1, hi1, side)
+            else:
+                # No melbank (minimal unit-test frames): fall back to the coarse
+                # band envelope so the room still lives; no rotation, no flash.
+                level = _melbank_drive(frame, self._env, info, p.pan_gain)
+                peak = 0.0
             flash = peak * p.spectral_pop * music_gate  # proportional to peak height
             if flash > lf.get(cid, 0.0):
                 lf[cid] = flash
@@ -706,7 +817,9 @@ class EffectEngine:
             prev_c, prev_b = self._state[cid]
             alpha = p.bri_attack if target >= prev_b else p.bri_decay
             new_b = prev_b + (target - prev_b) * alpha
-            # Colour by spectral position (spatial gradient) + the drift phase.
+            # Colour stays keyed to the lamp's fixed position (a stable spatial
+            # gradient) + the drift phase: only the brightness/instrument activity
+            # rotates, so the room keeps a coherent colour field.
             cpos = info["xrank"] * p.colour_spread + self.colour_phase
             tgt_c = self.palette.sample(cpos)
             m = max(tgt_c)
@@ -723,7 +836,7 @@ class EffectEngine:
             cval = max(nc)
             # Glow (smoothed) + peak flash (sharp), theme-faithful value, master.
             b = min(1.0, new_b + lf.get(cid, 0.0)) * (0.35 + 0.65 * cval) * self.brightness
-            out[ch.channel_id] = (nc[0] * b, nc[1] * b, nc[2] * b)
+            out[cid] = (nc[0] * b, nc[1] * b, nc[2] * b)
         return out
 
     def _spawn_waves(

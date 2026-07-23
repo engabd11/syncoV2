@@ -186,6 +186,24 @@ class ModeParams:
     # beats). Only Extreme uses it; here melbank_gain is the glow gain and
     # spectral_pop the peak-flash gain.
     graph_reactive: bool = False
+    # --- Extreme graph-renderer enrichment (only _render_extreme reads these) ---
+    # Weight of the per-bin spectral FLUX (frame-to-frame rise) in a lamp's peak
+    # flash, on top of the slow-baseline transient. Flux re-fires on EVERY hit in
+    # a steady groove — each attack rises again after the inter-hit decay — so a
+    # driving hi-hat / bassline / riff keeps the lamps moving instead of being
+    # absorbed into the baseline and going quiet (the fix for "only the big beats
+    # register, the rest of the song is missing"). A sustained tone does not rise
+    # frame-to-frame, so it still only glows and never strobes. 0 = pure novelty
+    # (the original v1.40 behaviour).
+    mel_flux_gain: float = 0.0
+    # Spectral ROTATION speed, in lamp-steps per second (0 = fixed mapping). The
+    # lamp<->spectrum assignment slowly rotates around the room so every lamp
+    # takes turns being the kick / snare / guitar / cymbal — the whole room trades
+    # instruments as the song goes on instead of each lamp being pinned to one
+    # band forever. Grid-free (advances on time, scaled by loudness), so it adds
+    # no phantom/predicted beats. Full spectral coverage is preserved at every
+    # instant; only *which lamp* shows *which* band cycles.
+    rotate_rate: float = 0.0
     # ONSET-FLUX gate (0 disables). A *scheduled* beat (from the offline track
     # map's tempo grid, or the causal tracker) fires on the grid even where no
     # real onset happened — an offline map force-fits a grid across the WHOLE
@@ -333,10 +351,12 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         # Beat-path fields the graph renderer never reads (kept 0 / inert).
         bass_gain=0.0, beat_gain=0.0, beat_threshold=99.0, spread=0.0, shimmer=0.0,
         base=0.0, floor=0.0,
-        melbank_gain=0.72, melbank_floor=0.02,   # GLOW: brightness ∝ band loudness
+        melbank_gain=0.85, melbank_floor=0.02,   # GLOW: brightness ∝ band loudness
         spectral_pop=1.8,                         # PEAK FLASH: ∝ band transient height
-        energy_gain=0.12,                         # a little whole-room loudness lift
-        flash_decay=0.72,                         # per-frame fade of a peak flash
+        mel_flux_gain=1.1,                        # groove: every hit re-fires, not just novel peaks
+        rotate_rate=0.16,                         # spectrum rotates ~one lamp every 6 s
+        energy_gain=0.10,                         # a little whole-room loudness lift
+        flash_decay=0.70,                         # per-frame fade of a peak flash
         bri_attack=0.5, bri_decay=0.4,            # glow smoothing (flash stays sharp)
         colour_speed=0.05, colour_flow=0.05,      # smooth colour drift (no beat jumps)
         colour_spread=0.4, colour_lerp=0.4, colour_sat=0.97,

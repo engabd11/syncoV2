@@ -1,10 +1,17 @@
-"""Extreme, rebuilt as a direct 'the song is a graph' renderer.
+"""Extreme, a direct 'the song is a graph' renderer.
 
 Each lamp reflects its own slice of the spectrum: a glow proportional to that
-band's loudness and a flash proportional to a fresh transient (peak) in it.
+band's loudness and a flash proportional to a fresh attack (peak) in it.
 Instruments separate by frequency across the room, peaks flash in proportion to
 their height, a sustained tone only glows (never strobes), and the beat grid is
 ignored entirely — see EffectEngine._render_extreme.
+
+The enrichment on top of the original v1.40 build (see the tests at the bottom):
+  * every hit of a STEADY groove keeps flashing (per-bin flux), not just the
+    first, surprising peak the slow-baseline transient would absorb, and
+  * the lamp<->spectrum map ROTATES over time, so every lamp takes turns on
+    every instrument (the whole room plays the song) while the spectrum stays
+    fully covered at every instant.
 """
 
 from __future__ import annotations
@@ -117,3 +124,43 @@ def test_fades_out_in_silence():
     for _ in range(60):  # audio stops
         out = eng.render(_frame([0.0] * MELBANK_BINS, energy=0.0), _DT)
     assert max(max(c) for c in out.values()) < 0.05  # rests dark
+
+
+def test_steady_groove_keeps_flashing_every_hit():
+    # A busy, steady pattern (each hit riding on sustained energy) must keep
+    # flashing on EVERY hit — the room follows the whole groove, not just the
+    # first, surprising one. The slow-baseline transient climbs into such a
+    # pattern and fades; the per-bin flux re-fires each attack, so the later hits
+    # stay as bright as the first.
+    eng = _eng()
+    rest = [0.55] * MELBANK_BINS
+    hit = [0.9] * MELBANK_BINS
+    for _ in range(20):  # settle the baseline into the sustained bed
+        eng.render(_frame(rest), _DT)
+    peaks = []
+    for _ in range(16):
+        out = eng.render(_frame(hit), _DT)  # the attack
+        peaks.append(max(max(c) for c in out.values()))
+        eng.render(_frame(rest), _DT)  # back to the bed
+    assert min(peaks[2:]) > 0.3  # every hit past warm-up still flashes
+    assert peaks[-1] > 0.7 * max(peaks)  # the groove does not fade out over time
+
+
+def test_spectrum_rotates_across_lamps_over_time():
+    # A FIXED low tone must not stay pinned to one lamp forever: the spectral map
+    # rotates, so over time different lamps respond to the same low band — every
+    # lamp takes turns — while the low band is always represented somewhere
+    # (full coverage) and the rotation is driven by time, never a beat grid.
+    low = [0.9] * 3 + [0.0] * (MELBANK_BINS - 3)
+    eng = _eng()
+    seen: set[int] = set()
+    lit_everywhere = True
+    for i in range(1400):  # ~28 s at 20 ms — several lamp-steps of rotation
+        out = eng.render(_frame(low), _DT)
+        vals = {cid: max(c) for cid, c in out.items()}
+        if i >= 40:  # after warm-up
+            seen.add(max(vals, key=vals.get))  # which lamp owns the low band now
+            if max(vals.values()) < 0.15:
+                lit_everywhere = False
+    assert len(seen) >= 3  # the low band visits multiple lamps around the room
+    assert lit_everywhere  # and is always lit somewhere (coverage preserved)
