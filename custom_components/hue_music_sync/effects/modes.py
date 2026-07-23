@@ -313,29 +313,31 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         # Deltas from Intense: base/floor 0 (was 0.05/0.10), beat_gain 2.1 (1.7),
         # melbank/energy/wave lowered for the dark base (0.42/0.16/0.55), and no
         # melbank floor (0.06). Everything else is Intense's value verbatim.
-        base=0.0, floor=0.0, bass_gain=0.16, beat_gain=2.1, beat_threshold=1.3,
+        base=0.0, floor=0.0, bass_gain=0.16, beat_gain=2.1, beat_threshold=1.0,
         spread=0.0, colour_speed=0.05, shimmer=0.0, colour_sat=0.97,
-        colour_beat_step=0.0, colour_lerp=0.55, energy_gain=0.13,
-        # GLOW + PEAKS (the user's spec): a continuous/sustained sound (vocals, a
-        # held tone, a song tail) must give a SMOOTH brightness that tracks how
-        # loud it is — never a strobe — and only real transient PEAKS should
-        # flash. So the "breathing" glow is heavily smoothed (bri_attack 0.12 vs
-        # Intense's 1.0) and leans on broadband loudness (energy up, melbank down)
-        # rather than the jumpy per-bin spectrum, and the spiky transient layers
-        # are pulled right back (spectral_pop 0.45->0.12, wave 0.42->0.20). A
-        # flash then only fires on a genuine peak: it needs a real transient
-        # (beat_threshold 1.0->1.3), a broadband/percussive shape (width_min up)
-        # and it barely fires with no beat at all (nobeat_flash down). The beat
-        # FLASH is added after the glow smoothing, so real drum hits stay sharp.
-        bri_attack=0.12, bri_decay=0.40,
+        colour_beat_step=0.0, colour_lerp=0.55, energy_gain=0.11,
+        # GLOW + PEAKS. The continuous "breathing" glow is smoothed a touch
+        # (bri_attack 0.28 vs Intense's 1.0) so a sustained sound gives a smooth
+        # brightness that tracks loudness rather than pumping per note, but the
+        # instrument-reactive layers are kept strong (spectral_pop, wave) so real
+        # drums and guitars still POP. The real "no strobing on non-beats" work is
+        # done by flux_gate (below), which mutes the offline track map's phantom
+        # scheduled beats, so the flash gates themselves stay open (Intense's
+        # beat_threshold / width_min) and real hits are not suppressed.
+        bri_attack=0.28, bri_decay=0.40,
         bri_slew=0.22, flash_decay=0.82,
-        wave_gain=0.20, wave_speed=2.4, wave_width=0.30,
+        wave_gain=0.35, wave_speed=2.4, wave_width=0.30,
         anticipation_ms=90, drop_boost=0.80, build_desat=0.50,
         role_mix=(1.0, 0.0, 0.0), hard_snap=True,
         highlight_quantile=0.18, weak_pulse=0.42, downbeat_pulse=0.55,
         colour_jump=0.16, colour_spread=0.22, full_room_accent=0.0,
-        melbank_gain=0.20, melbank_floor=0.0, colour_flow=0.05, spectral_pop=0.12,
-        salience_gamma=0.8, width_min=0.12, nobeat_flash=0.06, flux_gate=0.40,
+        melbank_gain=0.24, melbank_floor=0.0, colour_flow=0.05, spectral_pop=0.40,
+        salience_gamma=0.8, width_min=0.10, nobeat_flash=0.14,
+        # Onset-flux gate: a beat only counts where a real transient happened in
+        # the low OR mid band, so the track map's phantom grid beats (held tone /
+        # vocal / tail) are muted while real drums and guitars pass. THE strobing
+        # fix — it lets the flash gates above stay open without re-strobing.
+        flux_gate=0.30,
         predrop_depth=0.60, phrase_bars=4, phrase_colour_shift=0.06,
         pan_gain=0.5,
     ),
