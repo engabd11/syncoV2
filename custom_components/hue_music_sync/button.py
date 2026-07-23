@@ -16,7 +16,13 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    async_add_entities([HueSyncoPrewarmButton(entry)])
+    async_add_entities(
+        [
+            HueSyncoPrewarmButton(entry),
+            HueSyncoReanalyseButton(entry),
+            HueSyncoClearCacheButton(entry),
+        ]
+    )
 
 
 class HueSyncoPrewarmButton(HueSyncoLibraryEntity, ButtonEntity):
@@ -35,3 +41,41 @@ class HueSyncoPrewarmButton(HueSyncoLibraryEntity, ButtonEntity):
 
     async def async_press(self) -> None:
         await self.hass.services.async_call(DOMAIN, "prewarm_library", {})
+
+
+class HueSyncoReanalyseButton(HueSyncoLibraryEntity, ButtonEntity):
+    """Wipe the cache and re-analyse the WHOLE library from scratch.
+
+    Unlike "Analyse library" (which skips already-cached tracks), this forces a
+    full re-analysis — the way to upgrade every track map to a newer analysis
+    format. Runs in the background; progress shows on the "Library analysis"
+    sensor. ``prewarm_library`` with ``force: true``.
+    """
+
+    _attr_name = "Reanalyse library"
+    _attr_icon = "mdi:cached"
+
+    def __init__(self, entry: ConfigEntry) -> None:
+        super().__init__(entry, "reanalyse_button")
+
+    async def async_press(self) -> None:
+        await self.hass.services.async_call(
+            DOMAIN, "prewarm_library", {"force": True}
+        )
+
+
+class HueSyncoClearCacheButton(HueSyncoLibraryEntity, ButtonEntity):
+    """Delete the whole on-disk library cache (every analysed track map).
+
+    Frees the disk space; tracks re-analyse on their next play (or press
+    "Analyse library" to rebuild it). ``clear_library_cache`` service.
+    """
+
+    _attr_name = "Delete library cache"
+    _attr_icon = "mdi:delete-sweep"
+
+    def __init__(self, entry: ConfigEntry) -> None:
+        super().__init__(entry, "clear_cache_button")
+
+    async def async_press(self) -> None:
+        await self.hass.services.async_call(DOMAIN, "clear_library_cache", {})

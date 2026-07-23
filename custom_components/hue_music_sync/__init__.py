@@ -51,7 +51,7 @@ from .const import (
     SyncEffect,
     SyncMode,
 )
-from .coordinator import SyncManager, trackmap_cache_dir
+from .coordinator import SyncManager, trackmap_cache_dir, trackmap_cache_stats
 from .effects.modes import sanitize_auto_levels
 from .hue.bridge import HueBridge, HueBridgeError
 
@@ -62,6 +62,7 @@ SERVICE_DEACTIVATE = "deactivate"
 SERVICE_SET_OPTIONS = "set_options"
 SERVICE_PREWARM_LIBRARY = "prewarm_library"
 SERVICE_ANALYZE_TRACK = "analyze_track"
+SERVICE_CLEAR_LIBRARY_CACHE = "clear_library_cache"
 
 ATTR_RETRY_FAILED = "retry_failed"
 ATTR_URL = "url"
@@ -508,8 +509,13 @@ def _register_services(hass: HomeAssistant) -> None:
 
     async def _prewarm_library(call: ServiceCall) -> None:
         await _start_library_prewarm(
-            hass, retry_failed=bool(call.data.get(ATTR_RETRY_FAILED))
+            hass,
+            retry_failed=bool(call.data.get(ATTR_RETRY_FAILED)),
+            force=bool(call.data.get(ATTR_FORCE)),
         )
+
+    async def _clear_library_cache(call: ServiceCall) -> None:
+        await _clear_library_cache_impl(hass)
 
     async def _analyze_track(call: ServiceCall) -> None:
         hass.async_create_background_task(
@@ -523,7 +529,20 @@ def _register_services(hass: HomeAssistant) -> None:
         DOMAIN,
         SERVICE_PREWARM_LIBRARY,
         _prewarm_library,
-        vol.Schema({vol.Optional(ATTR_RETRY_FAILED, default=False): cv.boolean}),
+        vol.Schema(
+            {
+                vol.Optional(ATTR_RETRY_FAILED, default=False): cv.boolean,
+                # force: wipe the whole cache first and re-analyse every track
+                # (e.g. to upgrade all maps to a newer analysis format).
+                vol.Optional(ATTR_FORCE, default=False): cv.boolean,
+            }
+        ),
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_CLEAR_LIBRARY_CACHE,
+        _clear_library_cache,
+        vol.Schema({}),
     )
     hass.services.async_register(
         DOMAIN,
@@ -573,6 +592,64 @@ def _write_prewarm_state(hass: HomeAssistant, state: dict) -> None:
         os.replace(tmp, path)
     except OSError:
         _LOGGER.debug("Could not persist pre-warm state", exc_info=True)
+
+
+def _clear_trackmap_cache(hass: HomeAssistant) -> tuple[int, int]:
+    """Delete every cached track map + the sweep bookkeeping. Blocking (executor).
+
+    Returns ``(maps_removed, bytes_freed)`` — only the ``.npz`` maps are counted;
+    the small index/report/state files are removed too so nothing is left behind.
+    """
+    import os
+
+    meta = {"track_index.json", "analysis_report.json", "prewarm_state.json"}
+    removed = 0
+    freed = 0
+    try:
+        with os.scandir(trackmap_cache_dir(hass)) as it:
+            entries = list(it)
+    except OSError:
+        return 0, 0
+    for e in entries:
+        if not (e.name.endswith(".npz") or e.name in meta):
+            continue
+        try:
+            sz = e.stat().st_size
+        except OSError:
+            sz = 0
+        try:
+            os.unlink(e.path)
+        except OSError:
+            continue
+        if e.name.endswith(".npz"):
+            removed += 1
+            freed += sz
+    return removed, freed
+
+
+async def _clear_library_cache_impl(hass: HomeAssistant) -> tuple[int, int]:
+    """Wipe the whole library cache: on-disk maps + the shared index + status."""
+    from .coordinator import get_track_index
+
+    if hass.data.setdefault(DOMAIN, {}).get(DATA_PREWARM_RUNNING):
+        _LOGGER.warning(
+            "Clearing the library cache while a pre-warm sweep is running; the "
+            "sweep may re-create some maps — run it again after it finishes."
+        )
+    index = get_track_index(hass)
+    await index.ensure_loaded()
+    index.clear_all()
+    removed, freed = await hass.async_add_executor_job(_clear_trackmap_cache, hass)
+    _prewarm_update(
+        hass, status="never run", running=False, total=0, done=0,
+        analysed=0, ambient=0, failed=0, pending=None, last_run=None,
+        last_error=None, failed_tracks=[],
+    )
+    _LOGGER.info(
+        "Library cache cleared: %d maps removed (%.1f MB freed)",
+        removed, freed / (1024 * 1024),
+    )
+    return removed, freed
 
 
 def prewarm_status(hass: HomeAssistant) -> dict:
@@ -639,7 +716,7 @@ def _report_path(hass: HomeAssistant) -> str:
 
 
 async def _start_library_prewarm(
-    hass: HomeAssistant, retry_failed: bool = False
+    hass: HomeAssistant, retry_failed: bool = False, force: bool = False
 ) -> None:
     """Analyse the whole Music Assistant library into the on-disk cache.
 
@@ -650,7 +727,9 @@ async def _start_library_prewarm(
     where it left off and picks up newly added library tracks cheaply.
     ``retry_failed`` clears the persistent failure verdicts (and deletes
     ambient-tier maps) first, so everything problematic re-analyses — the way
-    to benefit from an analysis upgrade.
+    to benefit from an analysis upgrade. ``force`` goes further and wipes the
+    WHOLE cache first, so every track (even a usable, up-to-date map) is
+    re-analysed — the way to upgrade the entire library to a new map format.
     """
     from .audio.source import library_prewarm_items
     from .audio.trackmap import TrackMapper
@@ -702,6 +781,15 @@ async def _start_library_prewarm(
             track_index=index,
         )
         try:
+            if force:
+                # Full re-analysis: wipe every map + record so has_disk() misses
+                # on all of them and the whole library is analysed fresh.
+                index.clear_all()
+                await hass.async_add_executor_job(_clear_trackmap_cache, hass)
+                _LOGGER.info(
+                    "Library pre-warm: force — cleared the whole cache for a "
+                    "full re-analysis"
+                )
             if retry_failed:
                 cleared = index.clear_failures()
                 ambient = index.ambient_keys()

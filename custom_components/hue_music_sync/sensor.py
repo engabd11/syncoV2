@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
-from homeassistant.components.sensor import SensorEntity
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorStateClass,
+)
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import UnitOfInformation
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import _read_prewarm_state, prewarm_status
 from .const import SIGNAL_PREWARM
+from .coordinator import trackmap_cache_stats
 from .library_entity import HueSyncoLibraryEntity
 
 
@@ -18,7 +24,67 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    async_add_entities([HueSyncoPrewarmProgress(entry)])
+    async_add_entities(
+        [
+            HueSyncoPrewarmProgress(entry),
+            HueSyncoCacheSizeSensor(entry),
+            HueSyncoCachedSongsSensor(entry),
+        ]
+    )
+
+
+class _HueSyncoCacheStatSensor(HueSyncoLibraryEntity, SensorEntity):
+    """Base for the disk-cache stat sensors: polled + refreshed after a sweep."""
+
+    _attr_should_poll = True  # re-read the cache dir periodically
+
+    async def async_added_to_hass(self) -> None:
+        # Refresh immediately whenever the sweep/clear changes the cache.
+        self.async_on_remove(
+            async_dispatcher_connect(self.hass, SIGNAL_PREWARM, self._refresh)
+        )
+        await self.async_update()
+
+    @callback
+    def _refresh(self) -> None:
+        self.async_schedule_update_ha_state(force_refresh=True)
+
+    async def _stats(self) -> tuple[int, int]:
+        return await self.hass.async_add_executor_job(trackmap_cache_stats, self.hass)
+
+
+class HueSyncoCacheSizeSensor(_HueSyncoCacheStatSensor):
+    """Total size on disk of the analysed track-map cache."""
+
+    _attr_name = "Library cache size"
+    _attr_icon = "mdi:database"
+    _attr_device_class = SensorDeviceClass.DATA_SIZE
+    _attr_native_unit_of_measurement = UnitOfInformation.MEGABYTES
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_suggested_display_precision = 1
+
+    def __init__(self, entry: ConfigEntry) -> None:
+        super().__init__(entry, "cache_size")
+
+    async def async_update(self) -> None:
+        _count, size = await self._stats()
+        self._attr_native_value = round(size / (1024 * 1024), 2)
+
+
+class HueSyncoCachedSongsSensor(_HueSyncoCacheStatSensor):
+    """How many songs (track maps) are cached on disk."""
+
+    _attr_name = "Library cached songs"
+    _attr_icon = "mdi:music-note-multiple"
+    _attr_native_unit_of_measurement = "songs"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, entry: ConfigEntry) -> None:
+        super().__init__(entry, "cached_songs")
+
+    async def async_update(self) -> None:
+        count, _size = await self._stats()
+        self._attr_native_value = count
 
 
 class HueSyncoPrewarmProgress(HueSyncoLibraryEntity, SensorEntity):

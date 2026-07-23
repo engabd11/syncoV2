@@ -133,6 +133,12 @@ class TrackIndex:
             self._dirty = True
         return len(gone)
 
+    def clear_all(self) -> None:
+        """Drop every record — a full cache wipe. Persists an empty index."""
+        if self._tracks:
+            self._tracks.clear()
+            self._dirty = True
+
     def ambient_keys(self) -> list[str]:
         """Keys of every ambient (features-only) map, for a forced re-analysis."""
         return [k for k, v in self._tracks.items() if v.get("status") == "ambient"]

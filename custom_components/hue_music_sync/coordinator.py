@@ -153,6 +153,26 @@ def trackmap_cache_dir(hass) -> str:
     return hass.config.path("hue_music_sync", "trackmaps")
 
 
+def trackmap_cache_stats(hass) -> tuple[int, int]:
+    """(number of cached track maps, total bytes on disk). Blocking — executor."""
+    import os
+
+    count = 0
+    size = 0
+    try:
+        with os.scandir(trackmap_cache_dir(hass)) as it:
+            for e in it:
+                if e.name.endswith(".npz") and e.is_file():
+                    count += 1
+                    try:
+                        size += e.stat().st_size
+                    except OSError:
+                        pass
+    except OSError:
+        pass
+    return count, size
+
+
 DATA_TRACK_INDEX = "track_index"
 
 

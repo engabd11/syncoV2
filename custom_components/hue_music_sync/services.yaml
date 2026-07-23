@@ -219,6 +219,23 @@ prewarm_library:
       default: false
       selector:
         boolean:
+    force:
+      name: Full re-analysis
+      description: >-
+        Wipe the WHOLE cache first and re-analyse every track from scratch,
+        even tracks that already have a usable, up-to-date map. Use to upgrade
+        the entire library to a newer analysis format.
+      required: false
+      default: false
+      selector:
+        boolean:
+
+clear_library_cache:
+  name: Delete library cache
+  description: >-
+    Delete the whole on-disk track-map cache (every analysed song). Frees the
+    disk space; tracks re-analyse on their next play, or run "Pre-analyse music
+    library" to rebuild it.
 
 analyze_track:
   name: Analyse one track

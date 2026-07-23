@@ -176,8 +176,16 @@
         "retry_failed": {
           "name": "Retry failed tracks",
           "description": "Clear the recorded per-track failure verdicts (and ambient-only maps) first, so every previously failed track is analysed again."
+        },
+        "force": {
+          "name": "Full re-analysis",
+          "description": "Wipe the whole cache first and re-analyse every track from scratch, even up-to-date ones — to upgrade the entire library to a newer analysis format."
         }
       }
+    },
+    "clear_library_cache": {
+      "name": "Delete library cache",
+      "description": "Delete the whole on-disk track-map cache (every analysed song). Frees the disk space; tracks re-analyse on their next play, or run \"Pre-analyse music library\" to rebuild it."
     },
     "analyze_track": {
       "name": "Analyse one track",
