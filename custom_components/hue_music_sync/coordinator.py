@@ -1918,9 +1918,35 @@ class SyncManager:
                     "Stopping area %s so %s can take the single active stream",
                     other_id, keep_area_id,
                 )
-                await manager.stop_area(other_id)
+                # Already under the shared start/stop lock — use the unlocked
+                # variant so we don't deadlock re-acquiring it.
+                await manager._stop_area_locked(other_id)
+
+    def _start_stop_lock(self) -> asyncio.Lock:
+        """One integration-wide lock serialising every start/stop.
+
+        Rapid switch toggles (on/off/on pressed quickly) spawn concurrent
+        service-call tasks. Without serialising them a ``stop`` could pop and stop
+        a session while a racing ``start`` — having seen it gone — builds a new
+        one, or a session could be popped mid-``start()``: the stream keeps
+        running while ``is_active`` reports False, so the switch shows "off" while
+        the room stays synced and can't be turned off. Only one area streams at a
+        time anyway, so a single shared lock is the natural guard; the internal
+        ``*_locked`` helpers never re-acquire it, so there is no deadlock even
+        when ``_enforce_single_active_area`` stops areas on other managers.
+        """
+        data = self.hass.data.setdefault(DOMAIN, {})
+        lock = data.get("_start_stop_lock")
+        if lock is None:
+            lock = asyncio.Lock()
+            data["_start_stop_lock"] = lock
+        return lock
 
     async def start_area(self, area_id: str) -> None:
+        async with self._start_stop_lock():
+            await self._start_area_locked(area_id)
+
+    async def _start_area_locked(self, area_id: str) -> None:
         if area_id in self._sessions:
             return
         config = self.configs.get(area_id)
@@ -1963,6 +1989,10 @@ class SyncManager:
         async_dispatcher_send(self.hass, signal_area_update(area_id))
 
     async def stop_area(self, area_id: str) -> None:
+        async with self._start_stop_lock():
+            await self._stop_area_locked(area_id)
+
+    async def _stop_area_locked(self, area_id: str) -> None:
         session = self._sessions.pop(area_id, None)
         if session is not None:
             await session.stop()
