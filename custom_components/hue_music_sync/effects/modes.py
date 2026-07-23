@@ -211,6 +211,20 @@ class ModeParams:
     # no phantom/predicted beats. Full spectral coverage is preserved at every
     # instant; only *which lamp* shows *which* band cycles.
     rotate_rate: float = 0.0
+    # Extra rotation speed scaled by the frame's energy (0 = constant rate). The
+    # room rotates FASTER through busy/loud passages and settles in the quiet
+    # ones, so the instrument shuffle feels musical instead of a metronomic drift.
+    rotate_swing: float = 0.0
+    # Contrast expansion on a lamp's peak flash before it lights (1.0 = linear).
+    # >1 pushes small peaks much dimmer while leaving big ones bright, so peaks
+    # get RELATIVE brightness — a light tick barely lifts, a real hit slams — the
+    # room stops reading uniformly bright because "every peak is a full flash".
+    flash_gamma: float = 1.0
+    # Absolute-loudness floor on the flash (1.0 = ignore loudness). The peak-flash
+    # is scaled by ``floor + (1-floor)*salience`` so a hit in a whisper-quiet
+    # passage can't flash as bright as the same hit in a drop — the AGC'd melbank
+    # is *relative*, so without this a quiet tick and a loud slam look identical.
+    flash_loud_floor: float = 1.0
     # ONSET-FLUX gate (0 disables). A *scheduled* beat (from the offline track
     # map's tempo grid, or the causal tracker) fires on the grid even where no
     # real onset happened — an offline map force-fits a grid across the WHOLE
@@ -359,10 +373,13 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         bass_gain=0.0, beat_gain=0.0, beat_threshold=99.0, spread=0.0, shimmer=0.0,
         base=0.0, floor=0.0,
         melbank_gain=0.60, melbank_floor=0.02,   # GLOW: brightness ∝ band loudness (dark room)
-        spectral_pop=1.8,                         # PEAK FLASH: ∝ band attack height
+        spectral_pop=1.6,                         # PEAK FLASH gain (lowered so peaks don't all saturate)
+        flash_gamma=1.5,                          # expand peak contrast: small ticks stay dim, big hits slam
+        flash_loud_floor=0.30,                    # and scale by absolute loudness (quiet hit ≠ drop hit)
         mel_flux_gain=1.25,                       # groove: every real hit re-fires, not just novel peaks
         mel_flux_floor=0.12,                      # but ignore ambient/noise wash — only real attacks
-        rotate_rate=0.16,                         # spectrum rotates ~one lamp every 6 s
+        rotate_rate=0.20,                         # base spectrum rotation ~one lamp every 5 s
+        rotate_swing=0.45,                        # + faster through busy passages (instruments move more)
         energy_gain=0.06,                         # a touch of whole-room loudness lift (kept low)
         flash_decay=0.70,                         # per-frame fade of a peak flash
         bri_attack=0.5, bri_decay=0.4,            # glow smoothing (flash stays sharp)

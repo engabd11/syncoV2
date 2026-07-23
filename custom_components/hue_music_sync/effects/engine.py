@@ -730,12 +730,14 @@ class EffectEngine:
         n = len(self._rank_ids)
         usepan = p.pan_gain > 0.0 and bool(pan) and bool(mel) and len(pan) >= len(mel)
 
-        # Advance the spectral rotation: grid-free (time only, scaled by the music
-        # gate so it freezes in silence), so it adds no phantom/predicted beats.
-        # The whole low→high map slides one lamp at a time around the room — every
-        # lamp takes turns on every instrument — while all bands stay covered.
-        if n > 1 and p.rotate_rate > 0.0:
-            self._spectral_rot = (self._spectral_rot + p.rotate_rate * dt * music_gate) % n
+        # Advance the spectral rotation: grid-free (time-driven, faster through
+        # busy passages via rotate_swing, frozen in silence by the music gate), so
+        # it adds no phantom/predicted beats. The whole low→high map slides around
+        # the room — every lamp takes turns on every instrument — while all bands
+        # stay covered at every instant.
+        rot_rate = p.rotate_rate + p.rotate_swing * frame.energy
+        if n > 1 and rot_rate > 0.0:
+            self._spectral_rot = (self._spectral_rot + rot_rate * dt * music_gate) % n
         rot = self._spectral_rot
 
         def _pan_w(k: int, side: float) -> float:
@@ -787,17 +789,24 @@ class EffectEngine:
 
         colour_lerp = p.colour_lerp
         have_bands = bool(mel) and bool(bands)
+        # Absolute-loudness scale for the flash: a hit in a quiet passage can't
+        # flash as bright as one in a drop (the melbank is AGC-relative). 1.0 when
+        # the producer doesn't compute salience, so nothing changes for those.
+        loud = getattr(frame, "salience", 1.0)
+        loud_scale = p.flash_loud_floor + (1.0 - p.flash_loud_floor) * loud
         out: dict[int, RGB] = {}
         for rank_i, cid in enumerate(self._rank_ids):
             info = self.cmap[cid]
             side = info["side"]
             if have_bands:
                 # Rotating band assignment with a crossfade between the two bands
-                # the lamp is straddling, so redistribution reads as smooth
-                # movement rather than a jarring reshuffle.
+                # the lamp is straddling. Smoothstep the crossfade so a lamp sits
+                # crisply ON a band, then moves quickly to the next — separation
+                # stays sharp even as the map rotates.
                 pos = (rank_i + rot) % n
                 b0 = int(pos) % n
                 frac = pos - int(pos)
+                frac = frac * frac * (3.0 - 2.0 * frac)
                 b1 = (b0 + 1) % n
                 lo0, hi0 = bands[b0]
                 lo1, hi1 = bands[b1]
@@ -808,7 +817,10 @@ class EffectEngine:
                 # band envelope so the room still lives; no rotation, no flash.
                 level = _melbank_drive(frame, self._env, info, p.pan_gain)
                 peak = 0.0
-            flash = peak * p.spectral_pop * music_gate  # proportional to peak height
+            # Peak flash: expand the contrast (gamma) so small ticks stay dim and
+            # big hits slam, then scale by absolute loudness — peaks read with
+            # RELATIVE brightness instead of every one saturating to full.
+            flash = (peak ** p.flash_gamma) * p.spectral_pop * music_gate * loud_scale
             if flash > lf.get(cid, 0.0):
                 lf[cid] = flash
             # Smoothed glow target = band loudness + a little whole-room energy.
