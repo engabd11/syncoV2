@@ -134,7 +134,7 @@ def test_fade_out_beats_brighten_with_the_beat_height():
     # lifts the room.
     def peak_at(loud: float) -> float:
         eng = EffectEngine(_channels(5))
-        eng.set_mode(SyncMode.EXTREME)
+        eng.set_mode(SyncMode.INTENSE)
         bands = lambda m: {"sub_bass": m, "bass": m, "low_mid": m * 0.5,
                            "mid": m * 0.4, "high": m * 0.3}
         for _ in range(40):  # settle the loudness envelope at this level
@@ -168,12 +168,11 @@ def test_metadata_source_emits_no_beats():
 
 # --- comfort: beats swing smoothly, not as 1-frame strobes -----------------
 
-@pytest.mark.parametrize("mode", [SyncMode.HIGH, SyncMode.INTENSE, SyncMode.EXTREME])
+@pytest.mark.parametrize("mode", [SyncMode.HIGH, SyncMode.INTENSE])
 def test_beats_swing_smoothly_instead_of_strobing(mode):
-    # All club modes keep the comfort slew limiter: each light's per-frame
+    # High/Intense keep the comfort slew limiter: each light's per-frame
     # brightness RISE is capped at bri_slew, so a beat reads as a fast dim<->bright
-    # swing rather than a 1-frame strobe, while peaks still reach bright. (Extreme
-    # is a harder Intense — snappier, but still a swing, not an instant strobe.)
+    # swing rather than a 1-frame strobe, while peaks still reach bright.
     eng = EffectEngine(_channels(5))
     eng.set_mode(mode)
     slew = MODE_PARAMS[mode].bri_slew
@@ -191,67 +190,6 @@ def test_beats_swing_smoothly_instead_of_strobing(mode):
                 peak = max(peak, m)
     assert worst_rise <= slew + 1e-6  # no harsh single-frame jump
     assert peak > 0.7  # but beats still swing up to bright
-
-
-# --- selectivity: only standout beats flash --------------------------------
-
-def test_extreme_fires_on_ordinary_and_standout_beats():
-    # Club style: every beat punches (ordinary beats too), the standouts hardest.
-    eng = EffectEngine(_channels(5))
-    eng.set_mode(SyncMode.EXTREME)
-    _fill_window(eng)
-
-    # Ordinary off-downbeat (accent 0.3): still gives a visible punch now.
-    pre, tick = _play_beat(eng, 0.3, 1)
-    assert any(max(tick[c]) > max(pre[c]) + 0.10 for c in pre)
-
-    # Standout beat (accent 1.0, the bar's "one"): the room slams much harder.
-    pre, tick = _play_beat(eng, 1.0, 0)
-    assert any(max(tick[c]) > max(pre[c]) + 0.3 for c in pre)
-
-
-def test_extreme_slams_bright_on_beats_and_falls_back_dark():
-    # The club bright<->dark swing the user asked for: a beat slams the room
-    # bright, and between beats it falls back toward dark (a low continuous
-    # flicker, not a lit plateau), going fully dark in real silence.
-    eng = EffectEngine(_channels(5))
-    eng.set_mode(SyncMode.EXTREME)
-    _fill_window(eng)
-    _, tick = _play_beat(eng, 1.0, 0)  # a big beat
-    assert max(max(c) for c in tick.values()) > 0.6  # slams bright
-
-    out = None
-    for _ in range(18):  # flash decays, no new beat, music still playing
-        out = eng.render(_quiet(), _DT, beatgrid=_grid(False, phase=0.6))
-    assert max(max(c) for c in out.values()) < 0.45  # fell back toward dark
-
-    # Genuine silence (paused / between tracks): the continuous layer fades out
-    # with the loudness gate and the room rests fully dark.
-    silent = AnalysisFrame(
-        bands={n: 0.0 for n in ("sub_bass", "bass", "low_mid", "mid", "high")},
-        energy=0.0,
-    )
-    for _ in range(30):
-        out = eng.render(silent, _DT, beatgrid=_grid(False, phase=0.6))
-    assert max(max(c) for c in out.values()) < 0.08  # dark in silence
-
-
-# --- colour jumps every beat -----------------------------------------------
-
-def test_extreme_colour_jumps_on_every_beat():
-    # Colour is the primary motion: each beat advances the palette a lot more
-    # than a beatless frame's slow drift.
-    eng = EffectEngine(_channels(5))
-    eng.set_mode(SyncMode.EXTREME)
-    for _ in range(8):
-        eng.render(_quiet(), _DT, beatgrid=_grid(False, phase=0.5))
-    before = eng.colour_phase
-    eng.render(_quiet(), _DT, beatgrid=_grid(False, phase=0.5))  # no beat
-    drift = eng.colour_phase - before
-    before = eng.colour_phase
-    eng.render(_quiet(), _DT, beatgrid=_grid(True, accent=0.8))  # a beat
-    jump = eng.colour_phase - before
-    assert jump > drift + 0.10  # a real spectrum-spanning step on the beat
 
 
 def test_high_keeps_the_spatial_role_spread():

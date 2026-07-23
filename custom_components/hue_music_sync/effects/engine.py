@@ -31,6 +31,8 @@ from .modes import (
     ROLE_BASS,
     ROLE_MID,
     ROLE_VOCAL,
+    _melbank_drive,
+    _pan_weighted_mean,
     accent_knee,
     assign_roles,
     band_for_rank,
@@ -631,7 +633,98 @@ class EffectEngine:
             # smoothing pipeline; it still advances colour_phase for its ember glow.
             self.colour_phase += self.active_params.colour_speed * dt
             return self._fireworks.render(self, frame, dt)
+        if self.active_params.graph_reactive:
+            # Extreme: a clean, direct "the song is a graph" renderer that ignores
+            # the beat grid entirely (so no phantom/predicted beats) and reacts to
+            # the actual spectrum — see _render_extreme.
+            return self._render_extreme(frame, dt)
         return self._render_music(frame, dt, beatgrid, structure)
+
+    def _render_extreme(self, frame: AnalysisFrame, dt: float) -> dict[int, RGB]:
+        """Extreme, rebuilt from scratch: **the song is a graph** and each lamp
+        reflects its own slice of that graph.
+
+        The lamps are spread left→right across the audio spectrum (LedFx
+        "Wavelength"): the leftmost rides the lowest frequencies, the rightmost
+        the highest, so instruments naturally SEPARATE in space — a kick lights
+        the low lamps, a snare/guitar the mids, a cymbal the highs. Stereo pan
+        pulls each lamp's slice toward its side of the room, so a panned part
+        lights the matching side (the 3D/spatial distribution).
+
+        Each lamp's brightness is two proportional parts:
+
+        * a smooth GLOW = that band's loudness (how high the graph sits there),
+          so the room tracks the music going louder/quieter, and
+        * a PEAK FLASH = a fresh transient in that band (how far the graph just
+          jumped up), sized in direct proportion — a big peak flashes bright, a
+          small one dim — added on top of the smoothed glow so it stays sharp.
+
+        There is NO beat grid, no scheduled/predicted beat, no onset gating: a
+        held tone or vocal has no fresh transient so it only glows (never
+        strobes), a song tail simply fades as its loudness does, and every real
+        hit — at any tempo — flashes exactly as big as it actually is.
+        """
+        p = self.active_params
+        self._update_env(frame)
+        self._update_mel_transient(frame)
+        music_gate = min(1.0, self._loud / _SILENCE_GATE) if _SILENCE_GATE > 0 else 1.0
+        # Colour: a smooth spatial gradient that only DRIFTS (loudness-scaled),
+        # never jumps on a beat — colour never strobes, brightness carries the beat.
+        self.colour_phase += (p.colour_speed + p.colour_flow * frame.energy) * dt * music_gate
+
+        tr = self._mel_transient  # per-bin fresh-attack transients (the peaks)
+        pan = getattr(frame, "pan", None)
+        lf = self._light_flash
+        for cid in lf:  # per-lamp peak flash fades each frame
+            lf[cid] *= p.flash_decay
+
+        colour_lerp = p.colour_lerp
+        out: dict[int, RGB] = {}
+        for ch in self.channels:
+            cid = ch.channel_id
+            info = self.cmap[cid]
+            lo, hi = info["mel_lo"], info["mel_hi"]
+            # GLOW: this lamp's band loudness (pan-weighted toward its side).
+            level = _melbank_drive(frame, self._env, info, p.pan_gain)
+            # PEAK: a fresh transient in this lamp's band, pan-weighted the same.
+            peak = 0.0
+            if tr and hi > lo:
+                if p.pan_gain > 0.0 and pan and len(pan) >= hi:
+                    side = 2.0 * info["nx"] - 1.0
+                    peak = _pan_weighted_mean(tr, pan, lo, hi, side, p.pan_gain)
+                else:
+                    peak = sum(tr[lo:hi]) / (hi - lo)
+            flash = peak * p.spectral_pop * music_gate  # proportional to peak height
+            if flash > lf.get(cid, 0.0):
+                lf[cid] = flash
+            # Smoothed glow target = band loudness + a little whole-room energy.
+            target = (
+                p.melbank_floor
+                + p.melbank_gain * level * music_gate
+                + p.energy_gain * self._energy_env
+            )
+            prev_c, prev_b = self._state[cid]
+            alpha = p.bri_attack if target >= prev_b else p.bri_decay
+            new_b = prev_b + (target - prev_b) * alpha
+            # Colour by spectral position (spatial gradient) + the drift phase.
+            cpos = info["xrank"] * p.colour_spread + self.colour_phase
+            tgt_c = self.palette.sample(cpos)
+            m = max(tgt_c)
+            tgt_c = (tgt_c[0] / m, tgt_c[1] / m, tgt_c[2] / m) if m > 1e-6 else (0.0, 0.0, 0.0)
+            nc = (
+                prev_c[0] + (tgt_c[0] - prev_c[0]) * colour_lerp,
+                prev_c[1] + (tgt_c[1] - prev_c[1]) * colour_lerp,
+                prev_c[2] + (tgt_c[2] - prev_c[2]) * colour_lerp,
+            )
+            self._state[cid] = (nc, new_b)
+            if p.colour_sat < 1.0:
+                s = p.colour_sat
+                nc = (nc[0] * s + (1 - s), nc[1] * s + (1 - s), nc[2] * s + (1 - s))
+            cval = max(nc)
+            # Glow (smoothed) + peak flash (sharp), theme-faithful value, master.
+            b = min(1.0, new_b + lf.get(cid, 0.0)) * (0.35 + 0.65 * cval) * self.brightness
+            out[ch.channel_id] = (nc[0] * b, nc[1] * b, nc[2] * b)
+        return out
 
     def _spawn_waves(
         self,

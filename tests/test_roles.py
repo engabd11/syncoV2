@@ -226,11 +226,11 @@ def test_dynamic_roles_skip_absent_instruments_and_follow_present_ones():
     assert full_counts[ROLE_MID] >= 1 and full_counts[ROLE_VOCAL] >= 1
 
 
-def test_extreme_sub_threshold_onset_stays_dimmer_than_a_big_kick():
-    # Club Extreme reacts to far more now, but a genuinely sub-threshold onset
-    # still must not flash like a real kick - the big kick slams much brighter.
+def test_sub_threshold_onset_stays_dimmer_than_a_big_kick():
+    # A genuinely sub-threshold onset must not flash like a real kick - the big
+    # kick slams much brighter. (Intense; Extreme now runs the graph renderer.)
     eng = EffectEngine(_channels(4))
-    eng.set_mode(SyncMode.EXTREME)
+    eng.set_mode(SyncMode.INTENSE)
     eng.render(_quiet(), _DT)
     small = _peak_per_cid(eng, _kick(strength=0.6))  # below the fire floor
     for _ in range(30):

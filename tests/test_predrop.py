@@ -70,13 +70,13 @@ def _scheduled_countdown(n: int, window_s: float = 2.0) -> list[StructureState]:
 
 
 def test_scheduled_predrop_dims_then_detonates():
-    eng = _engine(SyncMode.EXTREME)
+    eng = _engine(SyncMode.INTENSE)
     warm = _run(eng, _steady(150), collect=True)  # settle the continuous layer
     base = sum(warm[-25:]) / 25
 
     dip = _run(eng, _scheduled_countdown(100), collect=True)  # 2 s countdown
     held = min(dip[-25:])  # deepest pull-down in the final half second
-    assert held < base * 0.5  # the room clearly pulls in (EXTREME depth 0.85)
+    assert held < base * 0.6  # the room clearly pulls in (INTENSE depth 0.60)
 
     # The detonation is a slew-limited fast SWING (by design, never a 1-frame
     # strobe): measure its peak over the following ~0.2 s.
@@ -88,12 +88,12 @@ def test_scheduled_predrop_dims_then_detonates():
 
 def test_drop_swell_bigger_after_held_predrop():
     # The same drop lands bigger when it detonates out of a held pull-down.
-    cold = _engine(SyncMode.EXTREME)
+    cold = _engine(SyncMode.INTENSE)
     _run(cold, _steady(150))
     cold.render(_frame(), _DT, structure=StructureState(drop_now=True))
     cold_swell = cold._swell
 
-    held = _engine(SyncMode.EXTREME)
+    held = _engine(SyncMode.INTENSE)
     _run(held, _steady(150))
     _run(held, _scheduled_countdown(100))
     held.render(_frame(), _DT, structure=StructureState(drop_now=True))
@@ -112,7 +112,7 @@ def test_subtle_is_provably_inert():
 def test_heuristic_flicker_never_commits():
     # drop_imminent flapping on/off (a jittery build detector) must never
     # reach the confirm streak, so the envelope stays at zero.
-    eng = _engine(SyncMode.EXTREME)
+    eng = _engine(SyncMode.INTENSE)
     _run(eng, _steady(150))
     states = [
         StructureState(drop_imminent=(i % 3 == 0))  # never 10 in a row
@@ -124,7 +124,7 @@ def test_heuristic_flicker_never_commits():
 
 
 def test_heuristic_timeout_releases_and_blocks_recommit():
-    eng = _engine(SyncMode.EXTREME)
+    eng = _engine(SyncMode.INTENSE)
     _run(eng, _steady(150))
     # A persistent heuristic flag commits after the confirm streak...
     _run(eng, [StructureState(drop_imminent=True) for _ in range(50)])
@@ -141,7 +141,7 @@ def test_heuristic_timeout_releases_and_blocks_recommit():
 def test_scheduled_path_bypasses_confirm_and_refractory():
     # The map is trusted: even during a heuristic refractory, a scheduled ETA
     # commits immediately.
-    eng = _engine(SyncMode.EXTREME)
+    eng = _engine(SyncMode.INTENSE)
     _run(eng, _steady(150))
     _run(eng, [StructureState(drop_imminent=True) for _ in range(250)])  # timeout
     assert eng._predrop_block_until > eng.time

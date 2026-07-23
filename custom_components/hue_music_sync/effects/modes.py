@@ -46,17 +46,22 @@ The ladder — same pattern throughout, each rung harder, darker and more unifie
   the beat over a few frames (a slew-limited swell, not a 1-frame strobe) and the
   colour shifts each hit — over a soft glow that never quite goes black.
   Eye-safety limiter bypassed (see safety docs).
-* **Extreme** — Intense SCALED to a wider range: a more intense Intense. It
-  reacts, swings and colours *exactly* like Intense (same reactivity, same
-  onset thresholds, same smooth swing, same breathing) — nothing about the
-  behaviour changes — but the range it plays over is stretched: a DARKER base
-  (floor 0 and a dimmer continuous glow, so quiet passages and the gaps between
-  hits fall dim instead of Intense's soft glow) and a HIGHER flash ceiling
-  (bigger beat pop) so the hits slam harder out of that dark. Because that dark
-  base would otherwise reveal the continuous layer pumping on non-beat content,
-  the breathing layer is smoothed and beat-less passages barely flash, so vocals,
-  intros/outros and fading beats stay calm instead of strobing. The eye-safety
-  limiter is bypassed entirely (see safety docs). Intense itself is unchanged.
+* **Extreme** — a ground-up rebuild that treats *the song as a graph* and reacts
+  to its shape directly, ignoring the beat grid entirely (``graph_reactive``, see
+  :meth:`EffectEngine._render_extreme`). Every lamp owns a slice of the spectrum
+  by its left-right position — low frequencies on one side, highs on the other —
+  so instruments **separate in space**: a kick lights the low lamps, a snare the
+  low-mids, a lead the mids, a cymbal the highs, all at once. Each lamp carries
+  two things: a **glow** proportional to how loud its band is right now, and a
+  **flash** proportional to a fresh transient (a *peak*) in that band — higher
+  peak, brighter flash; lower peak, dimmer flash. A sustained tone (a held vocal,
+  a pad) therefore only *glows* in proportion to its loudness and never strobes,
+  because a steady graph has no fresh peaks; only genuine attacks flash. There is
+  no beat grid, no highlight selection and no phantom/predicted beats — the room
+  is a live readout of the actual spectrum, so intros, grooves, vocals and
+  fade-outs all read honestly. Colour drifts smoothly across the spectrum rather
+  than jumping. The eye-safety limiter is bypassed entirely (see safety docs).
+  Intense and every lower rung are unchanged.
 """
 
 from __future__ import annotations
@@ -173,6 +178,14 @@ class ModeParams:
     # The bass-content weight floor in kick_flash (was a hard-coded 0.4):
     # how much a bass-less onset may still flash.
     kick_bass_floor: float = 0.40
+    # When set, the engine renders this mode with the dedicated "song as a graph"
+    # path (EffectEngine._render_extreme) instead of the beat-grid renderer: each
+    # lamp reflects its own slice of the spectrum (glow = band loudness, flash =
+    # band transient, both proportional), instruments separate by frequency across
+    # the room, and the beat grid is ignored entirely (no phantom/predicted
+    # beats). Only Extreme uses it; here melbank_gain is the glow gain and
+    # spectral_pop the peak-flash gain.
+    graph_reactive: bool = False
     # ONSET-FLUX gate (0 disables). A *scheduled* beat (from the offline track
     # map's tempo grid, or the causal tracker) fires on the grid even where no
     # real onset happened — an offline map force-fits a grid across the WHOLE
@@ -300,46 +313,34 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         predrop_depth=0.60, phrase_bars=4, phrase_colour_shift=0.06,
         pan_gain=0.5,
     ),
-    # Intense, SCALED to a wider range — a more intense Intense. EVERY behaviour
-    # is Intense's, byte-for-byte (the same smooth swing, the same reactivity and
-    # onset thresholds, the same colour jumps and breathing) so it reacts and
-    # FEELS exactly like Intense — only the range it plays over is stretched: a
-    # DARKER base (floor 0 and a lower continuous glow, so quiet passages and the
-    # gaps between hits fall dim instead of Intense's soft glow) and a HIGHER
-    # flash ceiling (bigger beat_gain) so beats slam harder out of that dark.
-    # The eye-safety limiter is bypassed entirely (coordinator._bypass_limiter,
-    # see the README warning). Intense itself is unchanged.
+    # REBUILT FROM SCRATCH — "the song is a graph." Extreme uses its own direct
+    # renderer (graph_reactive → EffectEngine._render_extreme) that ignores the
+    # beat grid entirely and reacts to the actual spectrum, so there are no
+    # phantom / predicted beats. Each lamp reflects its own slice of the audio:
+    #   * a smooth GLOW proportional to that band's loudness (melbank_gain), so
+    #     the room tracks the music going louder/quieter and a held tone / vocal
+    #     just glows instead of strobing, and a song tail simply fades out, and
+    #   * a PEAK FLASH proportional to a fresh transient in that band
+    #     (spectral_pop) — a big peak flashes bright, a small one dim.
+    # The lamps are spread left→right across the spectrum (+ stereo pan), so
+    # instruments SEPARATE in 3D space: kick on the low lamps, snare/guitar on the
+    # mids, cymbals on the highs, panned parts on their side. Colour is a smooth
+    # spatial gradient that only drifts (never jumps), so colour never strobes.
+    # The eye-safety limiter is bypassed (coordinator._bypass_limiter, README
+    # warning). Only the fields the graph renderer reads are set below.
     SyncMode.EXTREME: ModeParams(
-        # Deltas from Intense: base/floor 0 (was 0.05/0.10), beat_gain 2.1 (1.7),
-        # melbank/energy/wave lowered for the dark base (0.42/0.16/0.55), and no
-        # melbank floor (0.06). Everything else is Intense's value verbatim.
-        base=0.0, floor=0.0, bass_gain=0.16, beat_gain=2.1, beat_threshold=1.0,
-        spread=0.0, colour_speed=0.05, shimmer=0.0, colour_sat=0.97,
-        colour_beat_step=0.0, colour_lerp=0.55, energy_gain=0.11,
-        # GLOW + PEAKS. The continuous "breathing" glow is smoothed a touch
-        # (bri_attack 0.28 vs Intense's 1.0) so a sustained sound gives a smooth
-        # brightness that tracks loudness rather than pumping per note, but the
-        # instrument-reactive layers are kept strong (spectral_pop, wave) so real
-        # drums and guitars still POP. The real "no strobing on non-beats" work is
-        # done by flux_gate (below), which mutes the offline track map's phantom
-        # scheduled beats, so the flash gates themselves stay open (Intense's
-        # beat_threshold / width_min) and real hits are not suppressed.
-        bri_attack=0.28, bri_decay=0.40,
-        bri_slew=0.22, flash_decay=0.82,
-        wave_gain=0.35, wave_speed=2.4, wave_width=0.30,
-        anticipation_ms=90, drop_boost=0.80, build_desat=0.50,
-        role_mix=(1.0, 0.0, 0.0), hard_snap=True,
-        highlight_quantile=0.18, weak_pulse=0.42, downbeat_pulse=0.55,
-        colour_jump=0.16, colour_spread=0.22, full_room_accent=0.0,
-        melbank_gain=0.24, melbank_floor=0.0, colour_flow=0.05, spectral_pop=0.40,
-        salience_gamma=0.8, width_min=0.10, nobeat_flash=0.14,
-        # Onset-flux gate: a beat only counts where a real transient happened in
-        # the low OR mid band, so the track map's phantom grid beats (held tone /
-        # vocal / tail) are muted while real drums and guitars pass. THE strobing
-        # fix — it lets the flash gates above stay open without re-strobing.
-        flux_gate=0.30,
-        predrop_depth=0.60, phrase_bars=4, phrase_colour_shift=0.06,
-        pan_gain=0.5,
+        graph_reactive=True,
+        # Beat-path fields the graph renderer never reads (kept 0 / inert).
+        bass_gain=0.0, beat_gain=0.0, beat_threshold=99.0, spread=0.0, shimmer=0.0,
+        base=0.0, floor=0.0,
+        melbank_gain=0.72, melbank_floor=0.02,   # GLOW: brightness ∝ band loudness
+        spectral_pop=1.8,                         # PEAK FLASH: ∝ band transient height
+        energy_gain=0.12,                         # a little whole-room loudness lift
+        flash_decay=0.72,                         # per-frame fade of a peak flash
+        bri_attack=0.5, bri_decay=0.4,            # glow smoothing (flash stays sharp)
+        colour_speed=0.05, colour_flow=0.05,      # smooth colour drift (no beat jumps)
+        colour_spread=0.4, colour_lerp=0.4, colour_sat=0.97,
+        pan_gain=0.6,                             # stereo → light the matching side
     ),
 }
 

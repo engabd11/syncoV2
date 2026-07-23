@@ -138,15 +138,6 @@ def test_pulse_weight_non_highlights_still_tick_in_intense():
     assert pulse_weight(p, 0.0, 1, highlight=True) > 0.4
 
 
-def test_extreme_fires_every_beat_downbeat_hardest():
-    # Extreme keeps Intense's pulse shaping (it is a harder Intense): every beat
-    # ticks, the downbeat lands hard, and the top accents slam anywhere in the bar.
-    p = MODE_PARAMS[SyncMode.EXTREME]
-    assert 0.0 < pulse_weight(p, 0.3, 1, highlight=False) < 0.4  # ordinary beat ticks
-    assert pulse_weight(p, 0.3, 0, highlight=False) >= 0.55  # the "one" lands hard
-    assert pulse_weight(p, 0.95, 2, highlight=True) > 0.5  # top accents slam anywhere
-
-
 # --- live accent model -------------------------------------------------------
 
 def _click_track(bpm: float, seconds: float) -> np.ndarray:

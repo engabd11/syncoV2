@@ -78,7 +78,7 @@ def _run(eng: EffectEngine, frames, grids=None) -> float:
 def test_conf_stays_low_on_narrow_onsets():
     # Vowel-like onsets (width ~0.12, below the kick evidence span) firing
     # repeatedly with no tempo lock: confidence must not build.
-    eng = _engine(SyncMode.EXTREME)
+    eng = _engine(SyncMode.INTENSE)
     for i in range(300):
         beat = i % 25 == 0  # an irregular-ish stream of false "beats"
         eng.render(_frame(bass_beat=beat, onset_width=0.12), _DT)
@@ -86,7 +86,7 @@ def test_conf_stays_low_on_narrow_onsets():
 
 
 def test_conf_rises_fast_while_locked():
-    eng = _engine(SyncMode.EXTREME)
+    eng = _engine(SyncMode.INTENSE)
     grid = _locked_grid()
     for _ in range(50):  # one second of locked grid
         eng.render(_frame(), _DT, beatgrid=grid)
@@ -96,7 +96,7 @@ def test_conf_rises_fast_while_locked():
 def test_conf_recovers_within_a_few_real_kicks():
     # An unlocked intro with real (broadband) kicks: a handful of hits must
     # restore most of the confidence, so real music never feels muted.
-    eng = _engine(SyncMode.EXTREME)
+    eng = _engine(SyncMode.INTENSE)
     for i in range(100):
         kick = i % 25 == 0  # 4 kicks over 2 s
         eng.render(_frame(bass_beat=kick, onset_width=0.55), _DT)
@@ -104,7 +104,7 @@ def test_conf_recovers_within_a_few_real_kicks():
 
 
 def test_conf_decays_when_the_beat_stops():
-    eng = _engine(SyncMode.EXTREME)
+    eng = _engine(SyncMode.INTENSE)
     grid = _locked_grid()
     for _ in range(100):
         eng.render(_frame(), _DT, beatgrid=grid)
@@ -122,10 +122,10 @@ def test_extreme_rejects_narrow_noise_but_fires_on_real_kicks():
     # beat threshold and the low nobeat floor reject them outright — while a
     # broadband kick still slams.
     narrow = [_frame(bass_beat=(i % 25 == 0), onset_width=0.12) for i in range(100)]
-    assert _run(_engine(SyncMode.EXTREME), narrow) <= 0.05  # noise/vocals: rejected
+    assert _run(_engine(SyncMode.INTENSE), narrow) <= 0.05  # noise/vocals: rejected
 
     real = [_frame(bass_beat=(i % 25 == 0), onset_width=0.55) for i in range(100)]
-    assert _run(_engine(SyncMode.EXTREME), real) > 0.4  # broadband kicks fire hard
+    assert _run(_engine(SyncMode.INTENSE), real) > 0.4  # broadband kicks fire hard
 
 
 def test_locked_scheduled_path_is_untouched():
@@ -137,11 +137,11 @@ def test_locked_scheduled_path_is_untouched():
     grid.predicted_beat = True
     grid.accent_now = 1.0
 
-    fresh = _engine(SyncMode.EXTREME)  # zero confidence
+    fresh = _engine(SyncMode.INTENSE)  # zero confidence
     fresh.render(beat, _DT, beatgrid=grid)
     fresh_peak = max(fresh._light_flash.values())
 
-    charged = _engine(SyncMode.EXTREME)
+    charged = _engine(SyncMode.INTENSE)
     steady = _locked_grid()
     for _ in range(150):
         charged.render(_frame(), _DT, beatgrid=steady)
