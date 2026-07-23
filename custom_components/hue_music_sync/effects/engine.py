@@ -494,8 +494,7 @@ class EffectEngine:
 
     @staticmethod
     def _visible_event(
-        frame: AnalysisFrame, beatgrid: BeatGrid | None, det_gate: float = 1.0,
-        width_sched: bool = False,
+        frame: AnalysisFrame, beatgrid: BeatGrid | None, det_gate: float = 1.0
     ) -> tuple[float, float, bool]:
         """(strength, bass, grid_locked) of the beat driving visible accents.
 
@@ -509,15 +508,12 @@ class EffectEngine:
         slightly-misaligned grid (common on a replayed track map) rejected the
         real beats and the show went dead while the audio was clearly pumping.
 
-        ``det_gate`` (the mode's onset-width gate) attenuates the *detected*
-        path: a narrowband onset (a sung vowel, a swelling tone) that slipped
-        past the analyzer's shape guards is muted here. Normally scheduled grid
-        beats pass untouched (they were verified by the tempo model), but with
-        ``width_sched`` (the flux-gated club modes) the scheduled path is
-        width-gated too: an offline track map force-fits a grid across the whole
-        song, so its scheduled beats are NOT trustworthy on a held tone / vocal
-        — width-gating them mutes a narrowband (vocal) grid beat while a
-        broadband drum/guitar beat still passes.
+        ``det_gate`` (the mode's onset-width gate) attenuates only the
+        *detected* path: a narrowband onset (a sung vowel, a swelling tone)
+        that slipped past the analyzer's shape guards is muted here, while
+        scheduled grid beats — verified by the tempo model, not by this
+        frame's spectrum — pass untouched (the flux-gated modes instead reality-
+        check every beat by onset flux in EffectEngine._render_music).
         """
         bass = max(frame.bands.get("sub_bass", 0.0), frame.bands.get("bass", 0.0))
         det = frame.bass_strength * det_gate if frame.bass_beat else 0.0
@@ -525,7 +521,7 @@ class EffectEngine:
             sched = 0.0
             if beatgrid.predicted_beat:
                 acc = max(0.0, min(1.0, beatgrid.accent_now))
-                sched = (1.0 + 2.0 * acc) * (det_gate if width_sched else 1.0)
+                sched = 1.0 + 2.0 * acc
             strength = max(sched, det)
             return (strength, bass, True) if strength > 0.0 else (0.0, 0.0, True)
         return (det, bass, False) if det > 0.0 else (0.0, 0.0, False)
@@ -737,27 +733,28 @@ class EffectEngine:
         # One decision for everything visible: the scheduled beat (locked) or
         # the qualifying kick (unlocked reactive fallback).
         vis_strength, vis_bass, grid_locked = self._visible_event(
-            frame, beatgrid, width_gate, width_sched=p.flux_gate > 0.0
+            frame, beatgrid, width_gate
         )
         # Onset-flux gate (ModeParams.flux_gate): a beat only counts where a REAL
         # transient happened. A scheduled grid beat — especially from an offline
         # track map that force-fits a tempo grid across the WHOLE song — keeps
-        # ticking through a tail / breakdown after the drums have stopped, so the
-        # engine would flash, jump colour and roll waves on those phantom beats
-        # ("predictive beats" the user does not want). Gating vis_strength by the
-        # frame's actual bass onset flux mutes them at the source (a held tone /
-        # vocal has ~no flux, a real drum spikes) so EVERYTHING downstream —
-        # flash, colour jump, highlight ranking, waves — only fires on real hits.
-        # 0 disables (every other mode is untouched).
+        # ticking through a tail / breakdown / vocal after the drums have stopped,
+        # so the engine would flash, jump colour and roll WAVES on those phantom
+        # beats ("predictive beats" the user does not want). ``flux_factor`` is
+        # how real this beat is: a LOW-band transient (a kick — passes at any
+        # onset width, so a tight electronic kick still counts) OR a MID-band
+        # transient that is broadband (a guitar/snare — but a narrowband mid, i.e.
+        # a sung vowel, is muted by the width gate). A held tone / vocal / tail
+        # has neither, so it is muted at the source and nothing downstream —
+        # flash, colour jump, highlight ranking, waves — fires. 0 disables.
+        flux_factor = 1.0
         if p.flux_gate > 0.0:
             lo = 0.35 * p.flux_gate
-            # A real onset in EITHER the low (drum) or the mid (guitar/snare) band
-            # counts — only a held tone / vocal / tail with no transient in any
-            # band is a phantom. (The width gate still mutes narrowband vocals.)
-            real_flux = max(frame.bass_flux, frame.mid_flux)
-            vis_strength *= max(
-                0.0, min(1.0, (real_flux - lo) / max(1e-6, p.flux_gate - lo))
-            )
+            span = max(1e-6, p.flux_gate - lo)
+            bass_g = max(0.0, min(1.0, (frame.bass_flux - lo) / span))
+            mid_g = max(0.0, min(1.0, (frame.mid_flux - lo) / span)) * width_gate
+            flux_factor = max(bass_g, mid_g)
+            vis_strength *= flux_factor
         # Does the song currently have an actual beat? While the grid is
         # unlocked (no rhythm found), detected-onset flashes and waves soften
         # toward the mode's nobeat_flash floor, so beat-less passages breathe
@@ -893,7 +890,11 @@ class EffectEngine:
                     music_gate
                     * amp_scale
                     * (1.0 if grid_locked else rhythm_gate)
-                    * (1.0 - 0.8 * pd),
+                    * (1.0 - 0.8 * pd)
+                    # Only real onsets roll a wave: without this the track map's
+                    # phantom grid beats keep spawning waves that sweep the room
+                    # for seconds AFTER the last drum (the "reacting afterwards").
+                    * flux_factor,
                 )
             for w in self._waves:
                 w.advance(dt, decay_tau=0.45)
