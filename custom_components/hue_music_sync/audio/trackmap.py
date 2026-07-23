@@ -120,8 +120,8 @@ _MIN_AUDIO_RMS = 1e-4
 # incompatible bump must either extend _COMPAT_FORMATS or add a one-time format
 # scan to the pre-warm — has_disk() deliberately never opens files, so it
 # cannot tell a stale format from a fresh one.
-_CACHE_FORMAT = 4
-_COMPAT_FORMATS = frozenset({2, 3, 4})
+_CACHE_FORMAT = 5
+_COMPAT_FORMATS = frozenset({2, 3, 4, 5})
 
 # Offline mid picks narrower than this across the SuperFlux filterbank are
 # dropped as vocal/tonal (see AnalysisFrame.onset_width). Deliberately at the
@@ -246,6 +246,13 @@ class TrackFeatures:
     # analyses and mono decodes (frame_at then reports no pan — mono render).
     # Compresses to near-nothing in the .npz for centred masters.
     pan: np.ndarray = field(default_factory=lambda: np.zeros((0, 0), dtype=np.int8))
+    # Per-bin ABSOLUTE-loudness weight (MELBANK_BINS,), each bin's loud reference
+    # relative to the loudest bin (0..1). The melbank above is per-bin normalised
+    # (AGC-relative), which erases how loud each band is *in absolute terms*;
+    # melbank[f,c] * melbank_ref[c] recovers it, so a quiet instrument lights its
+    # lamp dimmer than a loud one (Extreme's per-band brightness). Empty on pre-v5
+    # analyses (frame_at reports it empty → uniform weighting, as before).
+    melbank_ref: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float32))
 
 
 # Auto-intensity mood weights: how far the song's spectral tilt (bass-heavy vs
@@ -475,6 +482,7 @@ class TrackMap:
                 "f_bass_flux": f.bass_flux, "f_mid_flux": f.mid_flux,
                 "f_centroid": f.centroid, "f_melbank": f.melbank,
                 "f_width": f.width, "f_pan": f.pan,
+                "f_melbank_ref": f.melbank_ref,
             })
         tmp = Path(path).with_suffix(".npz.tmp")
         with open(tmp, "wb") as fh:
@@ -511,6 +519,12 @@ class TrackMap:
                         pan=(
                             z["f_pan"] if "f_pan" in z
                             else np.zeros((0, 0), dtype=np.int8)
+                        ),
+                        # Pre-v5 files have no per-bin loudness ref: frame_at then
+                        # reports it empty and the engine weights bands uniformly.
+                        melbank_ref=(
+                            z["f_melbank_ref"] if "f_melbank_ref" in z
+                            else np.zeros(0, dtype=np.float32)
                         ))
                 tm = cls(
                     duration=float(meta[0]), bpm=float(meta[1]),
@@ -573,6 +587,7 @@ class TrackMap:
         mid_strength = 1.0 + 2.0 * float(self.mid_accents[m1 - 1]) if mid else 0.0
         bands = {name: float(v) for name, v in zip(BANDS, f.bands[i])}
         melbank = f.melbank[i].tolist() if f.melbank.shape[0] > i else []
+        melbank_ref = f.melbank_ref.tolist() if f.melbank_ref.size else []
         prof = self.intensity_profile
         return AnalysisFrame(
             bands=bands,
@@ -592,6 +607,7 @@ class TrackMap:
             mid_beat=mid,
             mid_strength=mid_strength,
             melbank=melbank,
+            melbank_ref=melbank_ref,
             # Globally p95-normalised energy IS the salience signal (better
             # than the live rolling reference: the whole track was seen at
             # once), so map playback gets the same proportional reactions.
@@ -1518,26 +1534,37 @@ def _fill_section_palettes(sections: list[Section], ex: EnvelopeExtractor) -> No
             s.palette = pal.colors
 
 
-def _build_melbank(mel: np.ndarray) -> np.ndarray:
+def _build_melbank(mel: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Per-bin gain-normalise + asymmetric-smooth the offline melbank.
 
     Mirrors the live analyzer's per-bin AGC (here a global p95 reference, since
     the whole track is known) and its :class:`ExpFilter` smoothing, so scheduled
     playback feeds the engine the same continuous reactive texture as the tap.
+
+    Also returns the per-bin ABSOLUTE-loudness weight: each bin's p95 reference
+    divided by the loudest bin's, so ``normalised[f,c] * ref_weight[c]`` recovers
+    the cross-band absolute loudness the per-bin normalisation divides out.
     """
     if mel.ndim != 2 or mel.shape[0] == 0:
-        return np.zeros((0, 0), dtype=np.float32)
+        return np.zeros((0, 0), dtype=np.float32), np.zeros(0, dtype=np.float32)
     out = np.empty_like(mel, dtype=np.float32)
+    refs = np.empty(mel.shape[1], dtype=np.float32)
     floor = 0.02 * max(float(np.percentile(mel, 95)), 1e-6)
     for c in range(mel.shape[1]):
         ref = max(float(np.percentile(mel[:, c], 95)), floor)
+        refs[c] = ref
         out[:, c] = np.clip(mel[:, c] / ref, 0.0, 1.0)
     filt = ExpFilter(
         np.zeros(mel.shape[1], dtype=np.float32), alpha_rise=0.85, alpha_decay=0.20
     )
     for i in range(out.shape[0]):
         out[i] = filt.update(out[i])
-    return out
+    mx = float(refs.max()) if refs.size else 0.0
+    ref_weight = (
+        (refs / mx).astype(np.float32) if mx > 1e-9
+        else np.ones(mel.shape[1], dtype=np.float32)
+    )
+    return out, ref_weight
 
 
 def _norm_p(a: np.ndarray, pct: float, floor: float) -> np.ndarray:
@@ -1563,6 +1590,7 @@ def _build_features(
     bands = np.empty_like(named)
     for c in range(named.shape[1]):
         bands[:, c] = _norm_p(named[:, c], 95.0, floor=0.5)
+    melbank, melbank_ref = _build_melbank(np.asarray(ex.melbank, dtype=np.float32))
     return TrackFeatures(
         bands=bands,
         energy=_norm_p(rms, 95.0, floor=0.01),
@@ -1572,9 +1600,10 @@ def _build_features(
         bass_flux=_norm_p(bass_env, 99.0, floor=2.5),
         mid_flux=_norm_p(mid_env, 99.0, floor=2.5),
         centroid=np.asarray(ex.centroid, dtype=np.float32),
-        melbank=_build_melbank(np.asarray(ex.melbank, dtype=np.float32)),
+        melbank=melbank,
         width=np.asarray(ex.width, dtype=np.float32),  # already 0..1
         pan=_build_pan(ex),
+        melbank_ref=melbank_ref,
     )
 
 

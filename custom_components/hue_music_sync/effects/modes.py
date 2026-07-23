@@ -225,6 +225,12 @@ class ModeParams:
     # passage can't flash as bright as the same hit in a drop — the AGC'd melbank
     # is *relative*, so without this a quiet tick and a loud slam look identical.
     flash_loud_floor: float = 1.0
+    # How strongly a lamp's brightness follows its band's ABSOLUTE loudness
+    # (0 = off / every band equal, the per-bin-normalised default). Uses the
+    # offline melbank_ref: a loud band (kick) lights its lamp brighter than a
+    # quiet one (a faint cymbal tick), which per-bin normalisation flattens.
+    # Perceptually compressed so a quiet instrument stays visible, just dimmer.
+    band_loud_strength: float = 0.0
     # ONSET-FLUX gate (0 disables). A *scheduled* beat (from the offline track
     # map's tempo grid, or the causal tracker) fires on the grid even where no
     # real onset happened — an offline map force-fits a grid across the WHOLE
@@ -388,6 +394,7 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         mel_flux_floor=0.12,                      # but ignore ambient/noise wash — only real attacks
         rotate_rate=0.20,                         # base spectrum rotation ~one lamp every 5 s
         rotate_swing=0.45,                        # + faster through busy passages (instruments move more)
+        band_loud_strength=0.8,                   # loud bands (kick) brighter than quiet ones (cymbal tick)
         energy_gain=0.06,                         # a touch of whole-room loudness lift (kept low)
         flash_decay=0.70,                         # per-frame fade of a peak flash
         bri_attack=0.5, bri_decay=0.4,            # glow smoothing (flash stays sharp)

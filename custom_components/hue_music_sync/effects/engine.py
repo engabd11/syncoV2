@@ -142,6 +142,10 @@ _FALLBACK_SCHEME = ColorScheme.SUNSET
 # loud instrument in a lamp's band lifts that lamp (detail reads) without the
 # other bins washing it out.
 _EXT_GLOW_PEAKINESS = 0.3  # 0 = pure mean, 1 = pure hottest-bin
+# Perceptual compression on the per-band absolute-loudness weight (see
+# ModeParams.band_loud_strength): <1 softens the ratio so a much-quieter band is
+# dimmer but still clearly visible, not driven to near-black.
+_BAND_LOUD_COMPRESS = 0.5
 
 
 def _spectral_bands(n: int, bins: int) -> list[tuple[int, int]]:
@@ -729,6 +733,17 @@ class EffectEngine:
         bands = self._ext_bands
         n = len(self._rank_ids)
         usepan = p.pan_gain > 0.0 and bool(pan) and bool(mel) and len(pan) >= len(mel)
+        # Per-bin ABSOLUTE-loudness weight (offline melbank_ref): a loud band lights
+        # its lamp brighter than a quiet one, which per-bin normalisation flattens.
+        # Perceptually compressed + strength-blended so quiet instruments stay
+        # visible. Empty ref (live/metadata/pre-v5 map) → uniform (no change).
+        ref = getattr(frame, "melbank_ref", None)
+        bstr = p.band_loud_strength
+        mel_w: list[float] | None = None
+        if ref and bstr > 0.0 and mel and len(ref) == len(mel):
+            mel_w = [
+                (1.0 - bstr) + bstr * (r ** _BAND_LOUD_COMPRESS) for r in ref
+            ]
 
         # Advance the spectral rotation: grid-free (time-driven, faster through
         # busy passages via rotate_swing, frozen in silence by the music gate), so
@@ -753,6 +768,8 @@ class EffectEngine:
             mx = 0.0
             for k in range(lo, hi):
                 val = mel[k] * (_pan_w(k, side) if usepan else 1.0)
+                if mel_w is not None:
+                    val *= mel_w[k]
                 tot += val
                 if val > mx:
                     mx = val
@@ -779,6 +796,8 @@ class EffectEngine:
                     if fxk > r:
                         r = fxk
                 r *= _pan_w(k, side) if usepan else 1.0
+                if mel_w is not None:
+                    r *= mel_w[k]  # quiet band → dimmer flash than a loud one
                 if r > mx:
                     mx = r
             return mx

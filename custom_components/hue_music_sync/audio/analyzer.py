@@ -67,6 +67,13 @@ class AnalysisFrame:
     # brightness so the room is alive whether or not a beat fires. Empty list
     # means "not computed" (callers fall back to the coarse ``bands``).
     melbank: list[float] = field(default_factory=list)
+    # Per-melbank-bin ABSOLUTE-loudness weight (0..1), each bin's loud reference
+    # relative to the loudest bin. The melbank above is per-bin AGC-normalised, so
+    # it says WHEN each band is active but not how loud it is *in absolute terms*;
+    # melbank[c] * melbank_ref[c] recovers that, letting a renderer light a quiet
+    # instrument's lamp dimmer than a loud one. Empty means "not computed" — the
+    # offline track map fills it; live/metadata frames leave it empty (uniform).
+    melbank_ref: list[float] = field(default_factory=list)
     # Event-selection evidence (defaults are neutral so frame producers that
     # don't compute them behave exactly as before they existed):
     # Absolute loudness of this frame relative to the track's rolling loud

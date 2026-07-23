@@ -34,10 +34,13 @@ def _channels(n: int = 6) -> list[EntertainmentChannel]:
     ]
 
 
-def _frame(melbank: list[float], energy: float = 0.5) -> AnalysisFrame:
+def _frame(
+    melbank: list[float], energy: float = 0.5, ref: list[float] | None = None
+) -> AnalysisFrame:
     return AnalysisFrame(
         bands={"sub_bass": 0.4, "bass": 0.4, "low_mid": 0.4, "mid": 0.4, "high": 0.4},
         energy=energy, melbank=list(melbank),
+        melbank_ref=list(ref) if ref else [],
     )
 
 
@@ -144,6 +147,30 @@ def test_steady_groove_keeps_flashing_every_hit():
         eng.render(_frame(rest), _DT)  # back to the bed
     assert min(peaks[2:]) > 0.3  # every hit past warm-up still flashes
     assert peaks[-1] > 0.7 * max(peaks)  # the groove does not fade out over time
+
+
+def test_loud_bands_outshine_quiet_bands_of_equal_activity():
+    # Per-band absolute loudness: two bands with EQUAL activity but different
+    # absolute loudness (melbank_ref) light their lamps differently — the loud
+    # band (a kick) brighter than the quiet one (a faint cymbal). With no ref the
+    # per-bin-normalised activity lights them equally; the ref restores hierarchy.
+    n = MELBANK_BINS
+    activity = [0.8] * n
+    ref = [1.0] * (n // 2) + [0.25] * (n - n // 2)  # lows loud, highs quiet
+
+    def low_high(with_ref: bool):
+        eng = _eng()
+        out = {}
+        for _ in range(25):  # settle the glow; rotation is still ~0 here
+            out = eng.render(_frame(activity, ref=ref if with_ref else None), _DT)
+        low = max(max(out[c]) for c in (0, 1))   # low-frequency (loud) lamps
+        high = max(max(out[c]) for c in (4, 5))  # high-frequency (quiet) lamps
+        return low, high
+
+    low_w, high_w = low_high(with_ref=True)
+    assert low_w > high_w + 0.12          # loud band clearly outshines the quiet one
+    low_f, high_f = low_high(with_ref=False)
+    assert abs(low_f - high_f) < 0.08     # without the ref, equal activity == equal
 
 
 def test_spectrum_rotates_across_lamps_over_time():
