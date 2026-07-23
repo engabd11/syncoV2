@@ -141,7 +141,7 @@ _FALLBACK_SCHEME = ColorScheme.SUNSET
 # average. The glow blends the band's mean level with its hottest bin so one
 # loud instrument in a lamp's band lifts that lamp (detail reads) without the
 # other bins washing it out.
-_EXT_GLOW_PEAKINESS = 0.5  # 0 = pure mean, 1 = pure hottest-bin
+_EXT_GLOW_PEAKINESS = 0.3  # 0 = pure mean, 1 = pure hottest-bin
 
 
 def _spectral_bands(n: int, bins: int) -> list[tuple[int, int]]:
@@ -766,11 +766,14 @@ class EffectEngine:
             # isn't double-counted and the flash stays proportional to its height.
             if hi <= lo:
                 return 0.0
+            floor = p.mel_flux_floor
             mx = 0.0
             for k in range(lo, hi):
                 r = tr[k] if k < len(tr) else 0.0
                 if k < len(fx):
-                    fxk = p.mel_flux_gain * fx[k]
+                    # Groove flux, but only the part above the ambient noise floor,
+                    # so room tone / reverb wash never flashes — real hits do.
+                    fxk = p.mel_flux_gain * (fx[k] - floor)
                     if fxk > r:
                         r = fxk
                 r *= _pan_w(k, side) if usepan else 1.0

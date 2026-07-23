@@ -196,6 +196,13 @@ class ModeParams:
     # frame-to-frame, so it still only glows and never strobes. 0 = pure novelty
     # (the original v1.40 behaviour).
     mel_flux_gain: float = 0.0
+    # Noise floor on that per-bin flux (0 disables): a rise smaller than this is
+    # treated as room tone / ambience / reverb wash and contributes NOTHING, so
+    # the flashes fire on real instrument/beat attacks instead of "every sound".
+    # The novelty transient is deliberately left un-gated (it is already
+    # selective — a sustained sound is absorbed into its baseline), so this only
+    # tames the groove flux back to 1.40-style selectivity.
+    mel_flux_floor: float = 0.0
     # Spectral ROTATION speed, in lamp-steps per second (0 = fixed mapping). The
     # lamp<->spectrum assignment slowly rotates around the room so every lamp
     # takes turns being the kick / snare / guitar / cymbal — the whole room trades
@@ -351,11 +358,12 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         # Beat-path fields the graph renderer never reads (kept 0 / inert).
         bass_gain=0.0, beat_gain=0.0, beat_threshold=99.0, spread=0.0, shimmer=0.0,
         base=0.0, floor=0.0,
-        melbank_gain=0.85, melbank_floor=0.02,   # GLOW: brightness ∝ band loudness
-        spectral_pop=1.8,                         # PEAK FLASH: ∝ band transient height
-        mel_flux_gain=1.1,                        # groove: every hit re-fires, not just novel peaks
+        melbank_gain=0.60, melbank_floor=0.02,   # GLOW: brightness ∝ band loudness (dark room)
+        spectral_pop=1.8,                         # PEAK FLASH: ∝ band attack height
+        mel_flux_gain=1.25,                       # groove: every real hit re-fires, not just novel peaks
+        mel_flux_floor=0.12,                      # but ignore ambient/noise wash — only real attacks
         rotate_rate=0.16,                         # spectrum rotates ~one lamp every 6 s
-        energy_gain=0.10,                         # a little whole-room loudness lift
+        energy_gain=0.06,                         # a touch of whole-room loudness lift (kept low)
         flash_decay=0.70,                         # per-frame fade of a peak flash
         bri_attack=0.5, bri_decay=0.4,            # glow smoothing (flash stays sharp)
         colour_speed=0.05, colour_flow=0.05,      # smooth colour drift (no beat jumps)
