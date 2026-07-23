@@ -141,6 +141,9 @@ def _frame(beat: bool, strength: float = 0.0) -> AnalysisFrame:
     return AnalysisFrame(
         bands=bands, energy=1.0, beat=beat, beat_strength=strength,
         bass_beat=beat, bass_strength=strength,  # kicks: the visible beat stream
+        # A real kick carries onset flux; carry it so the beat passes the
+        # phantom-beat flux gate (Intense) — only flux-less grid ticks are cut.
+        bass_flux=min(1.0, strength) if beat else 0.0,
     )
 
 

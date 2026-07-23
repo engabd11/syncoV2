@@ -349,6 +349,14 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         colour_jump=0.16, colour_spread=0.22, full_room_accent=0.0,
         melbank_gain=0.42, melbank_floor=0.06, colour_flow=0.05, spectral_pop=0.45,
         salience_gamma=0.8, width_min=0.08, nobeat_flash=0.30,
+        # Phantom-beat guard: the offline track map force-fits a tempo grid across
+        # the WHOLE song, so its scheduled beats keep ticking through tails and
+        # breakdowns where the drums have stopped. Gate each scheduled beat by the
+        # frame's real onset flux — a real hit has a flux spike, a phantom does
+        # not — so the phantom flashes/colour-jumps/waves are muted while every
+        # genuine beat passes untouched (character unchanged). Conservative value:
+        # only near-zero-flux ticks are cut; real beats (flux ~0.7-1.0) pass full.
+        flux_gate=0.28,
         predrop_depth=0.60, phrase_bars=4, phrase_colour_shift=0.06,
         pan_gain=0.5,
     ),

@@ -30,9 +30,12 @@ def _channels(n: int = 3) -> list[EntertainmentChannel]:
 
 
 def _quiet(bass_beat: bool = False, mid_beat: bool = False) -> AnalysisFrame:
+    # An active passage: carries onset flux, so a scheduled grid beat passes the
+    # phantom-beat flux gate (a real beat has flux; only a flux-less tail/breakdown
+    # tick — a true phantom — is cut). bass_beat/mid_beat add discrete detection.
     return AnalysisFrame(
         bands={"sub_bass": 0.2, "bass": 0.2, "low_mid": 0.2, "mid": 0.2, "high": 0.1},
-        energy=0.4,
+        energy=0.4, bass_flux=1.0, mid_flux=1.0,
         bass_beat=bass_beat, bass_strength=2.0 if bass_beat else 0.0,
         mid_beat=mid_beat, mid_strength=2.0 if mid_beat else 0.0,
         beat=bass_beat or mid_beat, beat_strength=2.0 if (bass_beat or mid_beat) else 0.0,
