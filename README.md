@@ -3,12 +3,15 @@
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.12%2B-blue)
-![Version](https://img.shields.io/badge/version-1.19.1-informational)
+![Version](https://img.shields.io/badge/version-1.48.0-informational)
 
-Real-time music-reactive lighting for **Philips Hue Entertainment areas**, driven by **any Home Assistant media player — Music Assistant players first and foremost**. Beat detection, frequency analysis and spatial choreography stream straight to the bridge over the Hue Entertainment API (DTLS-encrypted, up to 50 Hz), and a bundled dashboard card mirrors the whole show live — no separate frontend install.
+Real-time music-reactive lighting for **Philips Hue Entertainment areas**, driven by **any Home Assistant media player — Music Assistant players first and foremost** (Sendspin and other MA players), with first-class support for **Navidrome / OpenSubsonic** libraries. Beat detection, frequency analysis and spatial choreography stream straight to the bridge over the Hue Entertainment API (DTLS-encrypted, up to 50 Hz), and a bundled dashboard card mirrors the whole show live — no separate frontend install.
 
 <p align="center">
-  <img src="docs/card.png" alt="Hue Synco dashboard card" width="360" />
+  <img src="docs/card-tablet.png" alt="Hue Synco tablet dashboard card" width="760" />
+</p>
+<p align="center">
+  <img src="docs/card.png" alt="Hue Synco mobile dashboard card" width="320" />
 </p>
 
 ---
@@ -58,6 +61,10 @@ You choose which player drives the lights — pick any player right from the car
 | Snapcast-backed players *(experimental/legacy)* | Real-time stream tap with automatic buffer alignment — see [legacy sources](#experimental--legacy-audio-sources) |
 
 The followed player can be **pinned per area** (from the card's player dropdown or the `set_options` service) or left on auto.
+
+### Navidrome / OpenSubsonic libraries
+
+Point Hue Synco at your **Navidrome or any OpenSubsonic** server (library URL + login in the integration options) and it will fetch and analyse your library directly. This is what makes a **Sendspin** player streaming from OpenSubsonic — or any player Music Assistant won't expose a tappable stream for — react with full beat accuracy: the track is matched to your library, decoded from the server, and analysed into a cached track map. Run **Analyse library** once to pre-warm the whole catalogue so every song reacts from its first beat (see [Controls](#controls)).
 
 ## Features
 
@@ -189,12 +196,16 @@ Each entertainment area gets:
 | Brightness | Number | Master brightness ceiling (5–100%) |
 | Timing offset | Number | Manual sync trim in milliseconds (−500 to +500) |
 
-Plus, once per installation:
+Plus, once per installation, a **Hue Synco Library** device for managing the analysis cache:
 
 | Entity | Type | Description |
 |---|---|---|
-| Analyse library | Button | Kicks off the background library pre-analysis |
+| Analyse library | Button | Kicks off (or resumes) the background library pre-analysis; skips already-cached tracks |
+| Reanalyse library | Button | Wipes the cache and re-analyses **every** track from scratch — the way to upgrade the whole library to a newer analysis format |
+| Delete library cache | Button | Removes every cached track map from disk (frees the space); tracks re-analyse on their next play |
 | Library analysis | Sensor | Live progress, with failure details in its attributes |
+| Library cache size | Sensor | Total size on disk of the analysed track maps (MB) |
+| Library cached songs | Sensor | How many songs are currently cached |
 
 While an area is syncing, its switch also exposes now-playing, album-colour, tempo and audio-source attributes — the state the card runs on, available to your own automations too.
 
@@ -206,8 +217,8 @@ While an area is syncing, its switch also exposes now-playing, album-colour, tem
 | **Subtle** | Strict | Gentle spatial gradient, soft colour drift, small beat steps |
 | **Medium** | Strict | Visible dimming, soft flashes on stronger beats, wide colour spread |
 | **High** | Strict | Per-instrument spatial split (bass/guitar/vocal), dynamically assigned to the instruments actually playing |
-| **Intense** | Relaxed | Unified club with a fast but smooth dim↔bright swing on the beat, colour shifting each hit; keeps a soft glow in the gaps |
-| **Extreme** | Relaxed | Same quick swing but a **true dark room** (floor 0) — quiet parts go black, every beat brightens the room out of the dark |
+| **Intense** | Relaxed | Unified club with a fast but smooth dim↔bright swing on the beat, colour shifting each hit; keeps a soft glow in the gaps. Scheduled beats are gated by real onset flux, so it never strobes on phantom grid beats through a tail or breakdown |
+| **Extreme** | Bypassed | A **direct "the song is a graph" renderer** — the beat grid is ignored entirely (no phantom beats). Each lamp reflects its own slice of the spectrum: a glow for its band's loudness and a flash on a fresh transient, weighted by the band's **absolute** loudness (a kick outshines a faint cymbal) and its stereo side. Instruments separate across the room and the map **rotates**, so every lamp takes turns on every instrument. A **true dark room** — quiet parts go black, every hit brightens out of the dark |
 
 See the [photosensitivity warning](#️-photosensitivity-warning) for what *Strict* and *Relaxed* mean.
 
@@ -218,7 +229,8 @@ See the [photosensitivity warning](#️-photosensitivity-warning) for what *Stri
 | `hue_music_sync.activate` | Start sync for one or more areas; optionally set mode, effect, colour, brightness and the followed player |
 | `hue_music_sync.deactivate` | Stop sync |
 | `hue_music_sync.set_options` | Change any setting live without restarting the session — including pinning or clearing the followed player |
-| `hue_music_sync.prewarm_library` | Analyse your whole Music Assistant library in the background and cache it to disk, so **every** track reacts with full beat accuracy the first time it plays. `retry_failed: true` clears recorded failures (and ambient-only maps) so they analyse again |
+| `hue_music_sync.prewarm_library` | Analyse your whole Music Assistant / OpenSubsonic library in the background and cache it to disk, so **every** track reacts with full beat accuracy the first time it plays. `retry_failed: true` clears recorded failures (and ambient-only maps) so they analyse again; `force: true` wipes the whole cache first and re-analyses everything (upgrade the library to a newer map format) |
+| `hue_music_sync.clear_library_cache` | Delete the whole on-disk track-map cache (every analysed song), freeing the disk space; tracks re-analyse on their next play |
 | `hue_music_sync.analyze_track` | Diagnose **one** song right away and post the verdict as a notification: tier, tempo, confidence, and exactly why a beat grid was rejected. Takes a stream `url`, an `artist` + `title` library lookup, or a `media_player` that is currently playing |
 
 Pre-analysing the library (or pressing the **Analyse library** button) is the way to make a brand-new track react instantly. It runs gently — one track at a time, yielding to live playback — and is resumable **and incremental**: re-running only analyses what's new, so it is also how newly added Navidrome/library tracks get picked up.
@@ -237,7 +249,7 @@ Where to look:
 - The full uncapped report is written to `config/hue_music_sync/trackmaps/analysis_report.json` after each sweep.
 - `hue_music_sync.analyze_track` re-analyses a single song on demand and explains its verdict (beats-on-peaks contrast, interval spread vs the local tempo, coverage, tempo stability).
 
-The tempo analysis follows **drifting and changing tempo** (a live drummer, a 100→140 BPM switch) via a windowed tempogram with Viterbi tempo-path decoding, so dynamic, human-played music gets a full-tier grid instead of being rejected. After updating to a release that improves the analysis, run `prewarm_library` with `retry_failed: true` once so previously failed/ambient tracks get re-scored.
+The tempo analysis follows **drifting and changing tempo** (a live drummer, a 100→140 BPM switch) via a windowed tempogram with Viterbi tempo-path decoding, so dynamic, human-played music gets a full-tier grid instead of being rejected. After updating to a release that improves the analysis, run `prewarm_library` with `retry_failed: true` once so previously failed/ambient tracks get re-scored — or, to upgrade **every** cached map to a new analysis format, press **Reanalyse library** (`prewarm_library` with `force: true`).
 
 ## Options
 
@@ -262,7 +274,8 @@ Hue Synco began life around Snapcast/Squeezelite before focusing on Music Assist
 
 ```
 Audio source ladder (per followed player, best available wins):
-  Snapcast tap → MA/Sendspin stream decode → offline track map → metadata glow
+  MA/Sendspin stream decode → OpenSubsonic library decode → offline track map
+  → metadata glow   (Snapcast tap sits above these when configured — legacy)
         ↓
 Real-time analysis (5-band FFT, 16-bin melbank, SuperFlux onsets, tempo,
 absolute-loudness salience + onset broadbandness for event selection)
@@ -288,12 +301,13 @@ The card talks to the integration over Home Assistant's WebSocket API (`hue_musi
 
 ## ⚠️ Photosensitivity warning
 
-Audio-reactive lighting can produce rapid whole-room brightness swings. Hue Synco applies an eye-safety limiter to **every** frame it emits — but at two different levels:
+Audio-reactive lighting can produce rapid whole-room brightness swings. Most modes pass through an eye-safety limiter, at different levels:
 
 - **Strict (WCAG 2.3.1-compliant)** — Auto, Subtle, Medium, High and the Movies effect: a hard cap of 3 whole-room flashes per second, a minimum brightness floor that prevents pure-black strobing, a saturated-red guard, and per-frame colour slew limits.
-- **Relaxed** — Intense and Extreme: a much higher flash budget that real music never reaches (the club character is untouched), which still hard-caps genuine strobe output. **This level is *not* WCAG-compliant. Intense and Extreme are unsuitable for anyone with photosensitivity.**
+- **Relaxed** — Intense: a much higher flash budget that real music never reaches (the club character is untouched), which still hard-caps genuine strobe output.
+- **Bypassed** — Extreme: the limiter is off entirely for the sharpest, fastest response (its per-lamp spatial separation means the *whole* room rarely flashes as one, but there is no cap).
 
-If anyone in the room may be photosensitive, stay on Auto/Subtle/Medium/High.
+**Relaxed and Bypassed are *not* WCAG-compliant. Intense and Extreme are unsuitable for anyone with photosensitivity.** If anyone in the room may be photosensitive, stay on Auto/Subtle/Medium/High.
 
 ## Security notes
 
@@ -316,7 +330,7 @@ If anyone in the room may be photosensitive, stay on Auto/Subtle/Medium/High.
 
 - **Hue Bridge v2 only** — the v1 (round) bridge does not support Entertainment streaming
 - **One area streaming at a time per bridge** — a single DTLS channel per bridge; multiple bridges each get their own entry
-- **Cache re-analysis after upgrades** — when an update changes the track-map format, previously analysed tracks re-analyse once in the background on their next play (or in one sweep via `prewarm_library`)
+- **Cache upgrades after updates** — a newer analysis format is backward-compatible: existing maps keep working, and newly played/analysed tracks use it. To apply a format upgrade across your whole library at once, press **Reanalyse library** (`prewarm_library` with `force: true`)
 
 ## Development
 
