@@ -231,6 +231,13 @@ class ModeParams:
     # quiet one (a faint cymbal tick), which per-bin normalisation flattens.
     # Perceptually compressed so a quiet instrument stays visible, just dimmer.
     band_loud_strength: float = 0.0
+    # Whole-room SLAM on a big BROADBAND transient, Extreme only (0 = off). A
+    # kick/drop that spikes many melbank bands at once punches the ENTIRE room in
+    # unison on top of the per-band flashes — the impact that makes the big
+    # moments land — while a single-band tick (an isolated hi-hat) barely
+    # registers, so the per-band detail is untouched. Squared, so only genuinely
+    # big broadband hits slam; moderate hits lift the room only slightly.
+    room_punch: float = 0.0
     # ONSET-FLUX gate (0 disables). A *scheduled* beat (from the offline track
     # map's tempo grid, or the causal tracker) fires on the grid even where no
     # real onset happened — an offline map force-fits a grid across the WHOLE
@@ -360,9 +367,12 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         # breakdowns where the drums have stopped. Gate each scheduled beat by the
         # frame's real onset flux — a real hit has a flux spike, a phantom does
         # not — so the phantom flashes/colour-jumps/waves are muted while every
-        # genuine beat passes untouched (character unchanged). Conservative value:
-        # only near-zero-flux ticks are cut; real beats (flux ~0.7-1.0) pass full.
-        flux_gate=0.28,
+        # genuine beat passes untouched: real beats (flux ~0.7-1.0) pass at full
+        # strength, while the phantom grid beats a track map fires into a tail /
+        # outro (lower flux) are muted — the fix for the residual end-of-song
+        # strobing. Frame-based, so the locked scheduled path stays confidence-
+        # independent (a real beat carries flux regardless of history).
+        flux_gate=0.5,
         predrop_depth=0.60, phrase_bars=4, phrase_colour_shift=0.06,
         pan_gain=0.5,
     ),
@@ -395,6 +405,7 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         rotate_rate=0.36,                         # base spectrum rotation ~one lamp every 3 s
         rotate_swing=0.85,                        # + much faster through busy passages (instruments circle the room)
         band_loud_strength=0.8,                   # loud bands (kick) brighter than quiet ones (cymbal tick)
+        room_punch=1.5,                           # big broadband hits slam the WHOLE room ("Intense on steroids")
         energy_gain=0.06,                         # a touch of whole-room loudness lift (kept low)
         flash_decay=0.70,                         # per-frame fade of a peak flash
         bri_attack=0.5, bri_decay=0.4,            # glow smoothing (flash stays sharp)

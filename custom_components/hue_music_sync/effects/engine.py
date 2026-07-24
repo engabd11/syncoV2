@@ -147,6 +147,11 @@ _EXT_GLOW_PEAKINESS = 0.3  # 0 = pure mean, 1 = pure hottest-bin
 # ModeParams.band_loud_strength): <1 softens the ratio so a much-quieter band is
 # dimmer but still clearly visible, not driven to near-black.
 _BAND_LOUD_COMPRESS = 0.5
+# Exponent on the whole-room slam's broadband measure (ModeParams.room_punch):
+# >1 makes only genuinely big broadband hits (drops) slam the whole room, while
+# moderate hits lift it only slightly — so the unison punch stays reserved for
+# the big moments and the per-band detail carries everything else.
+_EXT_ROOM_GAMMA = 2.0
 
 
 def _spectral_bands(n: int, bins: int) -> list[tuple[int, int]]:
@@ -909,6 +914,28 @@ class EffectEngine:
         # the producer doesn't compute salience, so nothing changes for those.
         loud = getattr(frame, "salience", 1.0)
         loud_scale = p.flash_loud_floor + (1.0 - p.flash_loud_floor) * loud
+        # Whole-room SLAM: a big BROADBAND transient (a kick/drop that spikes many
+        # bands at once) punches the ENTIRE room in unison — the impact that lands
+        # the big moments — while a single-band tick barely registers, so the
+        # per-band detail is intact. The mean positive flux measures "how
+        # broadband", squared so only the big hits slam.
+        room_slam = 0.0
+        if p.room_punch > 0.0 and fx:
+            tot = 0.0
+            mx = 0.0
+            for v in fx:
+                d = v - p.mel_flux_floor
+                if d > 0.0:
+                    tot += d
+                    if d > mx:
+                        mx = d
+            # Mostly the broadband mean (a full-spectrum drop) with a little of the
+            # hottest band, so a big kick punches too without every tick slamming.
+            room_fx = 0.8 * (tot / len(fx)) + 0.2 * mx
+            room_slam = (
+                p.room_punch * (room_fx ** _EXT_ROOM_GAMMA)
+                * p.spectral_pop * music_gate * loud_scale
+            )
         out: dict[int, RGB] = {}
         for rank_i, cid in enumerate(self._rank_ids):
             info = self.cmap[cid]
@@ -936,6 +963,8 @@ class EffectEngine:
             # big hits slam, then scale by absolute loudness — peaks read with
             # RELATIVE brightness instead of every one saturating to full.
             flash = (peak ** p.flash_gamma) * p.spectral_pop * music_gate * loud_scale
+            if room_slam > flash:  # a big broadband hit slams every lamp in unison
+                flash = room_slam
             if flash > lf.get(cid, 0.0):
                 lf[cid] = flash
             # Smoothed glow target = band loudness + a little whole-room energy.
