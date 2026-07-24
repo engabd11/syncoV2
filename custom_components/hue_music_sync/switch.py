@@ -7,6 +7,7 @@ from typing import Any
 
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -25,9 +26,11 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     manager: SyncManager = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities(
-        HueMusicSyncSwitch(manager, area_id) for area_id in manager.enabled_areas
-    )
+    entities: list[SwitchEntity] = []
+    for area_id in manager.enabled_areas:
+        entities.append(HueMusicSyncSwitch(manager, area_id))
+        entities.append(HueMusicSyncAdvancedSwitch(manager, area_id))
+    async_add_entities(entities)
 
 
 class HueMusicSyncSwitch(HueMusicSyncAreaEntity, SwitchEntity):
@@ -92,3 +95,44 @@ class HueMusicSyncSwitch(HueMusicSyncAreaEntity, SwitchEntity):
             await self._manager.stop_area(self._area_id)
         finally:
             self._sync_state()
+
+
+class HueMusicSyncAdvancedSwitch(HueMusicSyncAreaEntity, SwitchEntity):
+    """Advanced controls: reveal + apply this area's live tunable knobs.
+
+    A per-area setting (not a live-sync action), so it lives in the device's
+    Config section. When on, the dashboard card shows the tunable sliders under
+    the intensity picker and their overrides are applied live; when off, the mode
+    renders with its coded defaults regardless of any stored knob values.
+    """
+
+    _attr_name = "Advanced controls"
+    _attr_icon = "mdi:tune-vertical"
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, manager: SyncManager, area_id: str) -> None:
+        super().__init__(manager, area_id, "advanced")
+        self._attr_is_on = manager.get_settings(area_id).advanced
+
+    @callback
+    def _sync_state(self) -> None:
+        self._attr_is_on = self._manager.get_settings(self._area_id).advanced
+        self.async_write_ha_state()
+
+    async def async_added_to_hass(self) -> None:
+        self._attr_is_on = self._manager.get_settings(self._area_id).advanced
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass, signal_area_update(self._area_id), self._sync_state
+            )
+        )
+
+    async def _set(self, advanced: bool) -> None:
+        await self._manager.update_settings(self._area_id, advanced=advanced)
+        self._sync_state()
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        await self._set(True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        await self._set(False)

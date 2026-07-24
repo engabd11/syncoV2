@@ -28,6 +28,10 @@ CONF_MEDIA_PLAYER: Final = "media_player"
 CONF_LATENCY_MS: Final = "latency_ms"
 CONF_TIMING_MS: Final = "timing_ms"
 CONF_AUTO_TIMING: Final = "auto_timing"
+# Advanced live tunables: opt-in per-area knobs that scale the active mode's
+# render params during playback (the card reveals them under the intensity).
+CONF_ADVANCED: Final = "advanced"  # show + apply the advanced tunables
+CONF_TUNABLES: Final = "tunables"  # dict {name: factor}; 1.0 = the mode's coded value
 CONF_SNAPSERVER_HOST: Final = "snapserver_host"
 # OpenSubsonic / Navidrome library (optional): lets us fetch & analyse library
 # tracks directly when Music Assistant won't expose a tappable stream URL
@@ -197,6 +201,38 @@ INTENSITY_LADDER: Final = (
 # Medium / High keeps the historical behaviour (Intense / Extreme stay opt-in),
 # so an existing Auto user sees no change until they add a rung.
 DEFAULT_AUTO_LEVELS: Final = (SyncMode.SUBTLE, SyncMode.MEDIUM, SyncMode.HIGH)
+
+# Advanced live tunables: each is a multiplier on the active mode's relevant
+# params (1.0 = the mode's coded value), applied live when Advanced is on. They
+# no-op gracefully on a mode that doesn't use a given param. The card shows them
+# as 0-200% sliders under the intensity picker.
+TUNABLE_KEYS: Final = (
+    "reactivity",    # flash punch: spectral_pop, mel_flux_gain, beat_gain
+    "glow",          # continuous room brightness: melbank_gain
+    "movement",      # spatial motion: rotate_rate, rotate_swing, wave_speed
+    "contrast",      # small-vs-big peak spread: flash_gamma
+    "colour_speed",  # colour drift speed: colour_speed, colour_flow
+    "loudness",      # per-band absolute-loudness follow: band_loud_strength
+)
+TUNABLE_MIN: Final = 0.0
+TUNABLE_MAX: Final = 2.0
+DEFAULT_TUNABLE: Final = 1.0
+
+
+def sanitize_tunables(data) -> dict[str, float]:
+    """Keep only known tunables, coerced to float and clamped to the valid range."""
+    out: dict[str, float] = {}
+    if not isinstance(data, dict):
+        return out
+    for key in TUNABLE_KEYS:
+        if key in data:
+            try:
+                v = float(data[key])
+            except (TypeError, ValueError):
+                continue
+            out[key] = max(TUNABLE_MIN, min(TUNABLE_MAX, v))
+    return out
+
 
 PLATFORMS: Final = ["switch", "select", "number", "button", "sensor"]
 

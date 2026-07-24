@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 from collections import deque
+from dataclasses import replace
 
 from ..audio.analyzer import AnalysisFrame
 from ..audio.structure import StructureState
@@ -172,7 +173,11 @@ class EffectEngine:
 
     def __init__(self, channels: list[EntertainmentChannel]) -> None:
         self.palette: Palette = get_palette(_FALLBACK_SCHEME)
-        self.params = MODE_PARAMS[DEFAULT_MODE]
+        # The raw mode preset, and ``params`` = that preset with the live advanced
+        # tunables folded in (identical when no tunables / all at 1.0).
+        self._base_params = MODE_PARAMS[DEFAULT_MODE]
+        self._tunables: dict[str, float] = {}
+        self.params = self._base_params
         self.effect: SyncEffect = DEFAULT_EFFECT
         self.brightness = 1.0  # master ceiling (0..1), independent of mode
         self.time: float = 0.0
@@ -588,7 +593,55 @@ class EffectEngine:
         self.palette = get_palette(scheme)
 
     def set_mode(self, mode: SyncMode) -> None:
-        self.params = MODE_PARAMS[mode]
+        self._base_params = MODE_PARAMS[mode]
+        self.params = self._with_tunables(self._base_params)
+
+    def set_tunables(self, tunables: dict[str, float] | None) -> None:
+        """Apply the advanced live tunables (percentage multipliers on the mode's
+        params). Empty / all-1.0 restores the mode's coded values exactly."""
+        self._tunables = dict(tunables) if tunables else {}
+        self.params = self._with_tunables(self._base_params)
+
+    def _with_tunables(self, base):
+        """The mode's params scaled by the active tunables (1.0 = unchanged).
+
+        Each knob scales the params of whatever the mode actually uses, and
+        no-ops on a param the mode leaves at 0 (e.g. rotation on a non-Extreme
+        mode), so one set of knobs works sensibly across every intensity.
+        """
+        t = self._tunables
+        if not t:
+            return base
+
+        def fac(name: str) -> float:
+            v = t.get(name, 1.0)
+            return v if v > 0.0 else 0.0
+
+        changes: dict[str, float] = {}
+        r = fac("reactivity")
+        if r != 1.0:
+            changes["spectral_pop"] = base.spectral_pop * r
+            changes["mel_flux_gain"] = base.mel_flux_gain * r
+            changes["beat_gain"] = base.beat_gain * r
+        g = fac("glow")
+        if g != 1.0:
+            changes["melbank_gain"] = base.melbank_gain * g
+        m = fac("movement")
+        if m != 1.0:
+            changes["rotate_rate"] = base.rotate_rate * m
+            changes["rotate_swing"] = base.rotate_swing * m
+            changes["wave_speed"] = base.wave_speed * m
+        c = fac("contrast")
+        if c != 1.0:
+            changes["flash_gamma"] = max(0.2, base.flash_gamma * c)
+        cs = fac("colour_speed")
+        if cs != 1.0:
+            changes["colour_speed"] = base.colour_speed * cs
+            changes["colour_flow"] = base.colour_flow * cs
+        loud = fac("loudness")
+        if loud != 1.0:
+            changes["band_loud_strength"] = min(1.0, base.band_loud_strength * loud)
+        return replace(base, **changes) if changes else base
 
     def set_effect(self, effect: SyncEffect) -> None:
         if effect != self.effect:

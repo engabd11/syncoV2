@@ -338,6 +338,20 @@ const CARD_CSS = `
   .hue-timing-num { font-size: 16px; font-weight: 800; font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
   .hue-timing-unit { font-size: 11px; font-weight: 700; color: var(--hue-faint); }
 
+  /* -- advanced live tunables -- */
+  .hue-advanced { display: flex; flex-direction: column; }
+  .hue-adv-toggle { align-self: flex-start; display: inline-flex; align-items: center; gap: 6px;
+    font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase;
+    color: var(--hue-dim); background: #ffffff10; border: none; border-radius: 9px;
+    padding: 6px 12px; cursor: pointer; transition: .18s; }
+  .hue-adv-toggle.on { color: #fff; }
+  .hue-tun-knobs { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
+  .hue-tun-row { gap: 9px; }
+  .hue-tun-label { font-size: 12px; color: var(--hue-dim); min-width: 108px;
+    display: flex; align-items: center; gap: 6px; }
+  .hue-adv-reset { align-self: flex-start; margin-top: 10px; font-size: 11px;
+    color: var(--hue-faint); background: none; border: none; cursor: pointer; }
+
   /* -- power switch -- */
   .hue-power { position: relative; width: 52px; height: 30px; border-radius: 999px; border: 1px solid var(--hue-line);
     background: #ffffff12; cursor: pointer; transition: .22s; padding: 0; flex: none; }
@@ -593,6 +607,24 @@ class Viz {
     this.downbeat = this._down;
     this.energy = live.energy != null ? live.energy : 0.5;
   }
+}
+
+/* Advanced live tunables: knobs shown under the intensity when Advanced is on.
+   Each is a 0-200% multiplier on the active mode's params (100% = as designed);
+   the integration sanitises + applies them live. Keys match const.TUNABLE_KEYS. */
+const TUNABLE_DEFS = [
+  { key: "reactivity",   label: "Reactivity",   icon: "⚡" },       // flash punch
+  { key: "glow",         label: "Glow",         icon: "\u{1F506}" },    // room brightness
+  { key: "movement",     label: "Movement",     icon: "↻" },       // spatial motion
+  { key: "contrast",     label: "Contrast",     icon: "◐" },       // small vs big peaks
+  { key: "colour_speed", label: "Colour speed", icon: "\u{1F308}" },    // colour drift
+  { key: "loudness",     label: "Loudness",     icon: "\u{1F50A}" },    // per-band loudness
+];
+const TUNABLE_KEYS = TUNABLE_DEFS.map((d) => d.key);
+// True when two tunable maps are equal across all keys (missing == 100%).
+function tunEq(a, b) {
+  a = a || {}; b = b || {};
+  return TUNABLE_KEYS.every((k) => (a[k] == null ? 1 : a[k]) === (b[k] == null ? 1 : b[k]));
 }
 
 /* ------------------------- The card element ------------------------- */
@@ -1085,6 +1117,22 @@ class HueMusicSyncCard extends HTMLElement {
     const timingAutoMs = swAttr.timing_auto_ms != null ? Number(swAttr.timing_auto_ms) : null;
     const timingLocked = !!swAttr.timing_locked;
 
+    // Advanced tunables: the toggle + the live knob factors, both optimistic
+    // (kept until the integration echoes them back) like the auto rungs/timing.
+    if (swAttr.advanced != null) {
+      if (this._advDirty && !!swAttr.advanced === !!this._ui.advanced) this._advDirty = false;
+      if (!this._advDirty) this._ui.advanced = !!swAttr.advanced;
+    }
+    const advanced = !!this._ui.advanced;
+    const liveTun = swAttr.tunables || {};
+    if (!this._tunDirty) this._ui.tunables = Object.assign({}, liveTun);
+    else if (tunEq(this._ui.tunables, liveTun)) this._tunDirty = false;
+    const tunables = {};
+    for (const k of TUNABLE_KEYS) {
+      const uiv = this._ui.tunables && this._ui.tunables[k];
+      tunables[k] = uiv != null ? uiv : (liveTun[k] != null ? liveTun[k] : 1.0);
+    }
+
     return {
       area, on,
       intensity: { ...intensity, value: intensityVal, autoMode, autoLevels },
@@ -1100,6 +1148,7 @@ class HueMusicSyncCard extends HTMLElement {
         step: timingStep, auto: autoTiming, autoMs: timingAutoMs, locked: timingLocked,
       },
       now,
+      advanced, tunables,
       audioSource: swAttr.audio_source || null,
     };
   }
@@ -1447,6 +1496,7 @@ class HueMusicSyncCard extends HTMLElement {
       intensityField.appendChild(this._autoRangeDropdown(m, accent));
     }
     body.appendChild(intensityField);
+    body.appendChild(this._advancedSection(m, accent));
     body.appendChild(
       this._segField("Effect", m.effect.options, m.effect.value, accent, (v) => {
         this._callSelect(m.effect.entity, v, "effect");
@@ -2041,6 +2091,39 @@ class HueMusicSyncCard extends HTMLElement {
     }
   }
 
+  _callAdvanced(m, on) {
+    // Optimistic toggle; persisted via set_options (also flips the Advanced
+    // switch entity). Demo mode just updates the local UI.
+    this._ui.advanced = on;
+    this._advDirty = true;
+    if (m.area && m.area.switch && this._hass) {
+      this._hass.callService("hue_music_sync", "set_options", {
+        entity_id: m.area.switch, advanced: on,
+      });
+    }
+  }
+
+  _sendTunables(m, tun) {
+    // Send the FULL factor map (the integration replaces the stored dict).
+    this._ui.tunables = tun;
+    this._tunDirty = true;
+    if (m.area && m.area.switch && this._hass) {
+      this._hass.callService("hue_music_sync", "set_options", {
+        entity_id: m.area.switch, tunables: tun,
+      });
+    }
+  }
+
+  _callTunable(m, key, factor) {
+    this._sendTunables(m, Object.assign({}, m.tunables, { [key]: factor }));
+  }
+
+  _resetTunables(m) {
+    const tun = {};
+    for (const k of TUNABLE_KEYS) tun[k] = 1.0;
+    this._sendTunables(m, tun);
+  }
+
   // Card background tinted by the album/palette colours: soft glows from the top
   // corners that reach well down the card plus one rising from the bottom, over
   // the base gradient — so the current song's hue bleeds through the WHOLE card
@@ -2153,6 +2236,111 @@ class HueMusicSyncCard extends HTMLElement {
 
     row.appendChild(slider);
     row.appendChild(valEl);
+    return row;
+  }
+
+  _advancedSection(m, accent) {
+    const field = document.createElement("div");
+    field.className = "hue-field hue-advanced";
+
+    const head = document.createElement("button");
+    head.type = "button";
+    head.className = "hue-adv-toggle" + (m.advanced ? " on" : "");
+    head.setAttribute("aria-pressed", m.advanced ? "true" : "false");
+    head.textContent = "⚙ Advanced";
+    if (m.advanced) head.style.background = accent;
+    head.addEventListener("click", () => {
+      this._callAdvanced(m, !m.advanced);
+      this._render();
+    });
+    field.appendChild(head);
+
+    if (m.advanced) {
+      const knobs = document.createElement("div");
+      knobs.className = "hue-tun-knobs";
+      for (const def of TUNABLE_DEFS) knobs.appendChild(this._tunableSlider(m, accent, def));
+      field.appendChild(knobs);
+      const reset = document.createElement("button");
+      reset.type = "button";
+      reset.className = "hue-adv-reset";
+      reset.textContent = "Reset to 100%";
+      reset.addEventListener("click", () => {
+        this._resetTunables(m);
+        this._render();
+      });
+      field.appendChild(reset);
+    }
+    return field;
+  }
+
+  _tunableSlider(m, accent, def) {
+    const factor = m.tunables && m.tunables[def.key] != null ? m.tunables[def.key] : 1.0;
+    const min = 0;
+    const max = 200;
+    const row = document.createElement("div");
+    row.className = "hue-slider-row hue-tun-row";
+    const lab = document.createElement("span");
+    lab.className = "hue-tun-label";
+    lab.textContent = `${def.icon} ${def.label}`;
+    row.appendChild(lab);
+
+    const slider = document.createElement("div");
+    slider.className = "hue-slider";
+    const track = document.createElement("div");
+    track.className = "hue-slider-track";
+    const fill = document.createElement("div");
+    fill.className = "hue-slider-fill";
+    const knob = document.createElement("div");
+    knob.className = "hue-slider-knob";
+    slider.append(track, fill, knob);
+
+    const valEl = document.createElement("span");
+    valEl.className = "hue-slider-val";
+    const suf = document.createElement("span");
+    suf.className = "hue-slider-suf";
+    suf.textContent = "%";
+
+    const paint = (pct) => {
+      const p = ((pct - min) / (max - min)) * 100;
+      fill.style.width = p + "%";
+      fill.style.background = gradFor([accent + "88", accent]);
+      knob.style.left = p + "%";
+      knob.style.background = accent;
+      knob.style.boxShadow = `0 0 0 4px ${accent}33, 0 0 16px ${accent}`;
+      valEl.textContent = Math.round(pct);
+      valEl.appendChild(suf);
+    };
+    let current = Math.round(factor * 100);
+    paint(current);
+
+    const fromEvent = (clientX) => {
+      const r = slider.getBoundingClientRect();
+      const p = Math.max(0, Math.min(1, (clientX - r.left) / r.width));
+      current = Math.max(min, Math.min(max, Math.round(min + p * (max - min))));
+      paint(current);
+    };
+    const onMove = (e) => {
+      if (!this._dragging) return;
+      const x = e.clientX ?? (e.touches && e.touches[0] && e.touches[0].clientX);
+      if (x != null) fromEvent(x);
+    };
+    const onUp = () => {
+      if (!this._dragging) return;
+      this._dragging = false;
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      this._callTunable(m, def.key, current / 100);
+      this._render();
+    };
+    slider.addEventListener("pointerdown", (e) => {
+      this._dragging = true;
+      slider.setPointerCapture && slider.setPointerCapture(e.pointerId);
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
+      fromEvent(e.clientX);
+    });
+
+    row.append(slider, valEl);
     return row;
   }
 
@@ -3065,6 +3253,7 @@ class HueMusicSyncTabletCard extends HueMusicSyncCard {
       intField.appendChild(this._autoRangeDropdown(m, accent));
     }
     right.appendChild(intField);
+    right.appendChild(this._advancedSection(m, accent));
 
     // Effect - shared segmented control.
     const effLabel = m.effect.options.find((o) => o.value === m.effect.value);

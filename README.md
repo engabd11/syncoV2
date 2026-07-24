@@ -195,6 +195,11 @@ Each entertainment area gets:
 | Colour | Select | Colour palette source |
 | Brightness | Number | Master brightness ceiling (5–100%) |
 | Timing offset | Number | Manual sync trim in milliseconds (−500 to +500) |
+| Advanced controls | Switch | Reveal + apply a set of live **tunable knobs** under the intensity |
+
+### Advanced controls
+
+Turn on **Advanced controls** (from the switch entity or the toggle on the card) to reveal a row of live sliders under the intensity picker — **Reactivity**, **Glow**, **Movement**, **Contrast**, **Colour speed** and **Loudness**. Each is a 0–200% multiplier on the active mode's behaviour (100% = the mode as designed), applied **live during the song** so you can dial the room in by ear. They scale whatever the current mode uses and quietly no-op on anything it doesn't (e.g. Movement only spins Extreme's spatial map), and turning Advanced back off restores the mode's defaults. *Reset to 100%* clears them.
 
 Plus, once per installation, a **Hue Synco Library** device for managing the analysis cache:
 

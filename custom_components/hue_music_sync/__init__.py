@@ -29,6 +29,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    CONF_ADVANCED,
     CONF_APP_KEY,
     CONF_AUTO_LEVELS,
     CONF_AUTO_TIMING,
@@ -43,6 +44,7 @@ from .const import (
     CONF_SUBSONIC_PASSWORD,
     CONF_SUBSONIC_URL,
     CONF_SUBSONIC_USER,
+    CONF_TUNABLES,
     DOMAIN,
     INTENSITY_LADDER,
     PLATFORMS,
@@ -50,6 +52,7 @@ from .const import (
     ColorScheme,
     SyncEffect,
     SyncMode,
+    sanitize_tunables,
 )
 from .coordinator import SyncManager, trackmap_cache_dir, trackmap_cache_stats
 from .effects.modes import sanitize_auto_levels
@@ -455,6 +458,10 @@ def _register_services(hass: HomeAssistant) -> None:
             changes["auto_levels"] = sanitize_auto_levels(call.data[CONF_AUTO_LEVELS])
         if CONF_AUTO_TIMING in call.data:
             changes["auto_timing"] = bool(call.data[CONF_AUTO_TIMING])
+        if CONF_ADVANCED in call.data:
+            changes["advanced"] = bool(call.data[CONF_ADVANCED])
+        if CONF_TUNABLES in call.data:
+            changes["tunables"] = sanitize_tunables(call.data[CONF_TUNABLES])
         if CONF_EFFECT in call.data:
             changes["effect"] = SyncEffect(call.data[CONF_EFFECT])
         if CONF_COLOUR in call.data:
@@ -493,6 +500,9 @@ def _register_services(hass: HomeAssistant) -> None:
         ),
         # Opt-in per-song timing auto-calibration (only meaningful with a live tap).
         vol.Optional(CONF_AUTO_TIMING): cv.boolean,
+        # Advanced live tunables: a toggle + a {name: factor} dict of overrides.
+        vol.Optional(CONF_ADVANCED): cv.boolean,
+        vol.Optional(CONF_TUNABLES): dict,
         vol.Optional(CONF_EFFECT): vol.In([str(e) for e in SyncEffect]),
         vol.Optional(CONF_COLOUR): vol.In([str(c) for c in ColorScheme]),
         vol.Optional(CONF_BRIGHTNESS): vol.All(

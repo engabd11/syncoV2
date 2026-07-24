@@ -14,7 +14,7 @@ import logging
 import time
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -46,6 +46,7 @@ from .const import (
     ANALYSIS_HOP,
     ANALYSIS_SAMPLE_RATE,
     BANDS,
+    CONF_ADVANCED,
     CONF_AREAS,
     CONF_AUTO_LEVELS,
     CONF_AUTO_TIMING,
@@ -61,6 +62,7 @@ from .const import (
     CONF_SUBSONIC_URL,
     CONF_SUBSONIC_USER,
     CONF_TIMING_MS,
+    CONF_TUNABLES,
     DEFAULT_AUTO_LEVELS,
     DEFAULT_AUTO_TIMING,
     DEFAULT_BRIGHTNESS,
@@ -77,6 +79,7 @@ from .const import (
     ColorScheme,
     SyncEffect,
     SyncMode,
+    sanitize_tunables,
     signal_area_update,
 )
 from .effects.engine import EffectEngine
@@ -225,6 +228,10 @@ class AreaSettings:
     auto_levels: tuple[SyncMode, ...] = DEFAULT_AUTO_LEVELS
     # Auto timing: calibrate the per-song startup delay instead of manual trim.
     auto_timing: bool = DEFAULT_AUTO_TIMING
+    # Advanced live tunables (opt-in): show + apply the knob overrides. When off,
+    # the engine uses the mode's coded params regardless of stored tunable values.
+    advanced: bool = False
+    tunables: dict[str, float] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict) -> AreaSettings:
@@ -252,6 +259,8 @@ class AreaSettings:
                 data.get(CONF_AUTO_LEVELS, DEFAULT_AUTO_LEVELS)
             ),
             auto_timing=bool(data.get(CONF_AUTO_TIMING, DEFAULT_AUTO_TIMING)),
+            advanced=bool(data.get(CONF_ADVANCED, False)),
+            tunables=sanitize_tunables(data.get(CONF_TUNABLES, {})),
         )
 
     def to_dict(self) -> dict:
@@ -265,6 +274,8 @@ class AreaSettings:
             CONF_LATENCY_MS: self.latency_ms,
             CONF_AUTO_LEVELS: [str(m) for m in self.auto_levels],
             CONF_AUTO_TIMING: self.auto_timing,
+            CONF_ADVANCED: self.advanced,
+            CONF_TUNABLES: dict(self.tunables),
         }
 
 
@@ -406,6 +417,9 @@ class SyncSession:
         return self._auto_level if mode is SyncMode.AUTO else mode
 
     async def start(self) -> None:
+        self._engine.set_tunables(
+            self._settings.tunables if self._settings.advanced else {}
+        )
         self._engine.set_mode(self._effective_mode(self._settings.mode))
         self._engine.set_effect(self._settings.effect)
         self._engine.set_brightness(self._settings.brightness)
@@ -467,6 +481,8 @@ class SyncSession:
         """Live-apply changed settings to the running session."""
         prev = self._settings
         self._settings = settings
+        # Advanced tunables first, so the mode below is built with them folded in.
+        self._engine.set_tunables(settings.tunables if settings.advanced else {})
         self._engine.set_mode(self._effective_mode(settings.mode))
         self._engine.set_effect(settings.effect)
         self._engine.set_brightness(settings.brightness)
@@ -1852,10 +1868,17 @@ class SyncManager:
     def area_attributes(self, area_id: str) -> dict:
         """Now-playing / album-colour / bpm data for an active area (for cards).
 
-        Empty when the area isn't syncing, so the switch drops the attributes.
+        Now-playing keys are present only while syncing; the persistent advanced
+        tunables are always carried so the card can show its knob section (and
+        their values) whether or not the area is currently playing.
         """
         session = self._sessions.get(area_id)
-        return dict(session.public_state) if session is not None else {}
+        attrs = dict(session.public_state) if session is not None else {}
+        s = self.get_settings(area_id)
+        attrs["advanced"] = s.advanced
+        if s.advanced and s.tunables:
+            attrs["tunables"] = dict(s.tunables)
+        return attrs
 
     def player_candidates(self, area_id: str) -> dict:
         """The players this area may be told to follow (for the card's picker).
@@ -1916,6 +1939,10 @@ class SyncManager:
         self._settings[area_id] = updated
         if (session := self._sessions.get(area_id)) is not None:
             session.apply_settings(updated)
+        # Refresh the area's entities (e.g. the Advanced switch, and the sync
+        # switch's attributes the card reads) so a change from any surface shows
+        # everywhere.
+        async_dispatcher_send(self.hass, signal_area_update(area_id))
         await self._persist_settings()
 
     def _all_managers(self) -> list[SyncManager]:
