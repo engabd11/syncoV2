@@ -182,6 +182,27 @@ _SCHEMES: dict[ColorScheme, Palette] = {
         (0.66, 0.90, 1.0), (0.72, 0.85, 1.0), (0.78, 0.85, 1.0),
         (0.86, 0.78, 1.0),
     )),
+    # --- Extra curated palettes ---
+    # Neon: electric cyan -> magenta -> green -> hot pink (punchy, high-energy).
+    ColorScheme.NEON: Palette(_hues(
+        (0.505, 0.94, 0.99), (0.845, 0.82, 1.0), (0.32, 0.92, 1.0),
+        (0.945, 0.82, 1.0),
+    )),
+    # Peacock: teal -> ocean blue -> emerald -> gold (jewel tones).
+    ColorScheme.PEACOCK: Palette(_hues(
+        (0.515, 0.87, 0.90), (0.60, 0.88, 1.0), (0.44, 0.90, 0.85),
+        (0.12, 0.80, 1.0),
+    )),
+    # Citrus: lemon -> lime -> orange -> coral (bright and fruity).
+    ColorScheme.CITRUS: Palette(_hues(
+        (0.15, 0.76, 1.0), (0.24, 0.80, 0.92), (0.09, 0.89, 1.0),
+        (0.005, 0.64, 1.0),
+    )),
+    # Rose gold: blush -> rose -> copper -> champagne (soft, warm, metallic).
+    ColorScheme.ROSEGOLD: Palette(_hues(
+        (0.04, 0.24, 1.0), (0.02, 0.45, 1.0), (0.04, 0.58, 0.88),
+        (0.12, 0.62, 0.96),
+    )),
 }
 
 # Fallback used when album-art extraction is unavailable.

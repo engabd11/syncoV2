@@ -178,6 +178,9 @@ class EffectEngine:
         self._base_params = MODE_PARAMS[DEFAULT_MODE]
         self._tunables: dict[str, float] = {}
         self.params = self._base_params
+        # The current intensity rung (for effects that scale their feel per rung,
+        # e.g. Fireworks). Kept in sync by set_mode.
+        self.mode: SyncMode = DEFAULT_MODE
         self.effect: SyncEffect = DEFAULT_EFFECT
         self.brightness = 1.0  # master ceiling (0..1), independent of mode
         self.time: float = 0.0
@@ -593,6 +596,7 @@ class EffectEngine:
         self.palette = get_palette(scheme)
 
     def set_mode(self, mode: SyncMode) -> None:
+        self.mode = mode
         self._base_params = MODE_PARAMS[mode]
         self.params = self._with_tunables(self._base_params)
 
@@ -701,7 +705,7 @@ class EffectEngine:
         """
         return MOVIE_PARAMS if self.effect is SyncEffect.MOVIES else self.params
 
-    def render_idle(self, phase: float, level: float = 0.12) -> dict[int, RGB]:
+    def render_idle(self, phase: float, level: float = 0.20) -> dict[int, RGB]:
         """A gentle, mode-independent palette glow for paused/idle state."""
         dim = level * self.brightness
         out: dict[int, RGB] = {}
@@ -710,8 +714,10 @@ class EffectEngine:
             c = self.palette.sample(info["xrank"] + phase)
             m = max(c)
             nc = (c[0] / m, c[1] / m, c[2] / m) if m > 1e-6 else (0.0, 0.0, 0.0)
-            # Respect a dark theme swatch's value even in the idle glow.
-            d = dim * (0.35 + 0.65 * m)
+            # Respect a dark theme swatch's value even in the idle glow, but keep a
+            # higher floor so a dark swatch still glows clearly rather than dropping
+            # near black.
+            d = dim * (0.5 + 0.5 * m)
             out[ch.channel_id] = (nc[0] * d, nc[1] * d, nc[2] * d)
         return out
 
@@ -728,8 +734,9 @@ class EffectEngine:
         whatever palette the last song left, so the room keeps that song's colours.
         """
         inten = max(0.0, min(1.0, intensity))
-        base = 0.13          # soft floor glow, always present
-        amp = 0.22 * inten   # depth of the moving brightness waves
+        base = 0.22          # soft floor glow, always present (lifted so a paused
+                             # or empty room reads as a present glow, not near-off)
+        amp = 0.30 * inten   # depth of the moving brightness waves
         breath = 0.88 + 0.12 * math.sin(2.0 * math.pi * 0.045 * t)  # slow swell
         out: dict[int, RGB] = {}
         for ch in self.channels:
@@ -743,7 +750,7 @@ class EffectEngine:
             w1 = 0.5 + 0.5 * math.sin(2.0 * math.pi * (info["nx"] * 0.9 - t * 0.10))
             w2 = 0.5 + 0.5 * math.sin(2.0 * math.pi * (info["nz"] * 0.7 + t * 0.06) + 1.7)
             wave = 0.6 * w1 + 0.4 * w2
-            d = self.brightness * (base + amp * wave) * breath * (0.35 + 0.65 * m)
+            d = self.brightness * (base + amp * wave) * breath * (0.5 + 0.5 * m)
             out[ch.channel_id] = (nc[0] * d, nc[1] * d, nc[2] * d)
         return out
 

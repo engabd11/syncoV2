@@ -140,6 +140,11 @@ class ColorScheme(StrEnum):
     BLOSSOM = "blossom"
     HONOLULU = "honolulu"
     GALAXY = "galaxy"
+    # Extra curated palettes (fill the picker with distinct, sensible themes)
+    NEON = "neon"  # electric cyan / magenta / green / hot pink
+    PEACOCK = "peacock"  # teal / blue / emerald / gold jewel tones
+    CITRUS = "citrus"  # lemon / lime / orange / coral
+    ROSEGOLD = "rosegold"  # blush / rose / copper / champagne
 
 
 class SyncMode(StrEnum):

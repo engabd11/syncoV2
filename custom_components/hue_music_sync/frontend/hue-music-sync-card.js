@@ -13,7 +13,7 @@
 // Cosmetic version (shown in the console banner). The browser cache-bust no
 // longer depends on this: the integration appends ?v=<content-hash> derived from
 // this file's bytes, so any edit is picked up without a manual hard refresh.
-const VERSION = "1.22.0";
+const VERSION = "1.23.0";
 
 /* ------------------------- Palette data ------------------------- */
 // Colour schemes from the integration, each a small gradient swatch.
@@ -21,6 +21,14 @@ const VERSION = "1.22.0";
 const PALETTES = [
   { id: "album",    name: "Album colours", colors: ["#ff2d7e", "#7b5cff", "#27d3ff"], album: true,
     aliases: ["album", "albumcolours", "albumcolors", "albumart"] },
+  // Album colours v2 (weighted): shows the same live album palette but with a
+  // solid ring marker; each colour holds for its share of the cover.
+  { id: "album_art_v2", name: "Album colours v2", colors: ["#ff2d7e", "#7b5cff", "#27d3ff"],
+    album: true, weighted: true,
+    aliases: ["albumartv2", "albumcoloursv2", "albumcolorsv2", "albumv2"] },
+  // Song colours: harmony-derived; a representative warm→cool gradient swatch.
+  { id: "song",     name: "Song colours",  colors: ["#ff5a3c", "#ffd23b", "#27d3ff", "#7b5cff"], song: true,
+    aliases: ["song", "songcolours", "songcolors"] },
   { id: "rainbow",  name: "Rainbow",       colors: ["#ff3b3b", "#ffd23b", "#3bff7a", "#3bc9ff", "#b03bff"] },
   { id: "sunset",   name: "Sunset",        colors: ["#ff7a3d", "#ff4d8d", "#9b4dff"] },
   { id: "ocean",    name: "Ocean",         colors: ["#1fd7c1", "#1f9bff", "#2c4bff"] },
@@ -33,6 +41,10 @@ const PALETTES = [
   { id: "blossom",  name: "Blossom",       colors: ["#ffb3d9", "#ff6fb0", "#c44d9b"], scene: true },
   { id: "honolulu", name: "Honolulu",      colors: ["#ff9a3d", "#ff4d7a", "#a34dff"], scene: true },
   { id: "galaxy",   name: "Galaxy",        colors: ["#3d6bff", "#7b3dff", "#ff3dd0"], scene: true },
+  { id: "neon",     name: "Neon",          colors: ["#0ff0fc", "#ff2df7", "#39ff14", "#ff2d6e"] },
+  { id: "peacock",  name: "Peacock",       colors: ["#0fb8c2", "#1f6dff", "#12b886", "#ffc233"] },
+  { id: "citrus",   name: "Citrus",        colors: ["#fff03d", "#9be62e", "#ff9f1c", "#ff5e5b"] },
+  { id: "rosegold", name: "Rose gold",     colors: ["#ffd7c2", "#ff9a8b", "#e07a5f", "#f4c95d"] },
 ];
 
 const DEFAULT_INTENSITIES = ["Auto", "Subtle", "Medium", "High", "Intense"];
@@ -304,12 +316,17 @@ const CARD_CSS = `
   .hue-autorange .hue-area-trigger { width: 100%; }
 
   /* -- palette dots -- */
-  .hue-dots { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; }
+  /* Centre the wrapped row so a short final row reads as intentional rather than
+     leaving a lopsided gap on the right. */
+  .hue-dots { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 9px; }
   .hue-dot { position: relative; border: none; border-radius: 50%; cursor: pointer; padding: 0; width: 26px; height: 26px;
     transition: transform .16s, box-shadow .2s; outline: 1px solid #ffffff1f; outline-offset: -1px; }
   .hue-dot:hover { transform: scale(1.12); }
   .hue-dot.on { transform: scale(1.06); }
   .hue-dot-ring { position: absolute; inset: 3px; border-radius: 50%; border: 1.5px dashed #ffffffcc; opacity: .8; }
+  /* Album colours v2 (weighted): a solid ring distinguishes it from the dashed
+     "Album colours" dot even though both show the live album palette. */
+  .hue-dot-ring.v2 { border-style: solid; }
 
   /* -- slider -- */
   .hue-slider-row { display: flex; align-items: center; gap: 11px; }
@@ -363,13 +380,33 @@ const CARD_CSS = `
   .hue-bars { display: flex; align-items: flex-end; width: 100%; height: 64px; gap: 3px; }
   .hue-bar { flex: 1; min-width: 0; border-radius: 4px; }
 
+  /* -- full-card album backdrop: a heavily-blurred wash of the cover art that
+     covers the WHOLE card and dissolves down through the controls, so the art
+     and the card look melted together rather than the art living only in the
+     hero. Masked to fade out before the bottom; sits behind everything (the
+     body scrim below is semi-transparent so this shows through it, darkened for
+     legibility). Hidden until the art URL validates (see _applyArt). -- */
+  .hue-card-art { position: absolute; inset: 0; z-index: 0; background-size: cover;
+    background-position: center; filter: blur(46px) saturate(1.4) brightness(0.6);
+    opacity: 0; transition: opacity .7s; pointer-events: none;
+    /* Fade IN just below the hero top (the hero already carries its own blurred
+       art up there — don't double-expose the pill/title), reach full through the
+       upper controls, then dissolve before the bottom. */
+    -webkit-mask: linear-gradient(180deg, transparent 0%, rgba(0,0,0,.35) 18%, #000 40%, #000 66%, transparent 94%);
+    mask: linear-gradient(180deg, transparent 0%, rgba(0,0,0,.35) 18%, #000 40%, #000 66%, transparent 94%); }
+  .hue-card-art.show { opacity: .32; }
+
   /* -- ambient hero -- */
   .hue-hero { position: relative; padding: 18px 20px 16px; overflow: hidden; }
   /* Blurred album art behind the colour wash: the card becomes "this song's
-     card". Hidden (opacity 0) until the art URL has actually loaded. */
+     card". Hidden (opacity 0) until the art URL has actually loaded. A soft
+     radial mask feathers the rectangle edges so it dissolves instead of ending
+     in a hard blurred box. */
   .hue-hero-art { position: absolute; inset: -24%; z-index: 0; background-size: cover;
     background-position: center; filter: blur(26px) saturate(1.25) brightness(0.62);
-    opacity: 0; transition: opacity .6s; }
+    opacity: 0; transition: opacity .6s;
+    -webkit-mask: radial-gradient(120% 105% at 50% 32%, #000 52%, transparent 100%);
+    mask: radial-gradient(120% 105% at 50% 32%, #000 52%, transparent 100%); }
   .hue-hero-art.show { opacity: .55; }
   .hue-hero-wash { position: absolute; inset: -20%; z-index: 0; filter: blur(8px); transition: opacity .4s; }
   .hue-hero-bars { position: absolute; left: 0; right: 0; bottom: 0; height: 64px; z-index: 0; opacity: .55;
@@ -390,7 +427,11 @@ const CARD_CSS = `
   .hue-bright-mini { display: inline-flex; align-items: center; gap: 5px; padding: 7px 11px; border-radius: 11px; background: #00000040;
     backdrop-filter: blur(6px); border: 1px solid var(--hue-line); font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; }
   .hue-bright-mini-icon { font-size: 12px; }
-  .hue-amb-body { position: relative; padding: 16px 20px 20px; background: linear-gradient(180deg, #121120cc, #0f0e1c); }
+  /* Semi-transparent dark scrim (not an opaque fill) so the full-card album
+     backdrop bleeds through the top of the controls and fades to dark toward the
+     bottom — the "melt" continues past the hero — while keeping labels legible. */
+  .hue-amb-body { position: relative; z-index: 1; padding: 16px 20px 20px;
+    background: linear-gradient(180deg, rgba(15,14,28,.28) 0%, rgba(15,14,28,.62) 55%, rgba(15,14,28,.86) 100%); }
 
   /* -- transport row (lives at the bottom of the now-playing right column,
         aligned to the cover's bottom edge; the buttons flex to fill the band
@@ -991,12 +1032,12 @@ class HueMusicSyncCard extends HTMLElement {
       colourValue = colourEnt.state;
       colourOptions = colourEnt.attributes.options.map((o) => {
         const sw2 = matchPalette(o);
-        return { value: o, name: sw2 ? sw2.name : titleize(o), colors: sw2 ? sw2.colors : DEFAULT_SWATCH, album: !!(sw2 && sw2.album) };
+        return { value: o, name: sw2 ? sw2.name : titleize(o), colors: sw2 ? sw2.colors : DEFAULT_SWATCH, album: !!(sw2 && sw2.album), weighted: !!(sw2 && sw2.weighted) };
       });
     } else {
       colourEntity = null;
       colourValue = null;
-      colourOptions = PALETTES.map((p) => ({ value: p.id, name: p.name, colors: p.colors, album: !!p.album }));
+      colourOptions = PALETTES.map((p) => ({ value: p.id, name: p.name, colors: p.colors, album: !!p.album, weighted: !!p.weighted }));
     }
 
     const brightEnt = st(area.brightness);
@@ -1273,6 +1314,14 @@ class HueMusicSyncCard extends HTMLElement {
       ? `0 30px 80px -28px ${accent}77, 0 0 0 1px var(--hue-line)`
       : "0 0 0 1px var(--hue-line)";
 
+    // Full-card blurred album backdrop (behind everything). Applied/validated by
+    // _applyArt; the CSS mask fades it down through the controls so the art and
+    // the card melt together.
+    const cardArt = document.createElement("div");
+    cardArt.className = "hue-card-art";
+    this._cardArtNode = cardArt;
+    card.appendChild(cardArt);
+
     /* hero */
     const hero = document.createElement("div");
     hero.className = "hue-hero";
@@ -1345,7 +1394,15 @@ class HueMusicSyncCard extends HTMLElement {
     // right, so the artwork gets the extra vertical room.
     const heroNow = document.createElement("div");
     heroNow.className = "hue-hero-now";
-    heroNow.appendChild(this._cover(96, 18, m.now.art));
+    const heroCover = this._cover(96, 18, m.now.art);
+    // Feather the cover into a colour halo drawn from the album/palette, so the
+    // artwork tile melts into the surrounding wash rather than reading as a hard
+    // rectangle pasted on top. (Keeps the base depth/inset shadows.)
+    heroCover.style.boxShadow =
+      `0 8px 22px -6px #000a, inset 0 0 0 1px #fff1,` +
+      ` 0 0 30px -4px ${pal.colors[0]}66,` +
+      ` 0 0 66px -12px ${(pal.colors[pal.colors.length - 1] || pal.colors[0])}40`;
+    heroNow.appendChild(heroCover);
 
     const right = document.createElement("div");
     right.className = "hue-now-right";
@@ -1738,6 +1795,10 @@ class HueMusicSyncCard extends HTMLElement {
     const apply = (u) => {
       const css = `url("${u}")`;
       if (this._coverArtNode) this._coverArtNode.style.backgroundImage = css;
+      if (this._cardArtNode) {
+        this._cardArtNode.style.backgroundImage = css;
+        this._cardArtNode.classList.add("show");
+      }
       if (this._heroArtNode) {
         this._heroArtNode.style.backgroundImage = css;
         this._heroArtNode.classList.add("show");
@@ -2124,20 +2185,31 @@ class HueMusicSyncCard extends HTMLElement {
     this._sendTunables(m, tun);
   }
 
-  // Card background tinted by the album/palette colours: soft glows from the top
-  // corners that reach well down the card plus one rising from the bottom, over
-  // the base gradient — so the current song's hue bleeds through the WHOLE card
-  // (past the hero divider), not just the header band.
+  // Card background tinted by the album/palette colours: a soft "mesh" of glows
+  // placed around the card, one per extracted colour, over the base gradient —
+  // so the current song's whole palette (not just two or three hues) bleeds
+  // through the WHOLE card and melts into the album backdrop. Alphas stay low so
+  // it reads as an artful tint, not a colour cast.
   _albumTintBackground(wc, baseFrom, baseTo) {
-    const a = wc[0];
-    const b = wc[wc.length - 1] || wc[0];
-    const c = wc[1] || wc[0];
-    return (
-      `radial-gradient(115% 75% at 15% -8%, ${a}40 0%, transparent 60%),` +
-      `radial-gradient(110% 70% at 90% 0%, ${b}34 0%, transparent 58%),` +
-      `radial-gradient(130% 78% at 55% 114%, ${c}26 0%, transparent 62%),` +
-      `linear-gradient(180deg, ${baseFrom} 0%, ${baseTo} 100%)`
-    );
+    const cols = (wc && wc.length) ? wc : [DEFAULT_SWATCH[0]];
+    // Anchor points + alpha (hex suffix) for up to 5 palette colours, spread so
+    // the colour reaches every corner and down the middle of the card.
+    const anchors = [
+      ["120% 82% at 12% -10%", "44"],
+      ["112% 74% at 90% -6%", "3a"],
+      ["120% 78% at 52% 110%", "32"],
+      ["95% 72% at 94% 58%", "2c"],
+      ["98% 74% at 6% 54%", "28"],
+    ];
+    const n = Math.min(cols.length, anchors.length);
+    const layers = [];
+    for (let i = 0; i < n; i++) {
+      layers.push(
+        `radial-gradient(${anchors[i][0]}, ${cols[i]}${anchors[i][1]} 0%, transparent ${58 + i}%)`
+      );
+    }
+    layers.push(`linear-gradient(180deg, ${baseFrom} 0%, ${baseTo} 100%)`);
+    return layers.join(",");
   }
 
   _dots(options, value, onChange) {
@@ -2154,7 +2226,7 @@ class HueMusicSyncCard extends HTMLElement {
         : "none";
       if (o.album) {
         const ring = document.createElement("span");
-        ring.className = "hue-dot-ring";
+        ring.className = "hue-dot-ring" + (o.weighted ? " v2" : "");
         b.appendChild(ring);
       }
       b.addEventListener("click", () => onChange(o.value));
@@ -2951,9 +3023,17 @@ const TABLET_CSS = `
     justify-content: space-between; gap: 14px; }
   .hue-land-right .hue-field { margin-bottom: 0; }
 
+  /* Landscape album backdrop: concentrate the blurred cover behind the left
+     column and dissolve it toward the right-hand controls (which stay dark and
+     legible), instead of the mobile top-to-bottom fade. */
+  .hue-land .hue-card-art {
+    -webkit-mask: radial-gradient(115% 130% at 24% 42%, #000 26%, rgba(0,0,0,.32) 60%, transparent 84%);
+    mask: radial-gradient(115% 130% at 24% 42%, #000 26%, rgba(0,0,0,.32) 60%, transparent 84%);
+  }
+
   /* now-playing block */
   .hue-land-cover { position: relative; align-self: center; margin: 6px 0 18px; }
-  .hue-land-cover-glow { position: absolute; inset: -22px; border-radius: 44px; pointer-events: none; filter: blur(26px); transition: opacity .08s; }
+  .hue-land-cover-glow { position: absolute; inset: -34px; border-radius: 52px; pointer-events: none; filter: blur(30px); transition: opacity .08s; }
   .hue-land-meta { text-align: center; margin-bottom: 18px; }
   .hue-land-meta .hue-now-track { font-size: 23px; }
   .hue-land-meta .hue-now-track-inner { display: inline-block; white-space: nowrap; }
@@ -3102,6 +3182,15 @@ class HueMusicSyncTabletCard extends HueMusicSyncCard {
       ? `0 34px 90px -28px ${accent}66, 0 0 0 1px var(--hue-line)`
       : "0 0 0 1px var(--hue-line)";
 
+    // Full-bleed blurred album backdrop — the landscape card previously had NO
+    // full-card art (only the cover carried it). This melts the artwork across
+    // the card; the tablet mask (TABLET_CSS) concentrates it behind the left
+    // cover and fades toward the right-hand controls. Applied by _applyArt.
+    const cardArt = document.createElement("div");
+    cardArt.className = "hue-card-art";
+    this._cardArtNode = cardArt;
+    card.appendChild(cardArt);
+
     // Soft palette wash across the top (pulsed by the shared loop via _washNode).
     const wash = document.createElement("div");
     wash.className = "hue-hero-wash";
@@ -3175,11 +3264,21 @@ class HueMusicSyncTabletCard extends HueMusicSyncCard {
     coverWrap.className = "hue-land-cover";
     const glow = document.createElement("div");
     glow.className = "hue-land-cover-glow";
+    // Richer multi-stop halo using more of the palette, so the cover dissolves
+    // into a colour cloud rather than sitting on a flat dark panel.
+    const gMid = wc[1] || wc[0];
+    const gEnd = wc[wc.length - 1] || wc[0];
     glow.style.background =
-      `radial-gradient(circle, ${wc[0]}55 0%, ${wc[wc.length - 1]}2e 58%, transparent 74%)`;
+      `radial-gradient(circle, ${wc[0]}66 0%, ${gMid}44 34%, ${gEnd}2a 62%, transparent 78%)`;
     this._landCoverGlow = glow;
     coverWrap.appendChild(glow);
-    coverWrap.appendChild(this._cover(208, 26, m.now.art));
+    const landCover = this._cover(208, 26, m.now.art);
+    // Feather the cover edge into the halo with a soft coloured outer glow (keeps
+    // the base depth/inset shadows).
+    landCover.style.boxShadow =
+      `0 8px 22px -6px #000a, inset 0 0 0 1px #fff1,` +
+      ` 0 0 46px -6px ${wc[0]}59, 0 0 90px -18px ${gEnd}3a`;
+    coverWrap.appendChild(landCover);
     left.appendChild(coverWrap);
 
     // Track / artist (marquee for long titles, like the mobile card).
