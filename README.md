@@ -115,6 +115,7 @@ An immersive now-playing header themed by the music itself — the blurred album
 
 ### Behaviour
 - **Idle beauty** — while paused, the card (and the room) drifts slowly through the palette instead of freezing
+- **Ambient idle show** — when the music is genuinely paused or nothing is queued, the room blossoms into a slow, wandering glow: colours drift through the palette while two gentle waves cross the room out of phase, so the light seems to move on its own (dim and non-flashing — a lava-lamp, not a strobe). It only emerges after a few seconds of real idle and fades its movement in, so the brief gap while the player moves from one song to the next never triggers it
 - Respects `prefers-reduced-motion`; pauses all animation when scrolled off-screen (wall tablets keep dashboards open 24/7)
 - **Demo mode** — added with no config, the card renders a self-running demo so you can style your dashboard before wiring entities
 

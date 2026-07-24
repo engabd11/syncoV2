@@ -715,6 +715,38 @@ class EffectEngine:
             out[ch.channel_id] = (nc[0] * d, nc[1] * d, nc[2] * d)
         return out
 
+    def render_idle_show(self, t: float, intensity: float = 1.0) -> dict[int, RGB]:
+        """A slow, dreamy ambient "show" for a genuinely idle/paused room.
+
+        Colours flow across the room and drift through the palette while two slow,
+        out-of-phase spatial waves and a gentle global breath make the light seem
+        to move on its own — a glow that wanders rather than a flat wash. ``t`` is
+        elapsed seconds; ``intensity`` (0..1) fades the *movement* in, so at 0 it
+        is the calm palette glow (matching :meth:`render_idle`) and grows to the
+        full wandering show at 1. Deliberately slow (sub-0.1 Hz) so it soothes
+        rather than distracts, and it never flashes. Mode-independent, and it uses
+        whatever palette the last song left, so the room keeps that song's colours.
+        """
+        inten = max(0.0, min(1.0, intensity))
+        base = 0.13          # soft floor glow, always present
+        amp = 0.22 * inten   # depth of the moving brightness waves
+        breath = 0.88 + 0.12 * math.sin(2.0 * math.pi * 0.045 * t)  # slow swell
+        out: dict[int, RGB] = {}
+        for ch in self.channels:
+            info = self.cmap[ch.channel_id]
+            # Colour spreads gently across the room and drifts slowly over time.
+            c = self.palette.sample(info["xrank"] * 0.6 + t * 0.045)
+            m = max(c)
+            nc = (c[0] / m, c[1] / m, c[2] / m) if m > 1e-6 else (0.0, 0.0, 0.0)
+            # Two slow waves on different axes cross the room out of phase, so the
+            # bright spot wanders organically instead of sweeping in a line.
+            w1 = 0.5 + 0.5 * math.sin(2.0 * math.pi * (info["nx"] * 0.9 - t * 0.10))
+            w2 = 0.5 + 0.5 * math.sin(2.0 * math.pi * (info["nz"] * 0.7 + t * 0.06) + 1.7)
+            wave = 0.6 * w1 + 0.4 * w2
+            d = self.brightness * (base + amp * wave) * breath * (0.35 + 0.65 * m)
+            out[ch.channel_id] = (nc[0] * d, nc[1] * d, nc[2] * d)
+        return out
+
     @property
     def active_waves(self) -> list[Wave]:
         """Live beat wavefronts (read by :func:`.modes.render`)."""

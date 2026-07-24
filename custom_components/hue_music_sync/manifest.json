@@ -11,5 +11,5 @@
   "issue_tracker": "https://github.com/engabd11/syncoV2/issues",
   "loggers": ["custom_components.hue_music_sync"],
   "requirements": ["numpy>=1.23"],
-  "version": "1.50.0"
+  "version": "1.51.0"
 }

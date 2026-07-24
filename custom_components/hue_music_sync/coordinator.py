@@ -98,6 +98,13 @@ _LOGGER = logging.getLogger(__name__)
 
 _IDLE_FPS = 10
 _IDLE_REOPEN_S = 2.0
+# Ambient idle "show" (slow wandering glow) for a genuinely paused/empty room.
+# It only emerges after the room has been idle this long, then fades its movement
+# in over the following window — so a brief gap while the player moves from one
+# song to the next (a couple of seconds at most) never triggers it and can't
+# distract. Until then the calm palette glow holds, exactly as before.
+_IDLE_SHOW_GRACE_S = 3.5
+_IDLE_SHOW_FADE_S = 3.0
 
 # DTLS auto-reconnect: a dropped channel (transient packet loss, bridge hiccup)
 # should recover on its own instead of silently ending the session. The window
@@ -849,7 +856,8 @@ class SyncSession:
                 pass
 
     async def _run(self) -> None:
-        idle_color_phase = 0.0
+        idle_phase = 0.0
+        idle_since: float | None = None  # when the room last went idle (else None)
         last_t = time.monotonic()
         last_reopen = 0.0
         period = 1.0 / DEFAULT_STREAM_FPS
@@ -880,16 +888,20 @@ class SyncSession:
                             last_reopen = now
                             await self._ensure_source()
                         if self._source is None:
-                            idle_color_phase += dt * 0.05
-                            await self._send_idle(idle_color_phase)
+                            if idle_since is None:
+                                idle_since = now
+                            idle_phase += dt
+                            await self._send_idle(idle_phase, now - idle_since)
                             await asyncio.sleep(1.0 / _IDLE_FPS)
                             continue
 
                     # Paused/stopped: idle (keep the source for a fast resume).
                     pstate = self._hass.states.get(self._source.entity_id)
                     if pstate is None or pstate.state != "playing":
-                        idle_color_phase += dt * 0.05
-                        await self._send_idle(idle_color_phase)
+                        if idle_since is None:
+                            idle_since = now
+                        idle_phase += dt
+                        await self._send_idle(idle_phase, now - idle_since)
                         await asyncio.sleep(1.0 / _IDLE_FPS)
                         continue
 
@@ -897,6 +909,10 @@ class SyncSession:
                     if frame is None:
                         await self._reset_source()
                         continue
+                    # Real audio is flowing again: leave idle. (A brief between-song
+                    # gap clears this as soon as the next frame arrives — before the
+                    # grace elapses — so the ambient show never triggers on it.)
+                    idle_since = None
 
                     self._maybe_refresh_album_art()
                     if self._settings.colour == ColorScheme.SONG and frame.chroma:
@@ -1033,9 +1049,15 @@ class SyncSession:
             _LOGGER.debug("Release of %s stream failed: %s", self._config.name, err)
         await self._restore_snapshot()
 
-    async def _send_idle(self, phase: float) -> None:
-        # Gentle dim glow drifting through the palette (paused / waiting for audio).
-        await self._safe_send(self._engine.render_idle(phase))
+    async def _send_idle(self, phase: float, idle_elapsed: float) -> None:
+        # Calm palette glow that, once the room has been idle past the grace
+        # window, blossoms into the slow wandering "show" — its movement fading in
+        # over ``_IDLE_SHOW_FADE_S``. A brief between-song gap stays below the
+        # grace, so it never sees more than the calm glow.
+        show = max(
+            0.0, min(1.0, (idle_elapsed - _IDLE_SHOW_GRACE_S) / _IDLE_SHOW_FADE_S)
+        )
+        await self._safe_send(self._engine.render_idle_show(phase, show))
 
     async def _send_timed(self, colors: dict, features: dict | None = None) -> None:
         """Send the frame through the timing-offset delay buffer.
