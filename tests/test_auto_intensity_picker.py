@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from hue_music_sync.const import DEFAULT_AUTO_LEVELS, INTENSITY_LADDER, SyncMode
 from hue_music_sync.effects.modes import (
+    _PICK_DWELL_S,
     AutoIntensityPicker,
     sanitize_auto_levels,
 )
@@ -276,3 +277,54 @@ def test_profile_never_leaves_the_enabled_set():
         for kw in (_QUIET, _LOUD):
             level = _run(AutoIntensityPicker(), allowed, **kw, profile=prof, seconds=14.0)
             assert level in allowed
+
+
+# --- precomputed (lag-free) section signal: switch on time, not seconds late ---
+
+def test_precomputed_signal_maps_directly_without_smoothing_lag():
+    # The offline curve is mapped as given — one frame lands the rung, no envelope
+    # ramp. A quiet value sits low, a loud value high, both immediately.
+    win = dict(lo=0.30, hi=0.80, dynamics=0.6)
+    p = AutoIntensityPicker()
+    low = p.update(0.02, energy=0.0, salience=0.0, bpm=120, beat=False,
+                   allowed=ALL_RUNGS, signal=0.30, **win)
+    p2 = AutoIntensityPicker()
+    high = p2.update(0.02, energy=0.0, salience=0.0, bpm=120, beat=False,
+                     allowed=ALL_RUNGS, signal=0.80, **win)
+    assert low is SyncMode.SUBTLE     # bottom of the window -> lowest rung, frame 1
+    assert high is SyncMode.EXTREME   # top -> highest rung, frame 1
+
+
+def test_precomputed_signal_switches_within_the_dwell_not_seconds_after():
+    # A step from quiet to loud is picked up as soon as the dwell allows (~3.5 s),
+    # not delayed further by a slow envelope: the whole point of the offline curve.
+    p = AutoIntensityPicker()
+    win = dict(lo=0.30, hi=0.80, dynamics=0.6, allowed=ALL_RUNGS)
+    kw = dict(energy=0.0, salience=0.0, bpm=120, beat=False)
+    for _ in range(200):  # 4 s quiet -> settles Subtle
+        p.update(0.02, signal=0.30, **kw, **win)
+    assert p.level is SyncMode.SUBTLE
+    # Now a hard section jump to a full drop: within one dwell it reaches the top.
+    reached = None
+    for i in range(int(4.0 / 0.02)):
+        lvl = p.update(0.02, signal=0.98, **kw, **win)
+        if lvl is SyncMode.EXTREME:
+            reached = i * 0.02
+            break
+    assert reached is not None and reached <= _PICK_DWELL_S + 0.1
+
+
+def test_reset_clears_the_carried_rung_for_a_new_song():
+    # After a song settles high, reset() + allow_immediate_repick() lets the NEXT
+    # song's opening rung apply on its first frame (no carry-forward).
+    p = AutoIntensityPicker()
+    win = dict(lo=0.30, hi=0.80, dynamics=0.6, allowed=ALL_RUNGS)
+    kw = dict(energy=0.0, salience=0.0, bpm=120, beat=False)
+    for _ in range(400):
+        p.update(0.02, signal=0.98, **kw, **win)
+    assert p.level is SyncMode.EXTREME
+    p.reset()
+    assert p.level is None                      # nothing carried across
+    p.allow_immediate_repick()
+    opening = p.update(0.02, signal=0.30, **kw, **win)  # new song opens quiet
+    assert opening is SyncMode.SUBTLE           # correct on the very first frame

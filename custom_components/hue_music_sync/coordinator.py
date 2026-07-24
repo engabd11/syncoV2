@@ -563,6 +563,9 @@ class SyncSession:
             bpm=bpm,
             beat=frame.beat,
             allowed=self._settings.auto_levels,
+            # Offline lag-free section-intensity (map playback): mapped directly so
+            # the rung switch lands on time. None on live/metadata → picker smooths.
+            signal=frame.intensity_signal,
             **prof_kw,
         )
         if target is self._auto_level:
@@ -617,11 +620,11 @@ class SyncSession:
         self._map_prev_pos = None
         self._map_section = None
         self._prefetch_key = None  # re-evaluate the next track after a jump
-        # The Auto picker is deliberately NOT reset here: its smoothing carries
-        # across the track boundary so the room transitions instead of dipping,
-        # and a loud tail bleeding into a quiet intro decays out within ~2 s.
-        # The timing calibrator, in contrast, IS per-song: the startup slippage
-        # is measured fresh each track.
+        # The Auto picker is reset at the track-change site in the run loop (so a
+        # new song re-picks at once from its own section curve rather than
+        # carrying the previous rung); a bare source reset here keeps the current
+        # pick until the track id actually changes. The timing calibrator IS
+        # per-song: the startup slippage is measured fresh each track.
         self._timing_cal.reset()
 
     async def _reset_source(self) -> None:
@@ -932,6 +935,13 @@ class SyncSession:
                         self._map_prev_pos = None
                         self._map_section = None
                         self._map_commit = None  # re-decide the regime per track
+                        # Re-evaluate Auto for the NEW song at once: clear the
+                        # picker's carried level/envelope so the previous track's
+                        # rung can't linger for a couple of seconds, and drop the
+                        # dwell so the new song's opening rung applies immediately
+                        # (its own section curve makes that opening honest).
+                        self._auto_picker.reset()
+                        self._auto_picker.allow_immediate_repick()
                         # Fresh live-chroma state: the new song picks its own
                         # key, and the map (if it arrives) reclaims the colour.
                         self._chroma_ema = None

@@ -9,6 +9,8 @@ import pytest
 
 from hue_music_sync.audio.trackmap import (
     _MAX_ANALYSIS_ATTEMPTS,
+    _PROFILE_LOOKAHEAD_S,
+    _SECTION_WIN_S,
     IntensityProfile,
     MapResult,
     TrackFeatures,
@@ -392,6 +394,8 @@ def test_build_intensity_profile_flat_vs_dynamic():
     assert prof.sig_hi > prof.sig_lo
     assert prof.dynamics > 0.2          # a genuinely dynamic energy curve
     assert prof.tilt > 0.0              # bass-heavy bands -> positive tilt
+    assert prof.curve.shape == (n,)     # one lag-free section value per frame
+    assert float(prof.curve.min()) >= 0.0 and float(prof.curve.max()) <= 1.0
     # Flat: constant energy -> near-zero true dynamics (stays compressed).
     flat = build_intensity_profile(_flat_features(n, 0.6, bass_heavy), 120.0, beats, 60.0)
     assert flat is not None
@@ -399,6 +403,26 @@ def test_build_intensity_profile_flat_vs_dynamic():
     # Too short to profile -> None (graceful).
     assert build_intensity_profile(_flat_features(10, 0.6, bass_heavy), 120.0, beats, 0.2) is None
     assert build_intensity_profile(None, 120.0, beats, 60.0) is None
+
+
+def test_section_curve_is_lag_free_at_a_step():
+    # A hard quiet->loud step: the centred curve transitions *on* the step, not a
+    # smoothing time-constant after it (that's what lets a rung switch land on
+    # time). win = _SECTION_WIN_S at 50 fps.
+    n = 4000
+    energy = np.zeros(n, dtype=np.float32)
+    energy[n // 2 :] = 1.0
+    z = np.zeros(n, dtype=np.float32)
+    feat = TrackFeatures(
+        bands=np.tile(np.asarray((0.5,) * 5, dtype=np.float32), (n, 1)),
+        energy=energy, flux=z, bass_flux=z, mid_flux=z, centroid=z,
+    )
+    prof = build_intensity_profile(feat, 0.0, np.zeros(0), n / 50.0)
+    win = int(round(_SECTION_WIN_S * 50))
+    k = n // 2
+    pre, mid, post = float(prof.curve[k - win]), float(prof.curve[k]), float(prof.curve[k + win])
+    assert pre < mid < post                          # rising through the step
+    assert abs(mid - 0.5 * (pre + post)) < 0.08      # transition CENTRED on it
 
 
 def test_frame_at_stamps_the_profile_on_playback_frames(map_120: TrackMap):
@@ -409,6 +433,10 @@ def test_frame_at_stamps_the_profile_on_playback_frames(map_120: TrackMap):
     assert fr.intensity_hi == pytest.approx(prof.sig_hi)
     assert fr.intensity_dynamics == pytest.approx(prof.dynamics)
     assert fr.intensity_mood == pytest.approx(prof.mood)
+    # The lag-free section signal is stamped, sampled slightly AHEAD of the frame.
+    i = int(12.0 / (1.0 / 50.0))
+    la = i + int(round(_PROFILE_LOOKAHEAD_S * 50))
+    assert fr.intensity_signal == pytest.approx(float(prof.curve[min(la, prof.curve.size - 1)]))
 
 
 def test_frame_at_replays_beats_exactly_once(map_120: TrackMap):

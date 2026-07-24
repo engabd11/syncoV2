@@ -106,6 +106,11 @@ class AnalysisFrame:
     intensity_hi: float | None = None
     intensity_dynamics: float | None = None
     intensity_mood: float = 0.0
+    # Precomputed, lag-free section-intensity for THIS frame (0..1), from the
+    # offline analysis sampled slightly ahead. When present the Auto picker maps
+    # it directly — no live smoothing lag — so a rung switch lands on the section
+    # change. None on live/metadata frames (the picker then smooths live).
+    intensity_signal: float | None = None
 
 
 # SuperFlux parameters, shared with the offline track-map analysis.

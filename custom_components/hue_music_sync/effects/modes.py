@@ -458,6 +458,12 @@ _SIG_HI_REF = 0.88   # ~a full drop maps to the top of it
 # brief dip doesn't drop the room out of the chorus.
 _PICK_HYST = 0.07
 _PICK_DWELL_S = 3.5
+# A *big* move (a real drop/breakdown — the target is this many ladder rungs from
+# the current one) commits on a much shorter dwell, so the room reaches the new
+# energy right as the section changes instead of stepping up one unhurried rung at
+# a time. Small, one-rung adjustments keep the long dwell so the pick stays calm.
+_PICK_BIG_JUMP = 2
+_PICK_BIG_DWELL_S = 1.0
 _PICK_ATTACK = 0.10   # per-frame EMA weight while the signal is rising
 _PICK_DECAY = 0.03    # per-frame EMA weight while it is falling
 # Section-level smoothing used ONLY on the per-song-profile path: rung selection
@@ -547,6 +553,7 @@ class AutoIntensityPicker:
         bpm: float,
         beat: bool,
         allowed: tuple[SyncMode, ...],
+        signal: float | None = None,
         lo: float = _SIG_LO_REF,
         hi: float = _SIG_HI_REF,
         dynamics: float | None = None,
@@ -554,13 +561,13 @@ class AutoIntensityPicker:
     ) -> SyncMode:
         """Advance one frame and return the rung Auto should be at now.
 
-        ``lo``/``hi``/``dynamics``/``mood`` are the current song's intensity
-        profile (from :func:`trackmap.build_intensity_profile`, carried on the
-        frame): ``lo``/``hi`` are the song's own quiet..loud signal window,
-        ``dynamics`` how much it actually moves, ``mood`` a spectral+tempo shift
-        of the operating point. They default to the historical fixed window with
-        no per-song shaping, so live-tap / metadata frames (which carry no
-        profile) behave exactly as before.
+        ``signal`` is the offline, lag-free section-intensity for this frame
+        (from the map's :class:`IntensityProfile` curve). When given it is mapped
+        DIRECTLY — no live smoothing — so the switch lands on the section change
+        instead of a time-constant later. Without it (live tap / metadata) the
+        picker smooths live as before. ``lo``/``hi``/``dynamics``/``mood`` are the
+        song's intensity window + character; they default to the historical fixed
+        window with no per-song shaping.
         """
         # Percussiveness: a leaky-integrator estimate of beats/second (decays
         # through quiet bridges, climbs on a busy groove). With time-constant
@@ -582,15 +589,27 @@ class AutoIntensityPicker:
         self._slow += (raw - self._slow) * slow_alpha
         self._since_switch += dt
 
-        # A per-song profile maps the SECTION-level envelope (so the pick follows
-        # verse↔chorus↔drop, not beats); the live-tap path keeps the fast signal.
-        sig = self._slow if dynamics is not None else self._signal
+        # Prefer the offline lag-free curve (map playback) — mapped directly so
+        # the pick follows the song's real section arc with no envelope lag. Fall
+        # back to the live section envelope when a profile is active without a
+        # curve, and to the fast signal on the live-tap / no-profile path.
+        if signal is not None:
+            sig = max(0.0, min(1.0, signal))
+        elif dynamics is not None:
+            sig = self._slow
+        else:
+            sig = self._signal
         target = self._resolve(sig, allowed, lo, hi, dynamics, mood)
-        if target is not self._level and self._since_switch >= _PICK_DWELL_S:
-            self._level = target
-            self._since_switch = 0.0
-        elif self._level is None:
+        if self._level is None:
             self._level = target  # first frame: adopt without waiting on dwell
+        elif target is not self._level:
+            # Big energy changes (a drop/breakdown) commit fast so the switch lands
+            # on the section; small one-rung nudges keep the long, unhurried dwell.
+            gap = abs(INTENSITY_LADDER.index(target) - INTENSITY_LADDER.index(self._level))
+            dwell = _PICK_BIG_DWELL_S if gap >= _PICK_BIG_JUMP else _PICK_DWELL_S
+            if self._since_switch >= dwell:
+                self._level = target
+                self._since_switch = 0.0
         return self._level
 
     def _resolve(

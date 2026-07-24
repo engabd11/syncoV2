@@ -59,8 +59,6 @@ from ..effects.modes import (
     _PICK_BEAT_FULL,
     _PICK_BPM_HI,
     _PICK_BPM_LO,
-    _PICK_SLOW_ATTACK,
-    _PICK_SLOW_DECAY,
 )
 from .analyzer import (
     LONG_FLUX_FLOOR_FRAC,
@@ -264,6 +262,17 @@ _MOOD_TEMPO_W = 0.08  # fast rides up; slow sits calmer
 # Floor on the song's normalisation window so a near-constant track can't divide
 # by ~0 (its small true ``dynamics`` still keeps it compressed — see the picker).
 _MIN_SIG_SPAN = 0.06
+# The offline section-intensity curve is a *centred* (lag-free) moving average of
+# the raw signal over this window. Because the whole track is known, it needn't
+# lag behind the music like the live picker's causal envelope — the curve at a
+# frame reflects the section that frame belongs to, so a rung switch lands right
+# on the section change instead of ~1 s late. Wide enough to smooth beat-to-beat
+# pumping, narrow enough to keep verse↔chorus↔drop contrast crisp.
+_SECTION_WIN_S = 1.4
+# Sample the curve this far ahead of the playback frame when stamping it, so the
+# rung switch is applied slightly early and the mode's brief render ease-in peaks
+# right as the audible section changes (the "schedule with the delay offset" fix).
+_PROFILE_LOOKAHEAD_S = 0.35
 
 
 @dataclass(slots=True)
@@ -271,16 +280,21 @@ class IntensityProfile:
     """Per-song Auto-intensity shaping, derived from the cached features.
 
     Lets the Auto picker spread the enabled rungs across THIS song's own quiet↔
-    loud range (not one fixed global window), and slide the operating point by
-    the song's character. Cheap to derive from :class:`TrackFeatures`, so the
-    existing pre-warmed library gets it on load with **no re-analysis**.
+    loud range (not one fixed global window), slide the operating point by the
+    song's character, and — via ``curve`` — switch rungs *on time*. Cheap to
+    derive from :class:`TrackFeatures`, so the existing pre-warmed library gets it
+    on load with **no re-analysis**.
     """
 
-    sig_lo: float    # ~p10 of the song's smoothed intensity signal (window floor)
+    sig_lo: float    # ~p10 of the song's section-intensity curve (window floor)
     sig_hi: float    # ~p95 of it (window ceiling)
     dynamics: float  # true p95-p10 span: how much the song actually moves (0..1)
     tilt: float      # spectral balance, -1 (bright) .. +1 (bass-heavy), 0 neutral
     tempo: float     # bpm mapped 0 (ballad) .. 1 (club) over _PICK_BPM_LO.._HI
+    # Per-frame lag-free section-intensity (0..1). The picker maps this DIRECTLY
+    # (no live smoothing), so switches follow the song's real section arc with no
+    # envelope lag. In-memory only (recomputed from features on load).
+    curve: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float32))
 
     @property
     def mood(self) -> float:
@@ -288,19 +302,22 @@ class IntensityProfile:
         return _MOOD_TILT_W * self.tilt + _MOOD_TEMPO_W * (self.tempo - 0.5) * 2.0
 
 
-def _asym_ema(x: np.ndarray, attack: float, decay: float) -> np.ndarray:
-    """Asymmetric EMA matching the live picker (fast attack, slow decay).
+def _section_curve(x: np.ndarray, win: int) -> np.ndarray:
+    """Centred (lag-free), edge-normalised moving average of ``x``.
 
-    State-dependent coefficient, so it can't be a plain vectorised filter; the
-    loop runs once per map over the ~50 fps frame array, offline.
+    Unlike a causal EMA this doesn't lag the music — the value at frame ``i``
+    reflects the window *around* ``i`` — so a rung switch lands on the section
+    change rather than a smoothing time-constant later. Vectorised; runs once per
+    map.
     """
-    out = np.empty_like(x)
-    s = float(x[0]) if x.size else 0.0
-    for i in range(x.size):
-        a = attack if x[i] > s else decay
-        s += (float(x[i]) - s) * a
-        out[i] = s
-    return out
+    n = x.size
+    win = max(1, int(win))
+    if win <= 1 or n == 0:
+        return x.astype(np.float32)
+    k = np.ones(win, dtype=np.float64) / win
+    num = np.convolve(x, k, mode="same")
+    den = np.convolve(np.ones(n, dtype=np.float64), k, mode="same")  # edge norm
+    return (num / np.maximum(den, 1e-9)).astype(np.float32)
 
 
 def _beat_rate_curve(beat_times: np.ndarray, n: int) -> np.ndarray:
@@ -358,11 +375,12 @@ def build_intensity_profile(
     # salience for map playback — see frame_at), vectorised over the whole track.
     moment = energy * (0.55 + 0.45 * energy)
     raw = np.clip(0.68 * moment + 0.16 * tempo + 0.16 * perc, 0.0, 1.0)
-    # Section-level envelope (matches the picker's profile-path smoothing), so the
-    # window/dynamics describe verse↔chorus↔drop rather than beat-to-beat pumping.
-    sig = _asym_ema(raw, _PICK_SLOW_ATTACK, _PICK_SLOW_DECAY)
-    lo = float(np.percentile(sig, 10.0))
-    hi = float(np.percentile(sig, 95.0))
+    # Lag-free section-intensity curve: the picker maps this directly, so the
+    # window/dynamics describe verse↔chorus↔drop (not beat-to-beat pumping) AND a
+    # switch lands on the section change instead of a smoothing lag later.
+    curve = _section_curve(raw, int(round(_SECTION_WIN_S / _FRAME_PERIOD)))
+    lo = float(np.percentile(curve, 10.0))
+    hi = float(np.percentile(curve, 95.0))
     dynamics = max(0.0, hi - lo)  # true spread drives the dynamics-honest blend
     if hi - lo < _MIN_SIG_SPAN:  # guard the normalisation window against ~0 span
         mid = 0.5 * (lo + hi)
@@ -380,7 +398,7 @@ def build_intensity_profile(
         high = float(band_mean[3] + band_mean[4])           # mid + high
         tilt = max(-1.0, min(1.0, (low - high) / (low + high + 1e-9)))
     return IntensityProfile(
-        sig_lo=lo, sig_hi=hi, dynamics=dynamics, tilt=tilt, tempo=tempo
+        sig_lo=lo, sig_hi=hi, dynamics=dynamics, tilt=tilt, tempo=tempo, curve=curve
     )
 
 
@@ -589,6 +607,13 @@ class TrackMap:
         melbank = f.melbank[i].tolist() if f.melbank.shape[0] > i else []
         melbank_ref = f.melbank_ref.tolist() if f.melbank_ref.size else []
         prof = self.intensity_profile
+        # Precomputed lag-free section-intensity, sampled a touch AHEAD so the Auto
+        # switch is applied early enough that the mode's brief render ease-in peaks
+        # right as the audible section changes (no ~1 s reaction lag).
+        intensity_sig = None
+        if prof is not None and prof.curve.size:
+            la = i + int(round(_PROFILE_LOOKAHEAD_S / _FRAME_PERIOD))
+            intensity_sig = float(prof.curve[min(la, prof.curve.size - 1)])
         return AnalysisFrame(
             bands=bands,
             energy=float(f.energy[i]),
@@ -620,6 +645,7 @@ class TrackMap:
             intensity_hi=prof.sig_hi if prof is not None else None,
             intensity_dynamics=prof.dynamics if prof is not None else None,
             intensity_mood=prof.mood if prof is not None else 0.0,
+            intensity_signal=intensity_sig,
         )
 
     def grid_at(self, pos: float, prev_pos: float | None = None) -> BeatGrid | None:
