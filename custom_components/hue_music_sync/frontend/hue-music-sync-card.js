@@ -13,7 +13,7 @@
 // Cosmetic version (shown in the console banner). The browser cache-bust no
 // longer depends on this: the integration appends ?v=<content-hash> derived from
 // this file's bytes, so any edit is picked up without a manual hard refresh.
-const VERSION = "1.23.1";
+const VERSION = "1.23.2";
 
 /* ------------------------- Palette data ------------------------- */
 // Colour schemes from the integration, each a small gradient swatch.
@@ -408,7 +408,7 @@ const CARD_CSS = `
     -webkit-mask: radial-gradient(120% 105% at 50% 32%, #000 52%, transparent 100%);
     mask: radial-gradient(120% 105% at 50% 32%, #000 52%, transparent 100%); }
   .hue-hero-art.show { opacity: .55; }
-  .hue-hero-wash { position: absolute; inset: -20%; z-index: 0; filter: blur(8px); transition: opacity .4s; }
+  .hue-hero-wash { position: absolute; inset: -20%; z-index: 0; filter: blur(16px); transition: opacity .4s; }
   .hue-hero-bars { position: absolute; left: 0; right: 0; bottom: 0; height: 64px; z-index: 0; opacity: .55;
     mask: linear-gradient(to top, #000, transparent); -webkit-mask: linear-gradient(to top, #000, transparent); padding: 0 6px; }
   .hue-hero-top { position: relative; z-index: 2; display: flex; align-items: center; justify-content: space-between; }
@@ -486,8 +486,8 @@ const CARD_CSS = `
   /* -- idle beauty: slow palette lava drift while paused -- */
   .hue-hero-wash.idle { animation: hue-lava 26s ease-in-out infinite alternate; }
   @keyframes hue-lava {
-    0% { filter: blur(8px) hue-rotate(0deg); transform: scale(1) translateY(0); }
-    100% { filter: blur(8px) hue-rotate(38deg); transform: scale(1.09) translateY(-2.5%); }
+    0% { filter: blur(16px) hue-rotate(0deg); transform: scale(1) translateY(0); }
+    100% { filter: blur(16px) hue-rotate(38deg); transform: scale(1.09) translateY(-2.5%); }
   }
 
   /* -- beat pads overlay (full-page: tall tap columns) -- */
@@ -2981,21 +2981,22 @@ class HueMusicSyncCard extends HTMLElement {
       const wash = this._washNode;
       wash.classList.toggle("idle", !active);
       if (active) {
-        wash.style.opacity = (0.55 + this._viz.energy * 0.4).toFixed(3);
-        if (!this._reduced) {
-          // Musical motion: a small pulse per beat, a deeper breath on the
-          // bar's downbeat, and a one-shot bloom when a loud section drops.
-          const s = 1 + this._viz.beat * 0.025 + this._viz.downbeat * 0.045;
-          wash.style.transform = `scale(${s.toFixed(4)})`;
-          wash.style.filter =
-            this._bloom > 0.02
-              ? `blur(8px) brightness(${(1 + this._bloom * 0.7).toFixed(3)})`
-              : "";
-        }
+        // Hold the album hue STEADY while playing. The old per-beat scale() +
+        // bloom re-rasterised the blurred gradient every frame, making the hue
+        // look like it was crawling and banding around the artwork. Now the wash
+        // never transforms; only a very gentle, heavily-eased brightness breathes
+        // (no per-beat jump), so the colour reads as a stable, smooth glow.
+        const target = 0.64 + this._viz.energy * 0.12;
+        this._washOp =
+          this._washOp == null ? target : this._washOp + (target - this._washOp) * 0.05;
+        wash.style.opacity = this._washOp.toFixed(3);
+        wash.style.transform = "";
+        wash.style.filter = "";
       } else {
         wash.style.opacity = 0.22;
         wash.style.transform = "";
         wash.style.filter = "";
+        this._washOp = null;
       }
     }
     if (this._glossNode) {
@@ -3637,9 +3638,14 @@ class HueMusicSyncTabletCard extends HueMusicSyncCard {
 
   /* -- per-frame: waveform playhead + live freq-map (called from the loop) -- */
   _loopExtra(active) {
-    // Cover halo breathes with the beat.
+    // Cover halo: a smooth, stable glow around the artwork — heavily eased off
+    // the energy envelope rather than snapping 0.55->1.0 on every beat (which
+    // read as a low-quality flicker of the hue around the cover).
     if (this._landCoverGlow) {
-      this._landCoverGlow.style.opacity = (0.55 + this._viz.beat * 0.45).toFixed(3);
+      const target = active ? 0.72 + this._viz.energy * 0.14 : 0.5;
+      this._glowOp =
+        this._glowOp == null ? target : this._glowOp + (target - this._glowOp) * 0.06;
+      this._landCoverGlow.style.opacity = this._glowOp.toFixed(3);
     }
 
     // Waveform playhead: position advances only while the song plays.
