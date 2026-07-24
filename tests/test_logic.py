@@ -254,6 +254,34 @@ def test_fireworks_respects_master_brightness():
     assert max(max(c) for c in out.values()) <= 0.5 + 1e-6
 
 
+def test_fireworks_bursts_on_calm_modes():
+    # The rebuild gave Fireworks its OWN onset sensitivity so a kick clearly
+    # lights a lamp on every rung — the old effect inherited Subtle's
+    # beat_threshold (99) and effectively never ignited on the calm modes.
+    eng = EffectEngine(_channels(6))
+    eng.set_mode(SyncMode.SUBTLE)
+    eng.set_effect(SyncEffect.FIREWORKS)
+    lit = 0.0
+    for _ in range(4):
+        out = eng.render(_frame(beat=True, strength=2.5), 0.05)
+        lit = max(lit, max(max(c) for c in out.values()))
+    assert lit > 0.5
+
+
+def test_fireworks_afterglow_has_live_energy_env():
+    # Fireworks bypasses the music renderer, so the loudness envelope it uses for
+    # the energy-driven afterglow (and its quiet-passage auto-launch gate) must
+    # still advance on the Fireworks path. Regression: _update_env was previously
+    # only called on the music/extreme paths, so energy_env stayed frozen at 0.
+    eng = EffectEngine(_channels(5))
+    eng.set_mode(SyncMode.SUBTLE)
+    eng.set_effect(SyncEffect.FIREWORKS)
+    for _ in range(60):
+        out = eng.render(_frame(beat=False), 0.025)  # loud (energy=1) but beatless
+    assert eng.energy_env > 0.5  # the envelope actually tracked the loudness
+    assert max(max(c) for c in out.values()) > 0.05  # room glows, not black
+
+
 def test_movie_warm_drift_in_quiet_moments():
     # In Movie, the colour eases toward warm tungsten white in quiet scenes and
     # back to the artwork hue as the scene gets louder. Use a cool palette so the

@@ -13,7 +13,7 @@
 // Cosmetic version (shown in the console banner). The browser cache-bust no
 // longer depends on this: the integration appends ?v=<content-hash> derived from
 // this file's bytes, so any edit is picked up without a manual hard refresh.
-const VERSION = "1.23.0";
+const VERSION = "1.23.1";
 
 /* ------------------------- Palette data ------------------------- */
 // Colour schemes from the integration, each a small gradient swatch.
@@ -821,11 +821,47 @@ class HueMusicSyncCard extends HTMLElement {
     // HA sets `hass` on every global state change; only re-render when an entity
     // this card actually shows has changed (or on first assignment / mid-config).
     const sig = this._signature(hass);
-    if (!areaMoved && prev && sig === this._sig && !this._dragging) return;
+    if (!areaMoved && prev && sig === this._sig && !this._dragging) {
+      // Nothing structural changed. The player position may still have advanced
+      // (a periodic report or a seek); re-anchor the playback snapshot in place
+      // so the transport time stays correct WITHOUT a full-card rebuild.
+      this._refreshPlayTiming();
+      return;
+    }
     this._sig = sig;
     if (!this._dragging) this._render();
   }
   get hass() { return this._hass; }
+
+  // Re-read the live player's authoritative position into the cached playback
+  // snapshot the rAF loop interpolates from, without re-rendering — so a seek is
+  // reflected immediately while steady playback (which the loop already
+  // interpolates) never triggers a flashy full rebuild. Mirrors _model()'s
+  // live/switch resolution.
+  _refreshPlayTiming() {
+    const p = this._play;
+    const hass = this._hass;
+    if (!p || this._demo || !hass) return;
+    const area = this._areas[this._areaIndex] || {};
+    const st = (id) => (id && hass.states[id]) || null;
+    const sw = st(area.switch);
+    const swAttr = sw ? sw.attributes : {};
+    const live = st(swAttr.source_player) || st(area.media_player);
+    let src;
+    if (live) {
+      const la = live.attributes;
+      src = la.media_position != null ? la : swAttr;
+      p.playing = live.state === "playing";
+    } else if (sw) {
+      src = swAttr;
+    } else {
+      return;
+    }
+    if (src.media_position == null) return;
+    p.position = Number(src.media_position) || 0;
+    p.updatedAt = src.media_position_updated_at
+      ? Date.parse(src.media_position_updated_at) : Date.now();
+  }
 
   // Point the card at the active (syncing) area the first time we can tell which
   // one it is, so opening the dashboard shows what's actually running instead of
@@ -860,8 +896,13 @@ class HueMusicSyncCard extends HTMLElement {
     const npSig = (e) => {
       if (!e) return "\u2205";
       const x = e.attributes;
+      // Deliberately EXCLUDE media_position: it ticks continuously while playing,
+      // and re-rendering on it rebuilds the whole card (re-fading the album
+      // backdrop from 0 and wiping the timeline until the next meta) \u2014 a visible
+      // flash. The rAF loop interpolates the playhead from a snapshot, and a seek
+      // re-anchors that snapshot via _refreshPlayTiming without a full render.
       return `${e.state}|${x.media_title || ""}|${x.media_artist || ""}|${x.entity_picture || x.media_image || ""}` +
-        `|${x.media_position || ""}|${x.bpm || ""}|${x.album_colors ? JSON.stringify(x.album_colors) : (x.palette ? JSON.stringify(x.palette) : "")}`;
+        `|${x.bpm || ""}|${x.album_colors ? JSON.stringify(x.album_colors) : (x.palette ? JSON.stringify(x.palette) : "")}`;
     };
     for (const a of this._areas) {
       for (const id of [a.intensity, a.effect, a.colour, a.brightness, a.timing]) {
@@ -935,6 +976,14 @@ class HueMusicSyncCard extends HTMLElement {
       this._io = null;
     }
     this._dropLiveSub();
+    // If the beat-pad overlay was open when HA reparented the card (tab switch,
+    // dashboard edit), stop its keepalive — otherwise the heartbeat keeps firing
+    // service calls from a detached element and holds the integration in drum
+    // mode forever. Stopping it lets the server-side drum window auto-expire.
+    if (this._drum && this._drum.keep) {
+      clearInterval(this._drum.keep);
+      this._drum.keep = 0;
+    }
   }
 
   /* -- live feed subscription -- */
@@ -3023,13 +3072,17 @@ const TABLET_CSS = `
     justify-content: space-between; gap: 14px; }
   .hue-land-right .hue-field { margin-bottom: 0; }
 
-  /* Landscape album backdrop: concentrate the blurred cover behind the left
-     column and dissolve it toward the right-hand controls (which stay dark and
-     legible), instead of the mobile top-to-bottom fade. */
+  /* Landscape album backdrop: a stronger melt than the mobile card — the
+     landscape card is wide and mostly dark, so the artwork's colour needs to
+     carry further and hold up as it spreads. Brighter/more saturated, higher
+     opacity, and a mask whose core reaches well across the card before it
+     dissolves toward the right-hand controls (which stay dark and legible). */
   .hue-land .hue-card-art {
-    -webkit-mask: radial-gradient(115% 130% at 24% 42%, #000 26%, rgba(0,0,0,.32) 60%, transparent 84%);
-    mask: radial-gradient(115% 130% at 24% 42%, #000 26%, rgba(0,0,0,.32) 60%, transparent 84%);
+    filter: blur(44px) saturate(1.6) brightness(0.74);
+    -webkit-mask: radial-gradient(140% 160% at 22% 40%, #000 42%, rgba(0,0,0,.52) 72%, transparent 95%);
+    mask: radial-gradient(140% 160% at 22% 40%, #000 42%, rgba(0,0,0,.52) 72%, transparent 95%);
   }
+  .hue-land .hue-card-art.show { opacity: .46; }
 
   /* now-playing block */
   .hue-land-cover { position: relative; align-self: center; margin: 6px 0 18px; }

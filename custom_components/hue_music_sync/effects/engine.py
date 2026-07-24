@@ -776,6 +776,10 @@ class EffectEngine:
         if self.effect is SyncEffect.FIREWORKS:
             # Fireworks owns its own per-light snap/fade, so it bypasses the music
             # smoothing pipeline; it still advances colour_phase for its ember glow.
+            # Keep the loudness/band envelopes live (they're otherwise only updated
+            # on the music/extreme paths) so Fireworks' energy-driven afterglow and
+            # its quiet-passage auto-launch gate see a real, smoothed energy_env.
+            self._update_env(frame)
             self.colour_phase += self.active_params.colour_speed * dt
             return self._fireworks.render(self, frame, dt)
         if self.active_params.graph_reactive:
