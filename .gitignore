@@ -30,3 +30,8 @@ Thumbs.db
 
 # Claude Code local harness state (per-machine permissions, not shared)
 .claude/
+
+# The native Sendspin Android app lives in its own repo (engabd11/sendspin-nowdroid);
+# a local copy is kept here for development but must never be committed to this repo.
+sendspin-nowdroid-master/
+sendspin-nowdroid/
