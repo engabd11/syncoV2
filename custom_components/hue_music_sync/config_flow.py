@@ -19,6 +19,9 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
+    BACKEND_MA,
+    BACKEND_SUBSONIC,
+    CONF_ACTIVE_BACKEND,
     CONF_APP_KEY,
     CONF_AREAS,
     CONF_BRIDGE_CERT,
@@ -30,6 +33,7 @@ from .const import (
     CONF_SUBSONIC_PASSWORD,
     CONF_SUBSONIC_URL,
     CONF_SUBSONIC_USER,
+    DEFAULT_BACKEND,
     DEFAULT_RESTORE_LIGHTS,
     DOMAIN,
 )
@@ -186,6 +190,9 @@ class HueMusicSyncOptionsFlow(OptionsFlow):
             new_options[CONF_SUBSONIC_URL] = user_input.get(CONF_SUBSONIC_URL, "").strip()
             new_options[CONF_SUBSONIC_USER] = user_input.get(CONF_SUBSONIC_USER, "").strip()
             new_options[CONF_SUBSONIC_PASSWORD] = user_input.get(CONF_SUBSONIC_PASSWORD, "")
+            new_options[CONF_ACTIVE_BACKEND] = user_input.get(
+                CONF_ACTIVE_BACKEND, DEFAULT_BACKEND
+            )
             self.hass.config_entries.async_update_entry(entry, options=new_options)
             self.hass.async_create_task(
                 self.hass.config_entries.async_reload(entry.entry_id)
@@ -224,6 +231,19 @@ class HueMusicSyncOptionsFlow(OptionsFlow):
                         CONF_SUBSONIC_PASSWORD,
                         default=entry.options.get(CONF_SUBSONIC_PASSWORD, ""),
                     ): str,
+                    # Which library the Synco player browses/plays. Music
+                    # Assistant is the full-feature backend (grouping, sync);
+                    # Navidrome/OpenSubsonic (direct) keeps the player working
+                    # when MA is down (needs the URL + login above).
+                    vol.Optional(
+                        CONF_ACTIVE_BACKEND,
+                        default=entry.options.get(CONF_ACTIVE_BACKEND, DEFAULT_BACKEND),
+                    ): vol.In(
+                        {
+                            BACKEND_MA: "Music Assistant",
+                            BACKEND_SUBSONIC: "Navidrome / OpenSubsonic (direct)",
+                        }
+                    ),
                 }
             ),
         )

@@ -41,6 +41,15 @@ CONF_SUBSONIC_USER: Final = "subsonic_user"
 CONF_SUBSONIC_PASSWORD: Final = "subsonic_password"
 CONF_RESTORE_LIGHTS: Final = "restore_lights"  # snapshot + restore light state on stop
 
+# Active library/playback backend for the Synco media player. Exactly one is
+# active at a time, and it can be switched at runtime — e.g. fall back to a
+# direct Navidrome/OpenSubsonic connection when Music Assistant is unavailable.
+# Stored in the config-entry options.
+CONF_ACTIVE_BACKEND: Final = "active_backend"
+BACKEND_MA: Final = "music_assistant"  # browse/play through Music Assistant
+BACKEND_SUBSONIC: Final = "subsonic"  # browse/play a Navidrome/OpenSubsonic server directly
+DEFAULT_BACKEND: Final = BACKEND_MA
+
 # --- Defaults ------------------------------------------------------------
 DEFAULT_LATENCY_MS: Final = 150
 DEFAULT_INTENSITY: Final = 1.0

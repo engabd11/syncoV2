@@ -22,8 +22,9 @@ import voluptuous as vol
 
 from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import config_validation as cv
 
-from .const import DOMAIN
+from .const import BACKEND_MA, BACKEND_SUBSONIC, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -39,6 +40,11 @@ def async_register_ws(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_tap)
     websocket_api.async_register_command(hass, ws_drum)
     websocket_api.async_register_command(hass, ws_players)
+    # Music-player surface (browse/search/play/backend switch).
+    websocket_api.async_register_command(hass, ws_browse)
+    websocket_api.async_register_command(hass, ws_search)
+    websocket_api.async_register_command(hass, ws_play)
+    websocket_api.async_register_command(hass, ws_backend)
 
 
 def _resolve_area(hass: HomeAssistant, connection, msg):
@@ -165,3 +171,185 @@ def ws_drum(
         manager, area_id = target
         manager.set_drum_mode(area_id, msg["active"])
         connection.send_result(msg["id"])
+
+
+# --- Music-player surface -------------------------------------------------
+#
+# Browse/search/play the active library backend (Music Assistant, or a direct
+# Navidrome/OpenSubsonic server — whichever the entry's options select). Keyed by
+# the same sync-switch entity id as the light feed, so the card resolves the
+# integration entry from the entity it already knows. Same authenticated-user
+# (non-admin) scope as the other commands: browse metadata is low-sensitivity,
+# and playback is issued SERVER-side (media_player.play_media) so a Subsonic
+# stream token is never handed to the browser.
+
+
+def _followed_player(manager, area_id: str) -> str | None:
+    """The player this area follows/pins, used as the MA browse root hint."""
+    try:
+        cand = manager.player_candidates(area_id)
+        return cand.get("following") or cand.get("selected")
+    except Exception:  # noqa: BLE001 - a browse hint is best-effort
+        return None
+
+
+def _entry_backend(hass: HomeAssistant, manager, followed_player: str | None = None):
+    from .library.factory import resolve_backend
+
+    return resolve_backend(hass, manager.entry, followed_player=followed_player)
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/browse",
+        vol.Required("entity_id"): str,
+        vol.Optional("node_id"): vol.Any(str, None),
+    }
+)
+@websocket_api.async_response
+async def ws_browse(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
+) -> None:
+    """Return the children of a browse node from the active library backend."""
+    target = _resolve_area(hass, connection, msg)
+    if target is None:
+        return
+    manager, area_id = target
+    from .library.base import BackendError
+
+    backend = _entry_backend(hass, manager, _followed_player(manager, area_id))
+    try:
+        node = await backend.browse(msg.get("node_id"))
+    except BackendError as err:
+        connection.send_error(msg["id"], "backend_error", str(err))
+        return
+    connection.send_result(msg["id"], {"backend": backend.id, "node": node.to_dict()})
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/search",
+        vol.Required("entity_id"): str,
+        vol.Required("query"): str,
+        vol.Optional("limit", default=30): vol.All(
+            vol.Coerce(int), vol.Range(min=1, max=100)
+        ),
+    }
+)
+@websocket_api.async_response
+async def ws_search(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
+) -> None:
+    """Full-text search the active library backend."""
+    target = _resolve_area(hass, connection, msg)
+    if target is None:
+        return
+    manager, area_id = target
+    from .library.base import BackendError, SearchResults
+
+    backend = _entry_backend(hass, manager, _followed_player(manager, area_id))
+    query = msg["query"].strip()
+    if not query:
+        empty = SearchResults(query="")
+        connection.send_result(
+            msg["id"], {"backend": backend.id, "results": empty.to_dict()}
+        )
+        return
+    try:
+        results = await backend.search(query, limit=msg["limit"])
+    except BackendError as err:
+        connection.send_error(msg["id"], "backend_error", str(err))
+        return
+    connection.send_result(
+        msg["id"], {"backend": backend.id, "results": results.to_dict()}
+    )
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/play",
+        vol.Required("entity_id"): str,
+        vol.Required("player"): cv.entity_id,
+        vol.Required("item_id"): str,
+        vol.Optional("enqueue", default="play"): vol.In(
+            ("play", "next", "add", "replace")
+        ),
+    }
+)
+@websocket_api.async_response
+async def ws_play(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
+) -> None:
+    """Play (or enqueue) a library item on a media player, server-side.
+
+    The backend turns the item id into ``(media_content_id, media_content_type)``
+    — for a direct Subsonic backend that is a ready-to-decode stream URL, so the
+    auth token stays server-side and never reaches the browser.
+    """
+    target = _resolve_area(hass, connection, msg)
+    if target is None:
+        return
+    manager, _area_id = target
+    from .library.base import BackendError
+
+    backend = _entry_backend(hass, manager, msg["player"])
+    try:
+        content_id, content_type = await backend.play_spec(msg["item_id"])
+    except BackendError as err:
+        connection.send_error(msg["id"], "backend_error", str(err))
+        return
+    data = {
+        "entity_id": msg["player"],
+        "media_content_id": content_id,
+        "media_content_type": content_type,
+    }
+    # Only pass enqueue for the non-default actions: a plain immediate play works
+    # on players that don't advertise the ENQUEUE feature.
+    if msg["enqueue"] != "play":
+        data["enqueue"] = msg["enqueue"]
+    try:
+        await hass.services.async_call("media_player", "play_media", data, blocking=True)
+    except Exception as err:  # noqa: BLE001 - surface a play failure to the card
+        connection.send_error(msg["id"], "play_failed", str(err))
+        return
+    connection.send_result(msg["id"])
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/backend",
+        vol.Required("entity_id"): str,
+        vol.Optional("set"): vol.In((BACKEND_MA, BACKEND_SUBSONIC)),
+    }
+)
+@websocket_api.async_response
+async def ws_backend(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
+) -> None:
+    """Get (or switch) the active library backend for this entry.
+
+    The backend is read fresh from the entry options on every browse/search/play,
+    so a switch takes effect immediately with no reload.
+    """
+    target = _resolve_area(hass, connection, msg)
+    if target is None:
+        return
+    manager, _area_id = target
+    from .const import CONF_ACTIVE_BACKEND
+    from .library.factory import active_backend_id, subsonic_configured
+
+    entry = manager.entry
+    if "set" in msg:
+        hass.config_entries.async_update_entry(
+            entry, options={**entry.options, CONF_ACTIVE_BACKEND: msg["set"]}
+        )
+    connection.send_result(
+        msg["id"],
+        {
+            "active": active_backend_id(entry),
+            "available": {
+                BACKEND_MA: True,
+                BACKEND_SUBSONIC: subsonic_configured(entry),
+            },
+        },
+    )

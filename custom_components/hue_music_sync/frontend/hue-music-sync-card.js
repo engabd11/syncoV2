@@ -457,6 +457,8 @@ const CARD_CSS = `
   /* -- song-structure timeline (energy silhouette + playhead) -- */
   .hue-tl { position: relative; z-index: 2; margin-top: 14px; height: 22px; display: none; }
   .hue-tl.live { display: block; }
+  .hue-tl.seekable.live { cursor: pointer; }
+  .hue-wave.seekable { cursor: pointer; }
   .hue-tl-sec { position: absolute; bottom: 0; border-radius: 3px 3px 0 0; transition: filter .3s, opacity .3s; }
   .hue-tl-sec.past { opacity: .45; }
   .hue-tl-sec.arming { animation: hue-arm 0.9s ease-in-out infinite; }
@@ -555,6 +557,53 @@ const CARD_CSS = `
     .hue-stage-dot.swap, .hue-tl-sec.arming, .hue-now-track-inner.scroll,
     .hue-hero-wash.idle, .hue-seg-anim, .hue-stage-tag-dot { animation: none !important; }
   }
+
+  /* -- library browser overlay (full-page: browse/search + play) -- */
+  .hue-lib { position: absolute; inset: 0; z-index: 11; display: flex; flex-direction: column;
+    gap: 12px; border-radius: 26px; padding: 16px 16px 12px; overflow: hidden;
+    background: #0b0a14f2; backdrop-filter: blur(8px); }
+  .hue-lib-head { display: flex; align-items: center; gap: 10px; flex: none; }
+  .hue-lib-back { width: 38px; height: 38px; border-radius: 12px; border: 1px solid var(--hue-line);
+    background: #ffffff0a; color: var(--hue-text); cursor: pointer; flex: none;
+    display: inline-flex; align-items: center; justify-content: center; transition: .15s; }
+  .hue-lib-back:hover { background: #ffffff16; }
+  .hue-lib-titles { display: flex; flex-direction: column; min-width: 0; flex: 1 1 auto; }
+  .hue-lib-crumb { font-size: 11.5px; color: var(--hue-dim); font-weight: 600;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .hue-lib-backend { font-size: 10px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase;
+    border-radius: 999px; padding: 7px 11px; border: 1px solid var(--hue-line); background: #ffffff0a;
+    color: var(--hue-dim); cursor: pointer; flex: none; transition: .15s; }
+  .hue-lib-backend:hover { background: #ffffff16; color: var(--hue-text); }
+  .hue-lib-search { flex: none; }
+  .hue-lib-search input { width: 100%; box-sizing: border-box; border-radius: 12px;
+    border: 1px solid var(--hue-line); background: #00000033; color: var(--hue-text);
+    padding: 10px 12px; font-size: 13px; outline: none; }
+  .hue-lib-search input:focus { border-color: #ffffff40; }
+  .hue-lib-body { flex: 1 1 auto; overflow-y: auto; -webkit-overflow-scrolling: touch; margin: 0 -4px; }
+  .hue-lib-sec { font-size: 10px; font-weight: 800; letter-spacing: .16em; text-transform: uppercase;
+    color: var(--hue-faint); margin: 12px 8px 4px; }
+  .hue-lib-row { display: flex; align-items: center; gap: 12px; padding: 7px 8px; border-radius: 12px;
+    cursor: pointer; }
+  .hue-lib-row:hover { background: #ffffff12; }
+  .hue-lib-art { width: 44px; height: 44px; border-radius: 8px; flex: none; object-fit: cover;
+    background: #ffffff14; display: flex; align-items: center; justify-content: center;
+    font-size: 20px; line-height: 1; color: var(--hue-faint); overflow: hidden; }
+  .hue-lib-meta { display: flex; flex-direction: column; min-width: 0; flex: 1 1 auto; }
+  .hue-lib-title { font-size: 13.5px; font-weight: 600; color: var(--hue-text);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .hue-lib-sub { font-size: 11.5px; color: var(--hue-dim);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .hue-lib-act { width: 34px; height: 34px; border-radius: 9px; border: 1px solid var(--hue-line);
+    background: #ffffff0a; color: var(--hue-text); cursor: pointer; flex: none; font-size: 15px;
+    font-weight: 700; display: inline-flex; align-items: center; justify-content: center; }
+  .hue-lib-act:hover { background: #ffffff1c; }
+  .hue-lib-chev { color: var(--hue-faint); flex: none; display: inline-flex; }
+  .hue-lib-empty { padding: 26px 8px; text-align: center; color: var(--hue-dim); font-size: 12.5px; }
+  .hue-lib-toast { position: absolute; left: 50%; bottom: 52px; transform: translateX(-50%);
+    max-width: 82%; background: #000000cc; color: #fff; font-size: 12px; padding: 8px 14px;
+    border-radius: 999px; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 12;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .hue-lib-toast.show { opacity: 1; }
 `;
 
 /* ------------------------- Visualizer -------------------------
@@ -761,6 +810,8 @@ class HueMusicSyncCard extends HTMLElement {
       typeof matchMedia === "function" &&
       matchMedia("(prefers-reduced-motion: reduce)").matches;
     this._drum = null;        // drum-pad ("play the beats") overlay state
+    this._lib = null;         // library-browser overlay state
+    this._grp = null;         // speaker-group overlay state
 
     // Player picker: which player the integration should follow. The candidate
     // list is dynamic (players start and stop), so it's fetched on demand and
@@ -829,14 +880,23 @@ class HueMusicSyncCard extends HTMLElement {
       return;
     }
     this._sig = sig;
-    if (!this._dragging) this._render();
+    // Never rebuild the card out from under an open dropdown — the menus are
+    // position:fixed popovers that a re-render tears down and re-hides for a frame
+    // (the "flash", and with frequent updates the menu never settles so it looks
+    // empty). Every close path re-renders explicitly, so the deferred update lands
+    // as soon as the menu closes.
+    if (!this._dragging && !this._menuOpen()) this._render();
   }
   get hass() { return this._hass; }
 
-  // Re-read the live player's authoritative position into the cached playback
-  // snapshot the rAF loop interpolates from, without re-rendering — so a seek is
-  // reflected immediately while steady playback (which the loop already
-  // interpolates) never triggers a flashy full rebuild. Mirrors _model()'s
+  _menuOpen() {
+    return !!(this._areaMenuOpen || this._playerMenuOpen || this._autoMenuOpen);
+  }
+
+  // Re-read the live player's authoritative position/bpm into the cached playback
+  // snapshot the rAF loop interpolates from, without re-rendering — so a seek (or
+  // a bpm nudge) is reflected immediately while steady playback (which the loop
+  // already interpolates) never triggers a flashy full rebuild. Mirrors _model()'s
   // live/switch resolution.
   _refreshPlayTiming() {
     const p = this._play;
@@ -846,6 +906,10 @@ class HueMusicSyncCard extends HTMLElement {
     const st = (id) => (id && hass.states[id]) || null;
     const sw = st(area.switch);
     const swAttr = sw ? sw.attributes : {};
+    // bpm is published rounded (flips near a .5 tempo) — kept out of the render
+    // signature, so re-anchor the visualizer's beat grid here instead.
+    const bpm = Number(swAttr.bpm);
+    if (bpm > 0) p.bpm = bpm;
     const live = st(swAttr.source_player) || st(area.media_player);
     let src;
     if (live) {
@@ -896,13 +960,14 @@ class HueMusicSyncCard extends HTMLElement {
     const npSig = (e) => {
       if (!e) return "\u2205";
       const x = e.attributes;
-      // Deliberately EXCLUDE media_position: it ticks continuously while playing,
-      // and re-rendering on it rebuilds the whole card (re-fading the album
-      // backdrop from 0 and wiping the timeline until the next meta) \u2014 a visible
-      // flash. The rAF loop interpolates the playhead from a snapshot, and a seek
-      // re-anchors that snapshot via _refreshPlayTiming without a full render.
+      // Deliberately EXCLUDE media_position AND bpm: both change while playing
+      // (position ticks continuously; the published bpm is rounded, so it flips
+      // now and then near a .5 tempo) and re-rendering on them rebuilds the whole
+      // card \u2014 re-fading the album backdrop from 0, wiping the timeline, and
+      // tearing down any open dropdown (the "flash"). The rAF loop reads both from
+      // a snapshot that _refreshPlayTiming re-anchors in place without a render.
       return `${e.state}|${x.media_title || ""}|${x.media_artist || ""}|${x.entity_picture || x.media_image || ""}` +
-        `|${x.bpm || ""}|${x.album_colors ? JSON.stringify(x.album_colors) : (x.palette ? JSON.stringify(x.palette) : "")}`;
+        `|${x.album_colors ? JSON.stringify(x.album_colors) : (x.palette ? JSON.stringify(x.palette) : "")}`;
     };
     for (const a of this._areas) {
       for (const id of [a.intensity, a.effect, a.colour, a.brightness, a.timing]) {
@@ -983,6 +1048,16 @@ class HueMusicSyncCard extends HTMLElement {
     if (this._drum && this._drum.keep) {
       clearInterval(this._drum.keep);
       this._drum.keep = 0;
+    }
+    // Stop the overlay timers if the card is reparented while one is open
+    // (they're re-armed on the next interaction).
+    if (this._lib) {
+      if (this._lib.searchTimer) { clearTimeout(this._lib.searchTimer); this._lib.searchTimer = 0; }
+      if (this._lib.toastTimer) { clearTimeout(this._lib.toastTimer); this._lib.toastTimer = 0; }
+    }
+    if (this._grp) {
+      if (this._grp.refresh) { clearTimeout(this._grp.refresh); this._grp.refresh = 0; }
+      if (this._grp.toastTimer) { clearTimeout(this._grp.toastTimer); this._grp.toastTimer = 0; }
     }
   }
 
@@ -1334,7 +1409,7 @@ class HueMusicSyncCard extends HTMLElement {
     if (!this._config) return;
     // Don't tear the DOM down while an overlay page is open (it lives inside the
     // card node a render would replace). Each closes with its own _render().
-    if (this._drum) return;
+    if (this._drum || this._lib || this._grp) return;
     const m = this._model();
     const accent = m.accent;
     const pal = m.colour.selected;
@@ -1540,6 +1615,18 @@ class HueMusicSyncCard extends HTMLElement {
     this._tlMarker = tlMarker;
     this._tlSecs = null;
     this._tlSig = "";
+    // Tap the timeline to seek the followed player (a deliberate click, not a
+    // drag, so a stray touch on a wall tablet won't jump the song).
+    if (m.now.player) {
+      tl.classList.add("seekable");
+      tl.addEventListener("click", (e) => {
+        const r = tl.getBoundingClientRect();
+        if (!r.width || !tl.classList.contains("live")) return;
+        const p = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+        this._seekTo(m.now.player, p);
+        if (this._tlMarker) this._tlMarker.style.left = `${(p * 100).toFixed(2)}%`;
+      });
+    }
     hero.appendChild(tl);
     card.appendChild(hero);
 
@@ -1639,6 +1726,17 @@ class HueMusicSyncCard extends HTMLElement {
     grid.appendChild(timingField);
 
     body.appendChild(grid);
+
+    // Volume for the followed player (only when it exposes a volume level).
+    const volRow = this._volumeSlider(m, accent);
+    if (volRow) {
+      const volField = document.createElement("div");
+      volField.className = "hue-field";
+      volField.appendChild(this._label("Volume"));
+      volField.appendChild(volRow);
+      body.appendChild(volField);
+    }
+
     card.appendChild(body);
 
     this.shadowRoot.innerHTML = `<style>${CARD_CSS}</style>`;
@@ -1831,6 +1929,19 @@ class HueMusicSyncCard extends HTMLElement {
         s.energy > current.energy + 0.15;
       s.node.classList.toggle("arming", arming);
     }
+  }
+
+  /* -- seek the followed player to a fraction (0..1) of the track -- */
+  _seekTo(player, fraction) {
+    if (!player || !this._hass) return;
+    const dur =
+      (this._liveMeta && this._liveMeta.duration) || this._trDur || this._waveDur || 0;
+    if (!dur) return;
+    const p = Math.max(0, Math.min(1, fraction));
+    this._hass.callService("media_player", "media_seek", {
+      entity_id: player,
+      seek_position: Math.round(p * dur),
+    });
   }
 
   /* -- album-art application (preload-validated) -- */
@@ -2360,6 +2471,89 @@ class HueMusicSyncCard extends HTMLElement {
     return row;
   }
 
+  /* -- volume slider for the followed player (native media_player.volume_set).
+     Returns null when there is no player or it exposes no volume_level, so the
+     field only appears when volume is actually controllable. -- */
+  _volumeSlider(m, accent) {
+    const player = m.now.player;
+    const state = player && this._hass && this._hass.states[player];
+    const raw = state && state.attributes ? state.attributes.volume_level : null;
+    if (raw == null || isNaN(Number(raw))) return null;
+    const min = 0, max = 100;
+
+    const row = document.createElement("div");
+    row.className = "hue-slider-row";
+    const icon = document.createElement("span");
+    icon.className = "hue-slider-icon";
+    icon.textContent = "\u{1F50A}"; // speaker
+    row.appendChild(icon);
+
+    const slider = document.createElement("div");
+    slider.className = "hue-slider";
+    const track = document.createElement("div");
+    track.className = "hue-slider-track";
+    const fill = document.createElement("div");
+    fill.className = "hue-slider-fill";
+    const knob = document.createElement("div");
+    knob.className = "hue-slider-knob";
+    slider.append(track, fill, knob);
+
+    const valEl = document.createElement("span");
+    valEl.className = "hue-slider-val";
+    const suf = document.createElement("span");
+    suf.className = "hue-slider-suf";
+    suf.textContent = "%";
+
+    const paint = (v) => {
+      const pct = ((v - min) / (max - min)) * 100;
+      fill.style.width = pct + "%";
+      fill.style.background = gradFor([accent + "88", accent]);
+      knob.style.left = pct + "%";
+      knob.style.background = accent;
+      knob.style.boxShadow = `0 0 0 4px ${accent}33, 0 0 16px ${accent}`;
+      valEl.textContent = Math.round(v);
+      valEl.appendChild(suf);
+    };
+    let current = Math.round(Number(raw) * 100);
+    paint(current);
+
+    const fromEvent = (clientX) => {
+      const r = slider.getBoundingClientRect();
+      let p = (clientX - r.left) / r.width;
+      p = Math.max(0, Math.min(1, p));
+      current = Math.round(min + p * (max - min));
+      paint(current);
+    };
+    const onMove = (e) => {
+      if (!this._dragging) return;
+      const x = e.clientX ?? (e.touches && e.touches[0] && e.touches[0].clientX);
+      if (x != null) fromEvent(x);
+    };
+    const onUp = () => {
+      if (!this._dragging) return;
+      this._dragging = false;
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      if (this._hass && player) {
+        this._hass.callService("media_player", "volume_set", {
+          entity_id: player,
+          volume_level: Math.max(0, Math.min(1, current / 100)),
+        });
+      }
+      this._render();
+    };
+    slider.addEventListener("pointerdown", (e) => {
+      this._dragging = true;
+      slider.setPointerCapture && slider.setPointerCapture(e.pointerId);
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
+      fromEvent(e.clientX);
+    });
+
+    row.append(slider, valEl);
+    return row;
+  }
+
   _advancedSection(m, accent) {
     const field = document.createElement("div");
     field.className = "hue-field hue-advanced";
@@ -2542,6 +2736,24 @@ class HueMusicSyncCard extends HTMLElement {
     tap.setAttribute("aria-label", "Open the beat pads to play the lights");
     tap.addEventListener("click", () => this._startDrums(m));
     wrap.appendChild(tap);
+    // Library: browse/search your music and play it to the followed player.
+    if (!this._demo) {
+      const libBtn = document.createElement("button");
+      libBtn.className = "hue-step";
+      libBtn.textContent = "\u{1F3B5}"; // musical note
+      libBtn.title = "Library";
+      libBtn.setAttribute("aria-label", "Browse and search your music library");
+      libBtn.addEventListener("click", () => this._openLibrary());
+      wrap.appendChild(libBtn);
+      // Speaker group: sync playback across rooms.
+      const grpBtn = document.createElement("button");
+      grpBtn.className = "hue-step";
+      grpBtn.textContent = "\u{1F517}"; // link
+      grpBtn.title = "Speaker group";
+      grpBtn.setAttribute("aria-label", "Group speakers for synchronised playback");
+      grpBtn.addEventListener("click", () => this._openGroup());
+      wrap.appendChild(grpBtn);
+    }
     return wrap;
   }
 
@@ -2718,6 +2930,573 @@ class HueMusicSyncCard extends HTMLElement {
     this._playersAt = 0; // and re-read once the integration has re-resolved
     this._playerMenuOpen = false;
     this._render();
+  }
+
+  /* -- library browser --
+     A full-page overlay to browse/search the active library backend (Music
+     Assistant, or a direct Navidrome/OpenSubsonic server) and play to the
+     followed player. Mirrors the beat-pad overlay: it lives inside _cardNode and
+     suppresses re-renders (the this._lib guard in _renderImpl) while open, so its
+     own state/DOM survive the ~1 Hz meta updates. Backed by the
+     hue_music_sync/browse|search|play|backend WebSocket commands; playback is
+     issued server-side so a Subsonic stream token never reaches the browser. */
+  _libSend(payload) {
+    const area = this._areas[this._areaIndex] || {};
+    const conn = this._hass && this._hass.connection;
+    if (!conn || !area.switch || this._demo) {
+      return Promise.reject(new Error("The player is not available here."));
+    }
+    return conn.sendMessagePromise({ ...payload, entity_id: area.switch });
+  }
+
+  _libTargetPlayer() {
+    // Freshest known player the lights follow: the switch's live source_player,
+    // else the pinned/following one from the cached picker list.
+    const area = this._areas[this._areaIndex] || {};
+    const swEnt = this._hass && area.switch && this._hass.states[area.switch];
+    const live = (swEnt && swEnt.attributes.source_player) || null;
+    if (live) return live;
+    const p = this._players;
+    return (p && (p.following || p.selected)) || null;
+  }
+
+  _openLibrary() {
+    if (!this._cardNode || this._lib || this._demo) return;
+    this._ensurePlayers(true); // so _libTargetPlayer knows the followed player
+
+    const overlay = document.createElement("div");
+    overlay.className = "hue-lib";
+
+    const head = document.createElement("div");
+    head.className = "hue-lib-head";
+    const back = document.createElement("button");
+    back.className = "hue-lib-back";
+    back.setAttribute("aria-label", "Back");
+    back.innerHTML =
+      '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">' +
+      '<path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2.4" ' +
+      'stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    back.addEventListener("click", (e) => { e.stopPropagation(); this._libBack(); });
+
+    const titles = document.createElement("div");
+    titles.className = "hue-lib-titles";
+    const title = document.createElement("div");
+    title.className = "hue-cal-title";
+    title.textContent = "Library";
+    const crumb = document.createElement("div");
+    crumb.className = "hue-lib-crumb";
+    titles.append(title, crumb);
+
+    const backendBtn = document.createElement("button");
+    backendBtn.className = "hue-lib-backend";
+    backendBtn.textContent = "…";
+    backendBtn.title = "Switch music source";
+    backendBtn.addEventListener("click", (e) => { e.stopPropagation(); this._libToggleBackend(); });
+
+    head.append(back, titles, backendBtn);
+
+    const searchWrap = document.createElement("div");
+    searchWrap.className = "hue-lib-search";
+    const search = document.createElement("input");
+    search.type = "search";
+    search.placeholder = "Search your library…";
+    search.setAttribute("aria-label", "Search the library");
+    search.addEventListener("input", () => this._libOnSearchInput(search.value));
+    searchWrap.appendChild(search);
+
+    const body = document.createElement("div");
+    body.className = "hue-lib-body";
+
+    const close = document.createElement("div");
+    close.className = "hue-cal-cancel";
+    close.textContent = "Done";
+    close.addEventListener("click", (e) => { e.stopPropagation(); this._closeLibrary(); });
+
+    overlay.append(head, searchWrap, body, close);
+    this._cardNode.appendChild(overlay);
+    this._lib = {
+      overlay, body, crumb, backendBtn, search,
+      stack: [], backend: null, available: null,
+      searchTimer: 0, toast: null, toastTimer: 0,
+    };
+    this._libLoadBackendInfo();
+    this._libBrowse(null); // the root level
+  }
+
+  _closeLibrary() {
+    const lib = this._lib;
+    if (!lib) return;
+    if (lib.searchTimer) clearTimeout(lib.searchTimer);
+    if (lib.toastTimer) clearTimeout(lib.toastTimer);
+    lib.overlay.remove();
+    this._lib = null;
+    this._render(); // repaint the normal card (state may have moved on)
+  }
+
+  _libBack() {
+    const lib = this._lib;
+    if (!lib) return;
+    if (lib.search && lib.search.value) { // a search is showing: clear it first
+      lib.search.value = "";
+      if (lib.stack.length) this._libRenderNode(lib.stack[lib.stack.length - 1]);
+      return;
+    }
+    if (lib.stack.length > 1) {
+      lib.stack.pop();
+      this._libRenderNode(lib.stack[lib.stack.length - 1]);
+    } else {
+      this._closeLibrary();
+    }
+  }
+
+  async _libBrowse(nodeId) {
+    const lib = this._lib;
+    if (!lib) return;
+    this._libSetLoading();
+    try {
+      const res = await this._libSend({ type: "hue_music_sync/browse", node_id: nodeId || null });
+      if (this._lib !== lib) return; // closed/reopened meanwhile
+      if (res && res.backend) this._libSetBackend(res.backend);
+      const node = res && res.node;
+      if (!node) { this._libError(new Error("Nothing to show.")); return; }
+      lib.stack.push(node);
+      this._libRenderNode(node);
+    } catch (err) {
+      this._libError(err);
+    }
+  }
+
+  _libOnSearchInput(value) {
+    const lib = this._lib;
+    if (!lib) return;
+    if (lib.searchTimer) clearTimeout(lib.searchTimer);
+    const q = (value || "").trim();
+    lib.searchTimer = setTimeout(() => {
+      if (this._lib !== lib) return;
+      if (!q) {
+        if (lib.stack.length) this._libRenderNode(lib.stack[lib.stack.length - 1]);
+        return;
+      }
+      this._libDoSearch(q);
+    }, 300);
+  }
+
+  async _libDoSearch(q) {
+    const lib = this._lib;
+    if (!lib) return;
+    this._libSetLoading();
+    try {
+      const res = await this._libSend({ type: "hue_music_sync/search", query: q });
+      if (this._lib !== lib) return;
+      if (res && res.backend) this._libSetBackend(res.backend);
+      this._libRenderSearch(res && res.results, q);
+    } catch (err) {
+      this._libError(err);
+    }
+  }
+
+  _libRenderNode(node) {
+    const lib = this._lib;
+    if (!lib || !node) return;
+    lib.crumb.textContent = node.title || "";
+    const body = lib.body;
+    body.replaceChildren();
+    const items = node.items || [];
+    if (node.can_play_all && items.some((i) => i.playable)) {
+      body.appendChild(this._libActionRow("▶  Play all", () => this._libPlayAll(items)));
+    }
+    if (!items.length) { body.appendChild(this._libEmpty("Nothing here.")); return; }
+    for (const it of items) body.appendChild(this._libRow(it));
+  }
+
+  _libRenderSearch(results, q) {
+    const lib = this._lib;
+    if (!lib) return;
+    lib.crumb.textContent = `Search: ${q}`;
+    const body = lib.body;
+    body.replaceChildren();
+    const groups = [
+      ["Artists", results && results.artists],
+      ["Albums", results && results.albums],
+      ["Tracks", results && results.tracks],
+    ];
+    let any = false;
+    for (const [label, arr] of groups) {
+      if (!arr || !arr.length) continue;
+      any = true;
+      const h = document.createElement("div");
+      h.className = "hue-lib-sec";
+      h.textContent = label;
+      body.appendChild(h);
+      for (const it of arr) body.appendChild(this._libRow(it));
+    }
+    if (!any) body.appendChild(this._libEmpty(`No results for “${q}”.`));
+  }
+
+  _libRow(item) {
+    const row = document.createElement("div");
+    row.className = "hue-lib-row";
+
+    const art = document.createElement(item.artwork ? "img" : "div");
+    art.className = "hue-lib-art";
+    if (item.artwork) {
+      art.src = item.artwork;
+      art.loading = "lazy";
+      art.alt = "";
+    } else {
+      art.textContent = this._libGlyph(item.kind);
+    }
+
+    const meta = document.createElement("div");
+    meta.className = "hue-lib-meta";
+    const t = document.createElement("div");
+    t.className = "hue-lib-title";
+    t.textContent = item.title || "";
+    meta.appendChild(t);
+    const subParts = [];
+    if (item.subtitle) subParts.push(item.subtitle);
+    if (item.duration) subParts.push(this._libFmtDur(item.duration));
+    if (subParts.length) {
+      const s = document.createElement("div");
+      s.className = "hue-lib-sub";
+      s.textContent = subParts.join(" · ");
+      meta.appendChild(s);
+    }
+    row.append(art, meta);
+
+    if (item.browsable) {
+      row.addEventListener("click", () => this._libBrowse(item.id));
+      if (item.playable) row.appendChild(this._libActBtn("add", () => this._libPlay(item, "add")));
+      const chev = document.createElement("span");
+      chev.className = "hue-lib-chev";
+      chev.innerHTML =
+        '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">' +
+        '<path d="M9 5l7 7-7 7" fill="none" stroke="currentColor" stroke-width="2.2" ' +
+        'stroke-linecap="round" stroke-linejoin="round"/></svg>';
+      row.appendChild(chev);
+    } else if (item.playable) {
+      row.addEventListener("click", () => this._libPlay(item, "play"));
+      row.appendChild(this._libActBtn("add", () => this._libPlay(item, "add")));
+    }
+    return row;
+  }
+
+  _libActBtn(kind, fn) {
+    const b = document.createElement("button");
+    b.className = "hue-lib-act";
+    b.textContent = kind === "add" ? "+" : "▶";
+    b.title = kind === "add" ? "Add to queue" : "Play";
+    b.setAttribute("aria-label", b.title);
+    b.addEventListener("click", (e) => { e.stopPropagation(); fn(); });
+    return b;
+  }
+
+  _libActionRow(label, fn) {
+    const row = document.createElement("div");
+    row.className = "hue-lib-row";
+    const t = document.createElement("div");
+    t.className = "hue-lib-title";
+    t.textContent = label;
+    row.appendChild(t);
+    row.addEventListener("click", fn);
+    return row;
+  }
+
+  async _libPlay(item, mode) {
+    const player = this._libTargetPlayer();
+    if (!player) {
+      this._libToast("No player selected — pick one on the card first.");
+      return;
+    }
+    try {
+      await this._libSend({
+        type: "hue_music_sync/play",
+        player,
+        item_id: item.id,
+        enqueue: mode === "add" ? "add" : "play",
+      });
+      this._libToast(mode === "add" ? "Added to queue" : `Playing ${item.title || ""}`.trim());
+    } catch (err) {
+      this._libToast(this._libErrText(err));
+    }
+  }
+
+  async _libPlayAll(items) {
+    const player = this._libTargetPlayer();
+    if (!player) {
+      this._libToast("No player selected — pick one on the card first.");
+      return;
+    }
+    const playable = (items || []).filter((i) => i.playable);
+    if (!playable.length) return;
+    try {
+      for (let i = 0; i < playable.length; i++) {
+        await this._libSend({
+          type: "hue_music_sync/play",
+          player,
+          item_id: playable[i].id,
+          enqueue: i === 0 ? "play" : "add",
+        });
+      }
+      this._libToast(`Queued ${playable.length} tracks`);
+    } catch (err) {
+      this._libToast(this._libErrText(err));
+    }
+  }
+
+  async _libLoadBackendInfo() {
+    try {
+      const res = await this._libSend({ type: "hue_music_sync/backend" });
+      if (!this._lib) return;
+      this._lib.available = (res && res.available) || null;
+      this._libSetBackend(res && res.active);
+    } catch (_) {
+      // Older integration without the backend command: hide the chip.
+      if (this._lib && this._lib.backendBtn) this._lib.backendBtn.style.display = "none";
+    }
+  }
+
+  _libSetBackend(id) {
+    const lib = this._lib;
+    if (!lib || !id) return;
+    lib.backend = id;
+    if (lib.backendBtn) {
+      lib.backendBtn.textContent = id === "subsonic" ? "Navidrome" : "Music Assistant";
+    }
+  }
+
+  async _libToggleBackend() {
+    const lib = this._lib;
+    if (!lib) return;
+    const avail = lib.available || {};
+    let target;
+    if (lib.backend === "subsonic") {
+      target = "music_assistant";
+    } else if (avail.subsonic) {
+      target = "subsonic";
+    } else {
+      this._libToast("Set the Navidrome/OpenSubsonic URL + login in the integration options first.");
+      return;
+    }
+    try {
+      const res = await this._libSend({ type: "hue_music_sync/backend", set: target });
+      if (!this._lib) return;
+      this._lib.available = (res && res.available) || null;
+      this._libSetBackend(res && res.active);
+      this._lib.stack = [];
+      if (this._lib.search) this._lib.search.value = "";
+      this._libBrowse(null);
+    } catch (err) {
+      this._libToast(this._libErrText(err));
+    }
+  }
+
+  _libSetLoading() {
+    const lib = this._lib;
+    if (!lib) return;
+    lib.body.replaceChildren(this._libEmpty("Loading…"));
+  }
+
+  _libEmpty(text) {
+    const d = document.createElement("div");
+    d.className = "hue-lib-empty";
+    d.textContent = text;
+    return d;
+  }
+
+  _libError(err) {
+    const lib = this._lib;
+    if (!lib) return;
+    lib.body.replaceChildren(this._libEmpty(this._libErrText(err)));
+  }
+
+  _libErrText(err) {
+    const msg = err && (err.message || err.error);
+    return msg ? String(msg) : "Something went wrong.";
+  }
+
+  _libGlyph(kind) {
+    const map = {
+      artist: "\u{1F3A4}", album: "\u{1F4BF}", track: "♪", playlist: "☰",
+      genre: "\u{1F3F7}", radio: "\u{1F4FB}", directory: "\u{1F4C2}",
+    };
+    return map[kind] || "♪";
+  }
+
+  _libFmtDur(sec) {
+    sec = Math.max(0, Math.round(Number(sec) || 0));
+    const m = Math.floor(sec / 60);
+    const s = sec % 60;
+    return `${m}:${String(s).padStart(2, "0")}`;
+  }
+
+  _libToast(text) {
+    const lib = this._lib;
+    if (!lib) return;
+    if (!lib.toast) {
+      lib.toast = document.createElement("div");
+      lib.toast.className = "hue-lib-toast";
+      lib.overlay.appendChild(lib.toast);
+    }
+    lib.toast.textContent = text;
+    lib.toast.classList.add("show");
+    if (lib.toastTimer) clearTimeout(lib.toastTimer);
+    lib.toastTimer = setTimeout(() => {
+      if (lib.toast) lib.toast.classList.remove("show");
+    }, 2200);
+  }
+
+  /* -- speaker grouping --
+     Group/ungroup players for synchronised multi-room playback via Home
+     Assistant's standard media_player.join / unjoin (Music Assistant, Sonos, …
+     all advertise SUPPORT_GROUPING and expose group_members). The followed
+     player is the group leader; other groupable players are added to / removed
+     from it. Per-speaker sync-DELAY tuning is a Sendspin-native setting and
+     lands with the native players — noted in the overlay, not wired here. */
+  _groupablePlayers() {
+    const out = [];
+    const st = this._hass && this._hass.states;
+    if (!st) return out;
+    for (const id in st) {
+      if (!id.startsWith("media_player.")) continue;
+      const s = st[id];
+      const sf = (s.attributes && s.attributes.supported_features) || 0;
+      if (!(sf & 524288)) continue; // MediaPlayerEntityFeature.GROUPING (1 << 19)
+      out.push({
+        entity_id: id,
+        name: (s.attributes && s.attributes.friendly_name) || id,
+        members: (s.attributes && s.attributes.group_members) || [],
+        state: s.state,
+      });
+    }
+    out.sort((a, b) => a.name.localeCompare(b.name));
+    return out;
+  }
+
+  _openGroup() {
+    if (!this._cardNode || this._grp || this._demo) return;
+    const overlay = document.createElement("div");
+    overlay.className = "hue-lib";
+
+    const head = document.createElement("div");
+    head.className = "hue-lib-head";
+    const back = document.createElement("button");
+    back.className = "hue-lib-back";
+    back.setAttribute("aria-label", "Back");
+    back.innerHTML =
+      '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">' +
+      '<path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2.4" ' +
+      'stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    back.addEventListener("click", (e) => { e.stopPropagation(); this._closeGroup(); });
+    const titles = document.createElement("div");
+    titles.className = "hue-lib-titles";
+    const title = document.createElement("div");
+    title.className = "hue-cal-title";
+    title.textContent = "Speaker group";
+    const crumb = document.createElement("div");
+    crumb.className = "hue-lib-crumb";
+    crumb.textContent = "Play in sync across rooms";
+    titles.append(title, crumb);
+    head.append(back, titles);
+
+    const body = document.createElement("div");
+    body.className = "hue-lib-body";
+
+    const close = document.createElement("div");
+    close.className = "hue-cal-cancel";
+    close.textContent = "Done";
+    close.addEventListener("click", (e) => { e.stopPropagation(); this._closeGroup(); });
+
+    overlay.append(head, body, close);
+    this._cardNode.appendChild(overlay);
+    this._grp = { overlay, body, leader: this._libTargetPlayer(), refresh: 0, toast: null, toastTimer: 0 };
+    this._grpRender();
+  }
+
+  _closeGroup() {
+    const g = this._grp;
+    if (!g) return;
+    if (g.refresh) clearTimeout(g.refresh);
+    if (g.toastTimer) clearTimeout(g.toastTimer);
+    g.overlay.remove();
+    this._grp = null;
+    this._render();
+  }
+
+  _grpRender() {
+    const g = this._grp;
+    if (!g) return;
+    const body = g.body;
+    body.replaceChildren();
+    const leaderId = g.leader;
+    const players = this._groupablePlayers();
+    if (!players.length) {
+      body.appendChild(this._libEmpty("No groupable players were found."));
+      return;
+    }
+    if (!leaderId) {
+      body.appendChild(this._libEmpty("Pick or start a player on the card first, then add speakers to it."));
+      return;
+    }
+    const leaderSt = this._hass && this._hass.states[leaderId];
+    const group = new Set(
+      (leaderSt && leaderSt.attributes && leaderSt.attributes.group_members) || [leaderId]
+    );
+    const accent = this._accent || "#7b5cff";
+    for (const p of players) {
+      const isLeader = p.entity_id === leaderId;
+      const inGroup = isLeader || group.has(p.entity_id);
+      const row = document.createElement("div");
+      row.className = "hue-lib-row";
+      const meta = document.createElement("div");
+      meta.className = "hue-lib-meta";
+      const t = document.createElement("div");
+      t.className = "hue-lib-title";
+      t.textContent = p.name;
+      const sub = document.createElement("div");
+      sub.className = "hue-lib-sub";
+      sub.textContent = isLeader ? "Leader" : (inGroup ? "In group" : (p.state || ""));
+      meta.append(t, sub);
+      row.appendChild(meta);
+      if (isLeader) {
+        const star = document.createElement("span");
+        star.className = "hue-lib-chev";
+        star.textContent = "★";
+        row.appendChild(star);
+      } else {
+        const btn = document.createElement("button");
+        btn.className = "hue-lib-act";
+        btn.textContent = inGroup ? "✓" : "+";
+        btn.title = inGroup ? "Remove from group" : "Add to group";
+        btn.setAttribute("aria-label", btn.title);
+        if (inGroup) {
+          btn.style.background = accent + "33";
+          btn.style.borderColor = accent + "66";
+        }
+        btn.addEventListener("click", (e) => { e.stopPropagation(); this._grpToggle(p.entity_id, inGroup); });
+        row.appendChild(btn);
+      }
+      body.appendChild(row);
+    }
+    const note = document.createElement("div");
+    note.className = "hue-lib-empty";
+    note.textContent = "Per-speaker sync-delay tuning arrives with the native Sendspin players.";
+    body.appendChild(note);
+  }
+
+  _grpToggle(entityId, inGroup) {
+    const g = this._grp;
+    if (!g || !this._hass || !g.leader) return;
+    const svc = inGroup ? "unjoin" : "join";
+    const data = inGroup
+      ? { entity_id: entityId }
+      : { entity_id: g.leader, group_members: [entityId] };
+    try {
+      Promise.resolve(this._hass.callService("media_player", svc, data)).catch(() => {});
+    } catch (_) { /* connection went away */ }
+    // Give HA a moment to settle the new group state, then rebuild the list.
+    if (g.refresh) clearTimeout(g.refresh);
+    g.refresh = setTimeout(() => { if (this._grp === g) this._grpRender(); }, 700);
   }
 
   /* -- play-the-beats drum pad --
@@ -3196,7 +3975,7 @@ class HueMusicSyncTabletCard extends HueMusicSyncCard {
   _renderImpl() {
     if (!this._config) return;
     // Don't tear the DOM down while the beat-pad overlay is open.
-    if (this._drum) return;
+    if (this._drum || this._lib || this._grp) return;
     const m = this._model();
     const accent = m.accent;
     const pal = m.colour.selected;
@@ -3443,6 +4222,16 @@ class HueMusicSyncTabletCard extends HueMusicSyncCard {
     timingField.appendChild(this._timing(m, accent));
     grid.appendChild(timingField);
     right.appendChild(grid);
+
+    // Volume for the followed player (only when it exposes a volume level).
+    const volRow = this._volumeSlider(m, accent);
+    if (volRow) {
+      const volField = document.createElement("div");
+      volField.className = "hue-field";
+      volField.appendChild(this._label("Volume"));
+      volField.appendChild(volRow);
+      right.appendChild(volField);
+    }
     return right;
   }
 
@@ -3479,9 +4268,9 @@ class HueMusicSyncTabletCard extends HueMusicSyncCard {
     return tx;
   }
 
-  /* -- waveform (stable pseudo-random silhouette; view-only playhead + section
-     highlights). Deliberately NOT a scrubber: it must not seek the player, so a
-     stray tap can't jump the song. -- */
+  /* -- waveform (stable pseudo-random silhouette; playhead + section highlights).
+     A single deliberate CLICK seeks the followed player (no drag-scrub, so a
+     stray touch on a wall tablet can't smear the song across the track). -- */
   _waveform(m, colors, accent) {
     const N = 68;
     if (!this._waveShape) {
@@ -3512,8 +4301,18 @@ class HueMusicSyncTabletCard extends HueMusicSyncCard {
     this._waveCursor = cursor;
     this._waveDur = m.now.duration || 0;
     this._waveLastIdx = -1;
-    // View-only: no pointer/seek handlers. The playhead + section highlights are
-    // driven by the live loop; the waveform never moves the track.
+    // Click to seek (deliberate tap only). The playhead + section highlights are
+    // still driven by the live loop; a click just jumps the position once.
+    if (m.now.player) {
+      wave.classList.add("seekable");
+      wave.addEventListener("click", (e) => {
+        const r = wave.getBoundingClientRect();
+        if (!r.width) return;
+        const p = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+        this._seekTo(m.now.player, p);
+        if (this._waveCursor) this._waveCursor.style.left = `${(p * 100).toFixed(2)}%`;
+      });
+    }
     return wave;
   }
 
