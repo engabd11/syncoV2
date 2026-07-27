@@ -3409,7 +3409,10 @@ class HueMusicSyncCard extends HTMLElement {
 
     overlay.append(head, body, close);
     this._cardNode.appendChild(overlay);
-    this._grp = { overlay, body, leader: this._libTargetPlayer(), refresh: 0, toast: null, toastTimer: 0 };
+    this._grp = {
+      overlay, body, crumbEl: crumb, leader: this._libTargetPlayer(),
+      refresh: 0, toast: null, toastTimer: 0,
+    };
     this._grpRender();
   }
 
@@ -3430,17 +3433,19 @@ class HueMusicSyncCard extends HTMLElement {
     body.replaceChildren();
     const leaderId = g.leader;
     const players = this._groupablePlayers();
+    if (g.crumbEl) {
+      g.crumbEl.textContent = leaderId
+        ? "Add speakers to the player you're controlling"
+        : "Choose a player to control";
+    }
     if (!players.length) {
       body.appendChild(this._libEmpty("No groupable players were found."));
       return;
     }
-    if (!leaderId) {
-      body.appendChild(this._libEmpty("Pick or start a player on the card first, then add speakers to it."));
-      return;
-    }
-    const leaderSt = this._hass && this._hass.states[leaderId];
+    const leaderSt = leaderId && this._hass && this._hass.states[leaderId];
     const group = new Set(
-      (leaderSt && leaderSt.attributes && leaderSt.attributes.group_members) || [leaderId]
+      (leaderSt && leaderSt.attributes && leaderSt.attributes.group_members) ||
+      (leaderId ? [leaderId] : [])
     );
     const accent = this._accent || "#7b5cff";
     for (const p of players) {
@@ -3448,22 +3453,30 @@ class HueMusicSyncCard extends HTMLElement {
       const inGroup = isLeader || group.has(p.entity_id);
       const row = document.createElement("div");
       row.className = "hue-lib-row";
+      if (isLeader) row.style.background = accent + "1f";
+
       const meta = document.createElement("div");
       meta.className = "hue-lib-meta";
+      meta.style.cursor = "pointer";
       const t = document.createElement("div");
       t.className = "hue-lib-title";
       t.textContent = p.name;
       const sub = document.createElement("div");
       sub.className = "hue-lib-sub";
-      sub.textContent = isLeader ? "Leader" : (inGroup ? "In group" : (p.state || ""));
+      sub.textContent = isLeader
+        ? "Controlling · leader"
+        : (inGroup ? "In group" : (leaderId ? (p.state || "") : "Tap to control"));
       meta.append(t, sub);
+      // Tap the name to control this player (and make it the group leader).
+      meta.addEventListener("click", () => this._grpSelectLeader(p.entity_id));
       row.appendChild(meta);
+
       if (isLeader) {
         const star = document.createElement("span");
         star.className = "hue-lib-chev";
         star.textContent = "★";
         row.appendChild(star);
-      } else {
+      } else if (leaderId) {
         const btn = document.createElement("button");
         btn.className = "hue-lib-act";
         btn.textContent = inGroup ? "✓" : "+";
@@ -3475,6 +3488,15 @@ class HueMusicSyncCard extends HTMLElement {
         }
         btn.addEventListener("click", (e) => { e.stopPropagation(); this._grpToggle(p.entity_id, inGroup); });
         row.appendChild(btn);
+      } else {
+        // No leader yet: a control chip picks this player.
+        const pick = document.createElement("button");
+        pick.className = "hue-lib-act";
+        pick.textContent = "▶";
+        pick.title = "Control this player";
+        pick.setAttribute("aria-label", pick.title);
+        pick.addEventListener("click", (e) => { e.stopPropagation(); this._grpSelectLeader(p.entity_id); });
+        row.appendChild(pick);
       }
       body.appendChild(row);
     }
@@ -3482,6 +3504,15 @@ class HueMusicSyncCard extends HTMLElement {
     note.className = "hue-lib-empty";
     note.textContent = "Per-speaker sync-delay tuning arrives with the native Sendspin players.";
     body.appendChild(note);
+  }
+
+  _grpSelectLeader(entityId) {
+    const g = this._grp;
+    if (!g || !entityId) return;
+    g.leader = entityId;
+    // Pin it so the card's transport + library play target this player too.
+    this._choosePlayer(entityId);
+    this._grpRender();
   }
 
   _grpToggle(entityId, inGroup) {
