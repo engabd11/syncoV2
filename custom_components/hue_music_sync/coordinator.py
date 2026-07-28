@@ -1910,6 +1910,11 @@ class SyncManager:
         attrs["advanced"] = s.advanced
         if s.advanced and s.tunables:
             attrs["tunables"] = dict(s.tunables)
+        # Persistent settings that aren't entities, so remote surfaces (the native
+        # app / any card) can reflect the current values, not just write them.
+        attrs["media_player"] = s.media_player
+        attrs["auto_levels"] = [str(m) for m in s.auto_levels]
+        attrs["auto_timing"] = s.auto_timing
         return attrs
 
     def player_candidates(self, area_id: str) -> dict:
