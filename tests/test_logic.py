@@ -56,15 +56,15 @@ def test_config_id_padding_does_not_crash():
     assert len(frame[16:52]) == 36  # padded to fixed width
 
 
-def test_build_packets_splits_large_areas_at_ten_lights():
-    # The bridge caps a packet at ~10 lights; a 14-channel area must split into
-    # two datagrams (10 + 4), each a complete HueStream frame.
+def test_build_packets_splits_large_areas_above_max_channels():
+    # The Entertainment API spec allows up to 20 channels per UDP message;
+    # a 25-channel area must split into two datagrams (20 + 5).
     enc = HueStreamEncoder(_UUID)
-    colors = {i: (0.0, 0.0, 1.0) for i in range(14)}
+    colors = {i: (0.0, 0.0, 1.0) for i in range(25)}
     packets = enc.build_packets(colors)
     assert len(packets) == 2
     counts = [(len(p) - 52) // 7 for p in packets]  # channels per datagram
-    assert counts == [10, 4]
+    assert counts == [20, 5]
     for p in packets:
         assert p[:9] == b"HueStream"
 

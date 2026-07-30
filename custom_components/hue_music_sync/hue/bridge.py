@@ -65,6 +65,11 @@ class EntertainmentChannel:
     x: float
     y: float
     z: float
+    # Per-light colour gamut triangle ((red_x, red_y), (green_x, green_y),
+    # (blue_x, blue_y)) resolved from the CLIP v2 API. None when the light's
+    # gamut is unknown (older firmware, white-only, or resolution failure) —
+    # the encoder falls back to its default gamut in that case.
+    gamut: tuple[tuple[float, float], ...] | None = None
 
 
 @dataclass(slots=True)
@@ -75,6 +80,12 @@ class EntertainmentConfig:
     name: str
     status: str
     channels: list[EntertainmentChannel] = field(default_factory=list)
+    # "screen" or "room" — affects spatial effect mapping. Screen-type areas
+    # have lamp positions relative to a screen + user position.
+    configuration_type: str = "room"
+    # Which application is currently streaming to this area (per the
+    # active_streamer field), or None if inactive. Used for conflict detection.
+    active_streamer: str | None = None
 
     @property
     def is_streaming(self) -> bool:
@@ -111,6 +122,37 @@ async def create_app_key(
     return app_key, client_key
 
 
+async def fetch_application_id(
+    session: aiohttp.ClientSession, host: str, app_key: str, ssl_ctx
+) -> str | None:
+    """Fetch the hue-application-id from the bridge's /auth/v1 endpoint.
+
+    Per the Hue Entertainment API spec, the PSK identity for the DTLS handshake
+    must be the ``hue-application-id`` (not the app key / username). This is
+    retrieved via a GET on ``https://<bridge>/auth/v1`` with the
+    ``hue-application-key`` header; the bridge responds with a
+    ``hue-application-id`` response header.
+
+    Returns None if the bridge does not expose the endpoint (older firmware) so
+    callers can fall back to the app key as before.
+    """
+    url = f"https://{host}/auth/v1"
+    headers = {"hue-application-key": app_key}
+    try:
+        async with session.get(
+            url, headers=headers, ssl=ssl_ctx, timeout=_API_TIMEOUT
+        ) as resp:
+            if resp.status != 200:
+                return None
+            # The application id is in a response header, not the body.
+            app_id = resp.headers.get("hue-application-id")
+            if app_id:
+                return app_id
+    except (aiohttp.ClientError, OSError):
+        return None
+    return None
+
+
 class HueBridge:
     """Authenticated CLIP v2 client for one bridge."""
 
@@ -145,25 +187,88 @@ class HueBridge:
             raise HueBridgeError(str(body["errors"]))
         return body.get("data", [])
 
+    async def get_light_gamuts(self) -> dict[str, tuple[tuple[float, float], ...]]:
+        """Per-light colour gamut triangles from the CLIP v2 API.
+
+        The API exposes each light's gamut as ``color.gamut`` with
+        ``red/green/blue`` xy points. Returns a mapping of light resource id
+        to a ``(red, green, blue)`` tuple of ``(x, y)`` pairs. Lights without
+        a color gamut (white-only) are omitted.
+        """
+        gamuts: dict[str, tuple[tuple[float, float], ...]] = {}
+        for light in await self._get("light"):
+            color = light.get("color")
+            if color is None:
+                continue
+            gamut = color.get("gamut")
+            if gamut is None:
+                continue
+            try:
+                red = (float(gamut["red"]["x"]), float(gamut["red"]["y"]))
+                green = (float(gamut["green"]["x"]), float(gamut["green"]["y"]))
+                blue = (float(gamut["blue"]["x"]), float(gamut["blue"]["y"]))
+                gamuts[light["id"]] = (red, green, blue)
+            except (KeyError, TypeError, ValueError):
+                continue
+        return gamuts
+
     async def get_entertainment_configs(self) -> list[EntertainmentConfig]:
-        """List entertainment areas with their channel positions."""
+        """List entertainment areas with their channel positions.
+
+        Also fetches per-light gamuts and resolves each channel's light to
+        its gamut, so the stream encoder can clamp to the correct colour
+        triangle per lamp instead of a single hardcoded gamut.
+        """
+        # Fetch gamuts once and build the channel→gamut map alongside the
+        # entertainment configs. The gamut resolution follows the same path
+        # as _area_light_rids: channel members → entertainment services →
+        # devices → light resources.
+        light_gamuts = await self.get_light_gamuts()
+
+        # Build entertainment service → device mapping for gamut resolution.
+        ent_services: dict[str, str] = {}  # ent_service_id -> device_rid
+        for ent in await self._get("entertainment"):
+            owner = ent.get("owner", {})
+            if owner.get("rtype") == "device":
+                ent_services[ent["id"]] = owner["rid"]
+
+        # Build device → light resource id mapping.
+        device_lights: dict[str, str] = {}  # device_rid -> light_rid
+        for light in await self._get("light"):
+            owner = light.get("owner", {})
+            if owner.get("rtype") == "device":
+                device_lights[owner["rid"]] = light["id"]
+
         configs: list[EntertainmentConfig] = []
         for item in await self._get("entertainment_configuration"):
-            channels = [
-                EntertainmentChannel(
+            channels = []
+            for ch in item.get("channels", []):
+                channel = EntertainmentChannel(
                     channel_id=ch["channel_id"],
                     x=ch.get("position", {}).get("x", 0.0),
                     y=ch.get("position", {}).get("y", 0.0),
                     z=ch.get("position", {}).get("z", 0.0),
                 )
-                for ch in item.get("channels", [])
-            ]
+                # Resolve this channel's gamut from its member light.
+                for member in ch.get("members", []):
+                    svc = member.get("service", {})
+                    if svc.get("rtype") != "entertainment":
+                        continue
+                    ent_id = svc.get("rid")
+                    device_rid = ent_services.get(ent_id or "")
+                    light_rid = device_lights.get(device_rid or "")
+                    if light_rid and light_rid in light_gamuts:
+                        channel.gamut = light_gamuts[light_rid]
+                    break
+                channels.append(channel)
             configs.append(
                 EntertainmentConfig(
                     id=item["id"],
                     name=item.get("metadata", {}).get("name", item["id"]),
                     status=item.get("status", "inactive"),
                     channels=channels,
+                    configuration_type=item.get("configuration_type", "room"),
+                    active_streamer=item.get("active_streamer"),
                 )
             )
         return configs

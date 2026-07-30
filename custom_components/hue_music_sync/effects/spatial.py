@@ -40,11 +40,19 @@ def normalize_positions(channels) -> dict[int, tuple[float, float, float]]:
     return {c.channel_id: (sx(c.x), sy(c.y), sz(c.z)) for c in channels}
 
 
-def floor_origin(positions: dict[int, tuple[float, float, float]]) -> tuple[float, float, float]:
+def floor_origin(
+    positions: dict[int, tuple[float, float, float]],
+    configuration_type: str = "room",
+) -> tuple[float, float, float]:
     """A sensible wave origin: horizontally central, at floor height.
 
-    A bass thump reads best rising from the centre/low part of the room and
+    For ``room``-type areas (the default) the origin is the room centre at
+    floor level — a bass thump reads best rising from the centre/low part and
     expanding outward and upward.
+
+    For ``screen``-type areas the lamp positions are relative to a screen and
+    the user, so the origin shifts to the front centre (where the screen is)
+    to make effects emanate from the screen direction.
     """
     if not positions:
         return (0.5, 0.5, 0.0)
@@ -52,6 +60,10 @@ def floor_origin(positions: dict[int, tuple[float, float, float]]) -> tuple[floa
     mx = sum(p[0] for p in positions.values()) / n
     my = sum(p[1] for p in positions.values()) / n
     mz = min(p[2] for p in positions.values())
+    if configuration_type == "screen":
+        # Screen areas: waves emanate from the front centre (y near 1.0 in
+        # normalised coords = closest to the screen/user).
+        return (mx, max(my, 0.8), mz)
     return (mx, my, mz)
 
 
@@ -61,19 +73,23 @@ def distance(a: tuple[float, float, float], b: tuple[float, float, float]) -> fl
 
 def phrase_origins(
     positions: dict[int, tuple[float, float, float]],
+    configuration_type: str = "room",
 ) -> list[tuple[float, float, float]]:
     """Deterministic wave-origin cycle for phrase-level variation.
 
     Centre → left → right → centre, all at floor height, so waves sweep the
     room from a different corner each musical phrase and the classic centred
     bloom recurs every other phrase. Deterministic (no seed) so two runs of
-    the same song render identically.
+    the same song render identically. For screen-type areas the origins
+    shift toward the front (screen) edge.
     """
-    centre = floor_origin(positions)
+    centre = floor_origin(positions, configuration_type)
     if not positions:
         return [centre]
     my = sum(p[1] for p in positions.values()) / len(positions)
     mz = min(p[2] for p in positions.values())
+    if configuration_type == "screen":
+        my = max(my, 0.8)
     return [centre, (0.15, my, mz), (0.85, my, mz), centre]
 
 
