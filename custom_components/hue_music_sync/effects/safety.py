@@ -45,6 +45,13 @@ MAX_FLASHES_PER_S = 3
 # It is NOT a WCAG-compliant level; those modes remain unsuitable for
 # photosensitive viewers and the README says so.
 RELAXED_MAX_FLASHES_PER_S = 8
+# The bridge sends at most 25 Hz over Zigbee, so the fastest *visible* effect
+# rate is ~12.5 Hz (2-3x slower than the Zigbee rate per the Entertainment API
+# spec). Flashing faster than this is physically coalesced by the bridge — the
+# bulbs simply can't change fast enough. The strict limiter (3/s) and relaxed
+# limiter (8/s) are both well within the visible range; Extreme mode's unbounded
+# flashing is ultimately capped by this physical ceiling regardless.
+PHYSICAL_MAX_EFFECT_HZ = 12.5
 # Saturated red has a separate, stricter threshold; allow far fewer red flashes
 # before the guard starts pulling the colour toward white.
 MAX_RED_FLASHES_PER_S = 1

@@ -94,11 +94,15 @@ def clamp_to_gamut(x: float, y: float, gamut=GAMUT_C) -> tuple[float, float]:
     return best[1], best[2]
 
 
-def rgb_to_xy(r: float, g: float, b: float) -> tuple[float, float]:
+def rgb_to_xy(
+    r: float, g: float, b: float, gamut=GAMUT_C
+) -> tuple[float, float]:
     """Standard Hue RGB -> xy chromaticity (sRGB gamma + Wide-RGB D65), gamut-clamped.
 
     Chromaticity is scale-invariant, so callers should pass a full-brightness
-    colour and carry brightness separately for stable dimming.
+    colour and carry brightness separately for stable dimming. The optional
+    ``gamut`` parameter (default Gamut C) allows per-light gamut triangles
+    fetched from the CLIP v2 API for accurate colour clamping on mixed setups.
     """
     r, g, b = _gam(r), _gam(g), _gam(b)
     x_ = r * 0.649926 + g * 0.103455 + b * 0.197109
@@ -125,7 +129,12 @@ class HueStreamEncoder:
         then per channel:       <channel id> + 3x uint16 big-endian
     """
 
-    def __init__(self, config_id: str, colorspace: int = ColorSpaceXYB) -> None:
+    def __init__(
+        self,
+        config_id: str,
+        colorspace: int = ColorSpaceXYB,
+        channel_gamuts: dict[int, tuple[tuple[float, float], ...]] | None = None,
+    ) -> None:
         raw = config_id.encode("ascii", "ignore")
         if len(raw) != 36:
             # The HueStream v2 id field is a fixed 36 bytes; pad/truncate rather
@@ -139,6 +148,10 @@ class HueStreamEncoder:
         self._colorspace = colorspace
         self._seq = 0
         self._prev_xy: dict[int, tuple[float, float]] = {}  # for xy slew-limiting
+        # Per-channel gamut triangles resolved from the CLIP v2 API. Each entry
+        # is ((rx, ry), (gx, gy), (bx, by)). Channels without a resolved gamut
+        # fall back to the default GAMUT_C in rgb_to_xy.
+        self._channel_gamuts = channel_gamuts or {}
 
     def _header(self, colorspace: int) -> bytearray:
         self._seq = (self._seq + 1) & 0xFF
@@ -194,7 +207,8 @@ class HueStreamEncoder:
                 # Black: keep the last hue so the next lit frame slews from it
                 # rather than popping out of the gamut origin.
                 return 0, 0, 0
-            x, y = rgb_to_xy(r / bri, g / bri, b / bri)
+            gamut = self._channel_gamuts.get(cid, GAMUT_C)
+            x, y = rgb_to_xy(r / bri, g / bri, b / bri, gamut)
             x, y = self._slew_xy(cid, x, y)
             return float_to_16(x), float_to_16(y), float_to_16(bri)
 
@@ -260,11 +274,18 @@ class DtlsStream:
         app_key: str,
         client_key: str,
         port: int = HUE_DTLS_PORT,
+        psk_identity: str | None = None,
     ) -> None:
         self._host = host
         self._app_key = app_key
         self._client_key = client_key  # hex string
         self._port = port
+        # Per the Hue Entertainment API spec, the DTLS PSK identity must be the
+        # hue-application-id (fetched from /auth/v1), NOT the app key. When not
+        # available (older firmware, or fetch failed), fall back to the app key
+        # as before — the bridge currently accepts both, but the spec says to
+        # use the application id and future firmware may enforce it.
+        self._psk_identity = psk_identity or app_key
         self._client: DtlsPskClient | None = None
         self._keepalive_task: asyncio.Task | None = None
         self._last_frame: bytes | None = None
@@ -288,7 +309,9 @@ class DtlsStream:
         except ValueError as err:
             raise ConnectionError(f"clientkey is not valid hex: {err}") from err
 
-        client = DtlsPskClient(self._host, self._port, self._app_key.encode(), psk)
+        client = DtlsPskClient(
+            self._host, self._port, self._psk_identity.encode(), psk
+        )
         loop = asyncio.get_running_loop()
         if self._executor is None:
             self._executor = ThreadPoolExecutor(

@@ -12,6 +12,10 @@ CONF_BRIDGE_ID: Final = "bridge_id"
 CONF_HOST: Final = "host"
 CONF_APP_KEY: Final = "app_key"  # Hue "username" / application key
 CONF_CLIENT_KEY: Final = "client_key"  # PSK for DTLS, hex string
+# The hue-application-id (fetched from /auth/v1) used as the DTLS PSK identity.
+# Per the Hue Entertainment API spec, this is the correct PSK identity — not the
+# app key. Stored so it doesn't need re-fetching every session.
+CONF_APP_ID: Final = "application_id"
 CONF_AREAS: Final = "areas"  # list of enabled entertainment_configuration ids
 # The bridge's self-signed TLS certificate (PEM), captured at pairing time
 # (trust-on-first-use) so every later CLIP call verifies it is talking to the
@@ -53,8 +57,12 @@ DEFAULT_BACKEND: Final = BACKEND_MA
 # --- Defaults ------------------------------------------------------------
 DEFAULT_LATENCY_MS: Final = 150
 DEFAULT_INTENSITY: Final = 1.0
-DEFAULT_STREAM_FPS: Final = 50  # Hue Entertainment's documented max packet rate
-# (matches the 50 Hz analysis frame rate, so every analysed hop becomes a frame)
+DEFAULT_STREAM_FPS: Final = 60  # Hue Entertainment API recommends 50-60 Hz streaming
+# The bridge relays to bulbs at max 25 Hz over Zigbee, so the visible effect rate
+# is capped regardless; 60 Hz gives smoother temporal resolution for the continuous
+# melbank/spatial wave layer. The analysis frame rate stays at ~50 Hz (ANALYSIS_HOP/
+# ANALYSIS_SAMPLE_RATE), so some frames are re-sent — the keepalive loop handles
+# that naturally.
 DEFAULT_NAME: Final = "hue_music_sync#ha"
 
 # Hue entertainment streaming
@@ -62,10 +70,11 @@ HUE_DTLS_PORT: Final = 2100
 HUE_STREAM_PROTOCOL: Final = b"HueStream"
 HUE_STREAM_VERSION: Final = b"\x02\x00"
 KEEPALIVE_INTERVAL: Final = 9.0  # bridge drops the channel after ~10s of silence
-# The Entertainment API accepts at most ~10 lights per UDP packet; larger areas
-# (multiple lamps + gradient-strip segments) must be split across packets or the
-# bridge can drop the over-stuffed frame.
-MAX_CHANNELS_PER_PACKET: Final = 10
+# The Entertainment API spec allows up to 20 channels per UDP streaming message;
+# the bridge handles splitting these into its internal ~10-light Zigbee batches.
+# Larger areas (multiple lamps + gradient-strip segments) are still split across
+# packets when they exceed this limit.
+MAX_CHANNELS_PER_PACKET: Final = 20
 
 # ffmpeg is only ever pointed at http(s) URLs (MA stream URLs, artwork,
 # Subsonic endpoints) — every source absolutises relative paths first. Locking

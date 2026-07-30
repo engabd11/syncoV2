@@ -30,6 +30,7 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     CONF_ADVANCED,
+    CONF_APP_ID,
     CONF_APP_KEY,
     CONF_AUTO_LEVELS,
     CONF_AUTO_TIMING,
@@ -56,7 +57,7 @@ from .const import (
 )
 from .coordinator import SyncManager, trackmap_cache_dir, trackmap_cache_stats
 from .effects.modes import sanitize_auto_levels
-from .hue.bridge import HueBridge, HueBridgeError
+from .hue.bridge import HueBridge, HueBridgeError, fetch_application_id
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -378,6 +379,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     ssl_ctx = await hass.async_add_executor_job(_build_ssl_context, pinned_cert)
     bridge = HueBridge(session, host, entry.data[CONF_APP_KEY], ssl_ctx)
 
+    # Fetch the hue-application-id (the correct DTLS PSK identity per the spec).
+    # Cached in the config entry so it doesn't need re-fetching every session.
+    # Falls back to the app key if the bridge doesn't expose /auth/v1 (older
+    # firmware) — the bridge currently accepts both, but the spec says to use
+    # the application id.
+    app_id = entry.data.get(CONF_APP_ID)
+    if not app_id:
+        app_id = await fetch_application_id(
+            session, host, entry.data[CONF_APP_KEY], ssl_ctx
+        )
+        if app_id:
+            hass.config_entries.async_update_entry(
+                entry, data={**entry.data, CONF_APP_ID: app_id}
+            )
+            _LOGGER.info("Fetched hue-application-id for DTLS PSK identity")
+        else:
+            _LOGGER.debug(
+                "Could not fetch hue-application-id; falling back to app key "
+                "as DTLS PSK identity (older firmware)"
+            )
+
     try:
         configs = await bridge.get_entertainment_configs()
     except (HueBridgeError, OSError) as err:
@@ -402,6 +424,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry.data[CONF_CLIENT_KEY],
         _ffmpeg_binary(hass),
         configs,
+        psk_identity=app_id,
     )
     hass.data[DOMAIN][entry.entry_id] = manager
     entry.runtime_data = manager

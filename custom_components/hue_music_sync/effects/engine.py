@@ -176,7 +176,11 @@ def _spectral_bands(n: int, bins: int) -> list[tuple[int, int]]:
 class EffectEngine:
     """Renders entertainment frames from audio features and the active mode."""
 
-    def __init__(self, channels: list[EntertainmentChannel]) -> None:
+    def __init__(
+        self,
+        channels: list[EntertainmentChannel],
+        configuration_type: str = "room",
+    ) -> None:
         self.palette: Palette = get_palette(_FALLBACK_SCHEME)
         # The raw mode preset, and ``params`` = that preset with the live advanced
         # tunables folded in (identical when no tunables / all at 1.0).
@@ -208,18 +212,22 @@ class EffectEngine:
         # the continuous colour/energy ambience keeps running underneath.
         self.manual_only = False
         self._fireworks = FireworksEffect()
-        self.set_channels(channels)
+        self.set_channels(channels, configuration_type)
 
-    def set_channels(self, channels: list[EntertainmentChannel]) -> None:
+    def set_channels(
+        self,
+        channels: list[EntertainmentChannel],
+        configuration_type: str = "room",
+    ) -> None:
         self.channels = channels
         order = sorted(channels, key=lambda c: c.x)
         self._rank_ids = [c.channel_id for c in order]
         n = len(order)
         positions = normalize_positions(channels)  # (nx, ny, nz) in 0..1
-        self._origin = floor_origin(positions)
+        self._origin = floor_origin(positions, configuration_type)
         # Phrase-cycled wave origins (centre/left/right/centre) with the
         # per-channel distances precomputed for each.
-        self._origins = phrase_origins(positions)
+        self._origins = phrase_origins(positions, configuration_type)
         self.cmap: dict[int, dict] = {}
         for rank, ch in enumerate(order):
             nx, ny, nz = positions[ch.channel_id]
