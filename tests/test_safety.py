@@ -293,3 +293,54 @@ def test_noise_gate_still_passes_real_signal():
         f = a.push(hop)
         loud += int(any(v > 0.1 for v in f.bands.values()))
     assert loud > 0
+
+
+# Gamut A (legacy LivingColors / Bloom / Iris / older light strips) from the
+# Hue colour-conversion guide. Much wider in green than Gamut C, so it is the
+# clearest witness that a per-light gamut is actually being applied.
+GAMUT_A = ((0.704, 0.296), (0.2151, 0.7106), (0.138, 0.08))
+
+
+def test_rgb_to_xy_respects_a_per_light_gamut():
+    # The gamut fetched from CLIP v2 must reach the clamp. This used to be
+    # accepted and then dropped, so every lamp got clamped to Gamut C no matter
+    # what the API said about it.
+    green_c = rgb_to_xy(0.0, 1.0, 0.0, GAMUT_C)
+    green_a = rgb_to_xy(0.0, 1.0, 0.0, GAMUT_A)
+    assert green_c != green_a
+    assert _point_in_triangle(green_c, *GAMUT_C)
+    assert _point_in_triangle(green_a, *GAMUT_A)
+
+
+def test_encoder_clamps_each_channel_to_its_own_gamut():
+    # A mixed-gamut area (a modern colour bulb next to a legacy strip) must not
+    # collapse to one triangle for both.
+    enc = HueStreamEncoder(
+        "abcdefab-1234-1234-1234-0123456789ab",
+        channel_gamuts={0: GAMUT_C, 1: GAMUT_A},
+    )
+    frame = enc.build_frame_xy({0: (0.0, 1.0, 0.0), 1: (0.0, 1.0, 0.0)})
+    body = frame[16 + 36:]
+    ch0, ch1 = body[0:7], body[7:14]
+    assert ch0[1:5] != ch1[1:5]  # different x,y for the same requested green
+
+
+def test_black_frame_holds_the_last_chromaticity():
+    # Brightness 0 must ride the dedicated brightness channel while xy stays
+    # where it was. Emitting xy=(0,0) would be outside every gamut, and the
+    # next lit frame would then slew out of that corner instead of from the
+    # hue actually on screen.
+    enc = HueStreamEncoder("abcdefab-1234-1234-1234-0123456789ab")
+    lit = enc.build_frame_xy({0: (1.0, 0.0, 0.0)})[16 + 36:]
+    dark = enc.build_frame_xy({0: (0.0, 0.0, 0.0)})[16 + 36:]
+    assert dark[1:5] == lit[1:5]  # same xy
+    assert dark[5:7] == b"\x00\x00"  # brightness off
+
+
+def test_black_frame_without_history_is_in_gamut():
+    enc = HueStreamEncoder("abcdefab-1234-1234-1234-0123456789ab")
+    dark = enc.build_frame_xy({0: (0.0, 0.0, 0.0)})[16 + 36:]
+    x = int.from_bytes(dark[1:3], "big") / 65535
+    y = int.from_bytes(dark[3:5], "big") / 65535
+    assert _point_in_triangle((x, y), *GAMUT_C)
+    assert dark[5:7] == b"\x00\x00"

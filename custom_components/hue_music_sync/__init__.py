@@ -58,6 +58,13 @@ from .const import (
 from .coordinator import SyncManager, trackmap_cache_dir, trackmap_cache_stats
 from .effects.modes import sanitize_auto_levels
 from .hue.bridge import HueBridge, HueBridgeError, fetch_application_id
+from .hue.certs import (
+    HUE_ROOT_CA_BUNDLE,
+    cert_common_name,
+    looks_like_bridge_id,
+    matches_bridge_id,
+)
+from .hue.events import HueEventStream
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -109,18 +116,42 @@ LOCAL_CARD_URL = f"/local/{CARD_FILENAME}"
 def _build_ssl_context(pinned_cert_pem: str | None = None) -> ssl.SSLContext:
     """SSL context for bridge HTTPS (blocking; build in an executor).
 
-    Hue bridges use a self-signed certificate, so CA validation can never
-    succeed. With a pinned PEM (captured at pairing, trust-on-first-use) the
-    context trusts exactly that certificate and requires it — a LAN
-    man-in-the-middle can no longer intercept the CLIP traffic or a pairing's
-    app key. Without one (legacy entries before their first re-setup, or a
-    capture failure) fall back to unverified TLS as before.
+    Preference order, strongest first:
+
+    1. **Signify's root CAs** — what the "Using HTTPS" guide requires. Modern
+       bridges present a certificate signed by them, and this also verifies any
+       intermediate the guide warns may appear in future. Hostname checking
+       stays off because the certificate's CN is the *bridge id*, not the IP;
+       the caller compares CN against the bridge id separately.
+    2. **A pinned certificate** (trust-on-first-use) for the handful of early
+       bridges still carrying a self-signed certificate, and for config entries
+       created before CA validation existed.
+
+    There is deliberately no unverified mode here — an unpinned, unvalidated
+    context is only ever built explicitly during first contact, before any
+    secret has been exchanged.
     """
+    ctx = ssl.create_default_context(cadata=HUE_ROOT_CA_BUNDLE)
     if pinned_cert_pem:
-        ctx = ssl.create_default_context(cadata=pinned_cert_pem)
-        ctx.check_hostname = False  # cert carries the bridge id, not the IP
-        ctx.verify_mode = ssl.CERT_REQUIRED
-        return ctx
+        # Trust the pinned certificate *as well*, so a bridge whose firmware
+        # later gains a properly signed certificate keeps working, and a
+        # still-self-signed one keeps validating against its pin.
+        try:
+            ctx.load_verify_locations(cadata=pinned_cert_pem)
+        except ssl.SSLError:
+            _LOGGER.debug("Pinned bridge certificate could not be loaded; ignoring it")
+    ctx.check_hostname = False  # cert carries the bridge id, not the IP
+    ctx.verify_mode = ssl.CERT_REQUIRED
+    return ctx
+
+
+def _build_unverified_context() -> ssl.SSLContext:
+    """Unverified context for first contact only (bridge id / cert discovery).
+
+    Used to read ``/api/config`` — an unauthenticated endpoint that carries no
+    secret — so we can learn the bridge id and capture its certificate before
+    deciding how to validate. Never used for pairing or for CLIP traffic.
+    """
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
@@ -376,6 +407,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "Could not capture the Hue bridge's TLS certificate; "
                 "connecting without verification for now"
             )
+    # Common-name check: the bridge certificate's CN is the bridge id, which is
+    # the config entry's unique id. This is the documented stand-in for hostname
+    # verification, and it is what stops a device that merely holds *a* valid
+    # Hue certificate from impersonating *this* bridge.
+    if pinned_cert and entry.unique_id:
+        cn = cert_common_name(pinned_cert)
+        bridge_id = entry.unique_id
+        if not matches_bridge_id(cn, bridge_id):
+            if looks_like_bridge_id(cn):
+                # The certificate names a real bridge, and it isn't ours.
+                raise ConfigEntryNotReady(
+                    f"Hue bridge {host} presented a certificate for '{cn}', but "
+                    f"this entry is paired with bridge {bridge_id}. If the bridge "
+                    "was replaced, remove and re-add the integration."
+                )
+            # Something else — an unusual or unparseable subject. Chain
+            # validation still has to pass below, so warn rather than refusing
+            # to start over a naming convention we may not have seen before.
+            _LOGGER.warning(
+                "Hue bridge %s presented a certificate whose common name (%s) is "
+                "not the bridge id (%s); continuing on chain validation alone",
+                host, cn, bridge_id,
+            )
     ssl_ctx = await hass.async_add_executor_job(_build_ssl_context, pinned_cert)
     bridge = HueBridge(session, host, entry.data[CONF_APP_KEY], ssl_ctx)
 
@@ -403,17 +457,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     try:
         configs = await bridge.get_entertainment_configs()
     except (HueBridgeError, OSError) as err:
-        if isinstance(err, aiohttp.ClientConnectorCertificateError):
-            # The bridge presented a different certificate than the pinned
-            # one. Legitimate cause: a factory-reset/replaced bridge (which
-            # invalidates the app key anyway). Malicious cause: an on-path
-            # interceptor. Never silently re-pin — tell the user instead.
+        if isinstance(err, aiohttp.ClientSSLError):
+            # The bridge's certificate chains to neither Signify's roots nor the
+            # pinned one. Legitimate cause: a factory-reset/replaced bridge
+            # (which invalidates the app key anyway), or a very old bridge that
+            # was never updated. Malicious cause: an on-path interceptor. Never
+            # silently re-pin or downgrade — tell the user instead.
             raise ConfigEntryNotReady(
-                f"Hue bridge {host} presented an unexpected TLS certificate. "
-                "If the bridge was factory-reset or replaced, remove and "
-                "re-add the integration to pair (and pin) it again."
+                f"Hue bridge {host} presented a TLS certificate that could not "
+                "be validated. Update the bridge from the Hue app; if it was "
+                "factory-reset or replaced, remove and re-add the integration "
+                "to pair it again."
             ) from err
         raise ConfigEntryNotReady(f"Cannot reach Hue bridge {host}: {err}") from err
+
+    # Bridge-side change notifications (SSE). Started before the manager so the
+    # subscription is live from the first area start; the client reconnects on
+    # its own, and a bridge that refuses the endpoint just means we fall back to
+    # the slower ownership check before any stream reclaim.
+    events = HueEventStream(session, host, entry.data[CONF_APP_KEY], ssl_ctx)
+    events.start()
 
     manager = SyncManager(
         hass,
@@ -425,6 +488,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _ffmpeg_binary(hass),
         configs,
         psk_identity=app_id,
+        events=events,
     )
     hass.data[DOMAIN][entry.entry_id] = manager
     entry.runtime_data = manager
@@ -439,6 +503,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unloaded:
         manager: SyncManager = hass.data[DOMAIN].pop(entry.entry_id)
+        manager.release_events()
+        if manager.events is not None:
+            await manager.events.stop()
         await manager.async_shutdown()
         # Drop this manager's switch entries from the area index.
         index = hass.data[DOMAIN].get(DATA_AREA_INDEX, {})

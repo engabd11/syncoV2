@@ -5,7 +5,7 @@
 ![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.12%2B-blue)
 ![Version](https://img.shields.io/badge/version-1.48.0-informational)
 
-Real-time music-reactive lighting for **Philips Hue Entertainment areas**, driven by **any Home Assistant media player — Music Assistant players first and foremost** (Sendspin and other MA players), with first-class support for **Navidrome / OpenSubsonic** libraries. Beat detection, frequency analysis and spatial choreography stream straight to the bridge over the Hue Entertainment API (DTLS-encrypted, up to 50 Hz), and a bundled dashboard card mirrors the whole show live — no separate frontend install.
+Real-time music-reactive lighting for **Philips Hue Entertainment areas**, driven by **any Home Assistant media player — Music Assistant players first and foremost** (Sendspin and other MA players), with first-class support for **Navidrome / OpenSubsonic** libraries. Beat detection, frequency analysis and spatial choreography stream straight to the bridge over the Hue Entertainment API (DTLS-encrypted, at the 60 Hz the spec recommends), and a bundled dashboard card mirrors the whole show live — no separate frontend install.
 
 <p align="center">
   <img src="docs/card-tablet.png" alt="Hue Synco tablet dashboard card" width="760" />
@@ -176,11 +176,10 @@ areas:
 
 ## Setup
 
-1. Go to **Settings → Devices & Services → Add Integration** and search for **Hue Synco**
-2. Enter your Hue bridge IP address
-3. Press the **link button** on the bridge when prompted — the bridge's TLS certificate is pinned at this moment (see [Security notes](#security-notes))
-4. Select which entertainment areas to enable
-5. Add the **Hue Synco Card** to a dashboard (it's already in the card picker)
+1. Go to **Settings → Devices & Services** — bridges on your network are discovered over mDNS and appear ready to set up. If yours doesn't, **Add Integration → Hue Synco** and enter its IP (the field is pre-filled when the bridge can be found via Hue's discovery service)
+2. Press the **link button** on the bridge when prompted — the bridge's TLS certificate is validated before pairing, so the DTLS client key never crosses an unverified connection (see [Security notes](#security-notes))
+3. Select which entertainment areas to enable
+4. Add the **Hue Synco Card** to a dashboard (it's already in the card picker)
 
 > Create and arrange your entertainment areas in the **Hue app** first — the lamp positions you set there are what the spatial choreography and the card's room mirror use.
 
@@ -317,7 +316,7 @@ Audio-reactive lighting can produce rapid whole-room brightness swings. Most mod
 
 ## Security notes
 
-- **Bridge certificate pinning** — Hue bridges use a self-signed TLS certificate, so ordinary CA validation is impossible. Hue Synco captures the bridge's certificate at pairing time (trust-on-first-use) and verifies every later CLIP API call against it. If the bridge is factory-reset or replaced, remove and re-add the integration to re-pair and re-pin. Entries created by older versions pin automatically on their next reload.
+- **Bridge certificate validation** — every CLIP API call is verified against Signify's two published Hue root CAs, and the certificate's common name is checked against the bridge id (Hue bridge certificates carry the bridge id, not an IP, so ordinary hostname verification cannot apply). The check runs *before* pairing, so the DTLS client key — which the bridge mints once and never reveals again — is never sent over an unverified connection. Early bridges that still carry a self-signed certificate fall back to trust-on-first-use pinning; update the bridge from the Hue app to get the stronger check.
 - **DTLS mutual authentication** — the entertainment stream's handshake enforces the server's `Finished` message, so the integration will refuse to stream colours to a device that does not actually know the pre-shared key.
 - **ffmpeg protocol whitelist** — every ffmpeg invocation is restricted to `http/https/tcp/tls`, so a malicious stream or artwork URL cannot steer the decoder into `file://` or other local protocols.
 - **Log redaction** — stream and artwork URLs are logged with their query strings masked (Subsonic auth tokens ride in query strings). Debug logs are safe to paste into bug reports.
@@ -330,7 +329,8 @@ Audio-reactive lighting can produce rapid whole-room brightness swings. Most mod
 - **"Metadata only" pill stays amber** — no tappable stream and no track map yet. Run **Analyse library** once, or configure the OpenSubsonic options so tracks can be fetched for analysis.
 - **First play of a new track reacts generically** — full offline analysis takes ~10 s on slower hardware; the show upgrades mid-song when it lands. `prewarm_library` removes this entirely.
 - **Position-coarse players (e.g. Sonos)** — ~500 ms position granularity reduces track-map timing precision; the timing stepper helps.
-- **Bridge unreachable after a factory reset** — the pinned certificate no longer matches (by design). Remove and re-add the integration.
+- **Bridge unreachable after a factory reset** — the certificate no longer matches the paired bridge id (by design). Remove and re-add the integration.
+- **Sync restarts after you stop it in the Hue app** — fixed in 1.54.0. Hue Synco now subscribes to the bridge's event stream and checks who owns the area before reconnecting, so stopping from the Hue app turns the Home Assistant switch off instead of taking the area back.
 
 ## Known limitations
 

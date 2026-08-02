@@ -91,7 +91,8 @@ from .effects.modes import (
 from .timing import TimingCalibrator
 from .effects.safety import RELAXED_MAX_FLASHES_PER_S, FieldSafety
 from .hue.bridge import EntertainmentConfig, HueBridge
-from .hue.stream import DtlsStream, HueStreamEncoder
+from .hue.events import HueEventStream
+from .hue.stream import DtlsStream, HueStreamEncoder, StreamRevoked
 from .util import redact_url
 
 _LOGGER = logging.getLogger(__name__)
@@ -162,6 +163,7 @@ _CHROMA_WARMUP_FRAMES = 150  # ~3 s
 # brightness quantisation produce no visible change, so the skip-unchanged
 # optimisation in _safe_send uses this threshold to avoid wasted DTLS sends.
 _BRIGHTNESS_QUANT = 1.0 / 2048.0  # ≈ 0.00049
+_CHROMA_QUANT = 1.0 / 4096.0  # ≈ 0.00024 (xy is 12-bit at the lamp)
 
 
 def trackmap_cache_dir(hass) -> str:
@@ -335,8 +337,18 @@ class SyncSession:
         }
         self._encoder = HueStreamEncoder(config.id, channel_gamuts=channel_gamuts)
         self._stream = DtlsStream(
-            host, app_key, client_key, psk_identity=psk_identity
+            host, app_key, client_key, psk_identity=psk_identity,
+            on_revoked=self.note_external_stop,
         )
+        # Our own hue-application-id, so an active_streamer value can be told
+        # apart from somebody else's. None on firmware without /auth/v1.
+        self._app_id = psk_identity
+        # Latched when the *bridge* ended the stream (Hue app pressed stop,
+        # another app took the area, streaming disabled via CLIP) rather than
+        # the network dropping it. The difference decides whether we reconnect
+        # or shut down: reclaiming a deliberately stopped area is exactly the
+        # behaviour that makes the Hue app's stop button appear not to work.
+        self._external_stop = False
         self._engine = EffectEngine(
             config.channels, configuration_type=config.configuration_type
         )
@@ -1016,13 +1028,20 @@ class SyncSession:
                         self._ws_features(frame) if self._ws_active() else None
                     )
                     await self._send_timed(colors, features)
+                except StreamRevoked as err:
+                    # The bridge told us the stream is over (close_notify /
+                    # user_canceled) — a deliberate stop, not a lost packet.
+                    # Reconnecting here would fight the user's Hue app.
+                    self.note_external_stop(str(err))
+                    last_t = time.monotonic()
                 except ConnectionError:
                     # DTLS channel dropped: try to recover instead of ending sync.
                     if not await self._reconnect_stream():
-                        _LOGGER.warning(
-                            "DTLS channel lost for %s; giving up after %d retries",
-                            self._config.name, _RECONNECT_ATTEMPTS,
-                        )
+                        if not self._external_stop:
+                            _LOGGER.warning(
+                                "DTLS channel lost for %s; giving up after %d retries",
+                                self._config.name, _RECONNECT_ATTEMPTS,
+                            )
                         self._running = False
                     last_t = time.monotonic()
                 except Exception:  # noqa: BLE001
@@ -1191,6 +1210,19 @@ class SyncSession:
                 if abs(bri_now - bri_prev) >= _BRIGHTNESS_QUANT:
                     changed = True
                     break
+                # Chromaticity change vs the 12-bit threshold. Brightness alone
+                # is not enough: a hue rotation at constant level (the idle
+                # show, rainbow effects, a slow palette drift) would otherwise
+                # be suppressed until the 9 s keepalive resent a stale frame.
+                # Compare the brightness-normalised components, since that is
+                # what actually determines the emitted xy.
+                if bri_now > 1e-6 and bri_prev > 1e-6:
+                    if any(
+                        abs(c / bri_now - p / bri_prev) >= _CHROMA_QUANT
+                        for c, p in zip(rgb, prev)
+                    ):
+                        changed = True
+                        break
             if not changed:
                 # No visible change — still feed the card's visualizer, but
                 # don't waste a DTLS packet. The keepalive handles channel liveness.
@@ -1279,17 +1311,88 @@ class SyncSession:
                     payload["duration"] = float(duration)
         return payload
 
+    @property
+    def externally_stopped(self) -> bool:
+        """True when the bridge (not us, not the network) ended the stream."""
+        return self._external_stop
+
+    def note_external_stop(self, reason: str = "the bridge ended the stream") -> None:
+        """Record that the area was taken from us; stop instead of reclaiming."""
+        if self._external_stop:
+            return
+        self._external_stop = True
+        _LOGGER.info(
+            "Entertainment area %s was stopped on the bridge (%s); "
+            "ending music sync instead of taking it back",
+            self._config.name, reason,
+        )
+        self._running = False
+
+    def on_bridge_event(self, resource: dict) -> None:
+        """React to an entertainment_configuration event for our area.
+
+        This is the fast path for "the user pressed stop in the Hue app": the
+        event lands within about a second, well before the DTLS channel's own
+        teardown would surface, so the switch turns off promptly and nothing
+        ever tries to restart the stream.
+        """
+        if resource.get("id") != self._config.id or not self._running:
+            return
+        status = resource.get("status")
+        streamer = resource.get("active_streamer")
+        if status is not None and status != "active":
+            self.note_external_stop("streaming was disabled on the bridge")
+        elif streamer is not None and self._app_id and streamer != self._app_id:
+            self.note_external_stop(f"another application ({streamer}) took the area")
+
+    async def _stream_still_ours(self) -> bool:
+        """Ask the bridge whether the area is still streaming to us.
+
+        Called before reclaiming a dropped channel. A genuine network drop
+        leaves the area ``active`` and still owned by us — the bridge holds the
+        session for ~10 s — whereas a deliberate stop shows up as ``inactive``
+        or a different ``active_streamer``. On any error we assume it is still
+        ours, so a flaky bridge query can never turn a recoverable drop into a
+        session that gives up.
+        """
+        try:
+            status, streamer = await self._bridge.get_entertainment_status(
+                self._config.id
+            )
+        except Exception as err:  # noqa: BLE001 - inconclusive; keep retrying
+            _LOGGER.debug(
+                "Could not confirm stream ownership for %s: %s",
+                self._config.name, err,
+            )
+            return True
+        if status != "active":
+            self.note_external_stop("the area is no longer streaming")
+            return False
+        if streamer and self._app_id and streamer != self._app_id:
+            self.note_external_stop(f"another application ({streamer}) took the area")
+            return False
+        return True
+
     async def _reconnect_stream(self) -> bool:
         """Re-establish a dropped DTLS channel with backoff; True on success."""
+        if self._external_stop:
+            return False
         try:
             await self._stream.stop()
         except Exception:  # noqa: BLE001 - best-effort teardown before retrying
             pass
+        # The channel dropping does not say *why*. Ask the bridge before doing
+        # anything: re-issuing action=start against an area somebody just
+        # stopped is what made a stop from the Hue app bounce straight back.
+        if not await self._stream_still_ours():
+            return False
         for attempt in range(1, _RECONNECT_ATTEMPTS + 1):
-            if not self._running or self._stopping:
+            if not self._running or self._stopping or self._external_stop:
                 return False
             delay = min(_RECONNECT_BASE_S * attempt, _RECONNECT_MAX_S)
             await asyncio.sleep(delay)
+            if self._external_stop:
+                return False
             try:
                 await self._bridge.start_stream(self._config.id)
                 await self._stream.start()
@@ -1851,10 +1954,21 @@ class SyncManager:
         ffmpeg_bin: str,
         configs: list[EntertainmentConfig],
         psk_identity: str | None = None,
+        events: "HueEventStream | None" = None,
     ) -> None:
         self.hass = hass
         self.entry = entry
         self.bridge = bridge
+        # Bridge-side change notifications. Subscribing here (rather than
+        # polling) is what lets an area stopped in the Hue app turn the switch
+        # off within about a second, instead of the sync loop noticing its DTLS
+        # channel died and trying to take the area back.
+        self.events = events
+        self._events_unsub: Callable[[], None] | None = None
+        if events is not None:
+            self._events_unsub = events.subscribe(
+                "entertainment_configuration", self._on_entertainment_event
+            )
         self._host = host
         self._app_key = app_key
         self._client_key = client_key
@@ -1882,6 +1996,20 @@ class SyncManager:
         self._settings: dict[str, AreaSettings] = self._load_settings()
         # Live-feed subscribers per area (dashboard cards over the WS API).
         self._ws_subs: dict[str, set[Callable[[dict], None]]] = {}
+
+    # -- bridge events -------------------------------------------------------
+
+    def _on_entertainment_event(self, resource: dict) -> None:
+        """Route an entertainment_configuration change to the session that owns it."""
+        session = self._sessions.get(resource.get("id") or "")
+        if session is not None:
+            session.on_bridge_event(resource)
+
+    def release_events(self) -> None:
+        """Drop this manager's event subscription (called on unload)."""
+        if self._events_unsub is not None:
+            self._events_unsub()
+            self._events_unsub = None
 
     # -- live WebSocket feed -------------------------------------------------
 
@@ -2089,14 +2217,24 @@ class SyncManager:
         # Refresh channels/status in case the area changed in the Hue app.
         config = await self.bridge.get_entertainment_config(area_id)
         self.configs[area_id] = config
-        # Conflict detection: if another application is already streaming to
-        # this area (per the active_streamer field), warn but still attempt —
-        # the bridge will reject the start action if it can't hand over.
-        if config.active_streamer:
-            _LOGGER.warning(
-                "Entertainment area %s reports active_streamer=%s (another app "
-                "may be streaming); attempting to take over the stream",
-                config.name, config.active_streamer,
+        # Conflict detection. "Only one stream can be active for an
+        # entertainment area, the active_streamer field indicates the
+        # application which is currently streaming" — so if that application is
+        # somebody else, seizing the area is precisely the rude behaviour we
+        # object to when the Hue app does it to us. Refuse with a clear message
+        # instead. A stale entry naming *us* (an unclean shutdown left the
+        # bridge's ~10 s session behind) is ours to reclaim, and start() already
+        # retries across that window.
+        streamer = config.active_streamer
+        if streamer and self._psk_identity and streamer != self._psk_identity:
+            raise HomeAssistantError(
+                f"Entertainment area {config.name} is already being streamed to by "
+                f"another application ({streamer}). Stop that app's sync first."
+            )
+        if streamer:
+            _LOGGER.debug(
+                "Entertainment area %s still reports active_streamer=%s (our own "
+                "previous session); reclaiming it", config.name, streamer,
             )
         session = SyncSession(
             self.hass, self.bridge, self._host, self._app_key, self._client_key,
@@ -2121,13 +2259,23 @@ class SyncManager:
 
     def _on_session_finished(self, area_id: str) -> None:
         """A session ended on its own (e.g. lost DTLS); drop it and refresh."""
-        if self._sessions.pop(area_id, None) is not None:
+        session = self._sessions.pop(area_id, None)
+        if session is not None:
             name = getattr(self.configs.get(area_id), "name", area_id)
-            _LOGGER.warning(
-                "Music sync for %s ended on its own (DTLS lost beyond the "
-                "reconnect window, or a sync-loop crash — see earlier log "
-                "entries); the switch has been turned off", name,
-            )
+            if session.externally_stopped:
+                # Expected and user-driven (the Hue app's stop button, or
+                # another app claiming the area) — not a fault.
+                _LOGGER.info(
+                    "Music sync for %s stopped because the entertainment area "
+                    "was taken on the bridge; the switch has been turned off",
+                    name,
+                )
+            else:
+                _LOGGER.warning(
+                    "Music sync for %s ended on its own (DTLS lost beyond the "
+                    "reconnect window, or a sync-loop crash — see earlier log "
+                    "entries); the switch has been turned off", name,
+                )
         async_dispatcher_send(self.hass, signal_area_update(area_id))
 
     async def stop_area(self, area_id: str) -> None:

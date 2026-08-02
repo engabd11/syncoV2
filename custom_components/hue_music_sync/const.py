@@ -76,6 +76,26 @@ KEEPALIVE_INTERVAL: Final = 9.0  # bridge drops the channel after ~10s of silenc
 # packets when they exceed this limit.
 MAX_CHANNELS_PER_PACKET: Final = 20
 
+# Hue REST limits (Hue System Performance). The bridge translates each CLIP
+# command into one Zigbee message per parameter and can only schedule ~25 of
+# those per second in total; the published guidance is ~10 commands/s to /light
+# with a 100 ms gap. Exceeding it buffers silently inside the bridge (seconds of
+# latency) and eventually drops commands with a type-901 error. Only the restore
+# path writes lights at all — the show itself goes over Entertainment streaming.
+LIGHT_COMMAND_MIN_INTERVAL: Final = 0.1
+
+# Server-Sent Events. Core Concepts: "It is important to not try to stay up to
+# date by performing repeated GET requests" — subscribe to /eventstream instead.
+# The bridge coalesces changes into at most one container per second.
+EVENTSTREAM_PATH: Final = "/eventstream/clip/v2"
+EVENTSTREAM_RECONNECT_BASE_S: Final = 2.0
+EVENTSTREAM_RECONNECT_MAX_S: Final = 60.0
+
+# Hue cloud discovery (discovery.meethue.com). Rate limited by Signify to one
+# request per 15 minutes per client, so results are cached for longer than that.
+DATA_DISCOVERY_CACHE: Final = "_discovery_cache"
+DISCOVERY_CACHE_TTL: Final = 15 * 60
+
 # ffmpeg is only ever pointed at http(s) URLs (MA stream URLs, artwork,
 # Subsonic endpoints) — every source absolutises relative paths first. Locking
 # the protocol set down stops a malicious URL (a compromised media server, a

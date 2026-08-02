@@ -48,9 +48,47 @@ _CIPHER_PSK_AES128_GCM_SHA256 = b"\x00\xa8"
 _HANDSHAKE_TIMEOUT = 1.0  # per-flight socket timeout
 _HANDSHAKE_RETRIES = 6
 
+# Alert levels / the descriptions the Hue streaming server documents.
+_ALERT_LEVEL_WARNING = 1
+_ALERT_LEVEL_FATAL = 2
+ALERT_CLOSE_NOTIFY = 0
+ALERT_USER_CANCELED = 90
+# Human-readable names for the error table in the Entertainment API spec, so a
+# rejected stream says *why* instead of just "the channel dropped".
+ALERT_NAMES = {
+    0: "close_notify",
+    10: "unexpected_message",
+    20: "bad_record_mac",
+    30: "decompression_failure",
+    40: "handshake_failure",
+    50: "decode_error",
+    51: "decrypt_error",
+    70: "protocol_version",
+    71: "insufficient_security",
+    80: "internal_error",
+    90: "user_canceled",
+    115: "unknown_psk_identity",
+}
+
 
 class DtlsError(Exception):
     """DTLS handshake or transport failure."""
+
+
+class DtlsPeerClosed(DtlsError):
+    """The bridge closed the DTLS session with an alert.
+
+    The Entertainment API documents ``close_notify`` as "Notification that
+    server will disconnect e.g. because streaming is disabled via CLIP" — i.e.
+    exactly what arrives when the user stops the area from the Hue app or
+    another application takes it over. That is a deliberate revocation, not a
+    lost packet, so callers must not treat it as a reconnectable drop.
+    """
+
+    def __init__(self, description: int) -> None:
+        self.description = description
+        name = ALERT_NAMES.get(description, f"alert {description}")
+        super().__init__(f"bridge closed the stream ({name})")
 
 
 # --- TLS 1.2 PRF (P_SHA256) ----------------------------------------------
@@ -380,6 +418,53 @@ class DtlsPskClient:
         if self._sock is None or self._keys is None:
             raise DtlsError("DTLS channel not connected")
         self._sock.sendall(self._record(_CT_APPLICATION_DATA, data, encrypt=True))
+
+    def poll_alert(self) -> tuple[int, int] | None:
+        """Drain the receive buffer and return the first alert as ``(level, desc)``.
+
+        Nothing else ever reads this socket: the stream is write-only once the
+        handshake is done, so without this the bridge's alerts sit unread (and
+        the kernel buffer grows for the life of the session). Reading them is
+        what lets us tell "the bridge revoked the stream" — the Hue app pressing
+        stop, or another app taking the area — apart from a network drop.
+
+        Non-blocking: returns ``None`` when there is nothing to read. Records
+        that fail to decrypt are ignored rather than raised, since a stale
+        retransmit from the handshake epoch is harmless.
+        """
+        sock = self._sock
+        if sock is None or self._keys is None:
+            return None
+        alert: tuple[int, int] | None = None
+        prev_timeout = sock.gettimeout()
+        try:
+            sock.settimeout(0)
+            while True:
+                try:
+                    data = sock.recv(4096)
+                except (BlockingIOError, socket.timeout):
+                    break
+                except OSError:
+                    break
+                if not data:
+                    break
+                for ctype, seq_bytes, fragment in self._split_records(data):
+                    if ctype != _CT_ALERT:
+                        continue
+                    epoch = struct.unpack(">H", seq_bytes[:2])[0]
+                    if epoch >= 1:
+                        try:
+                            fragment = self._decrypt(ctype, seq_bytes, fragment)
+                        except Exception:  # noqa: BLE001 - stale/!ours; ignore
+                            continue
+                    if len(fragment) >= 2 and alert is None:
+                        alert = (fragment[0], fragment[1])
+        finally:
+            try:
+                sock.settimeout(prev_timeout)
+            except OSError:
+                pass
+        return alert
 
     def close(self) -> None:
         if self._sock is not None:

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 
 from ..const import (
@@ -24,12 +24,29 @@ from ..const import (
     KEEPALIVE_INTERVAL,
     MAX_CHANNELS_PER_PACKET,
 )
-from .dtls import DtlsError, DtlsPskClient
+from .dtls import (
+    ALERT_CLOSE_NOTIFY,
+    ALERT_NAMES,
+    ALERT_USER_CANCELED,
+    DtlsError,
+    DtlsPeerClosed,
+    DtlsPskClient,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
 ColorSpaceRGB = 0x00
 ColorSpaceXYB = 0x01
+
+
+class StreamRevoked(ConnectionError):
+    """The bridge deliberately ended our stream; do not try to reclaim it.
+
+    Raised when the bridge sends ``close_notify`` (documented as "streaming is
+    disabled via CLIP") or ``user_canceled``. Subclasses ``ConnectionError`` so
+    existing handlers still catch it, but lets the sync loop tell a revocation
+    apart from a dropped packet and stop instead of re-issuing ``action=start``.
+    """
 
 
 def rgb8_to_16(value: int) -> int:
@@ -111,7 +128,7 @@ def rgb_to_xy(
     total = x_ + y_ + z_
     if total <= 0:
         return 0.0, 0.0
-    return clamp_to_gamut(x_ / total, y_ / total)
+    return clamp_to_gamut(x_ / total, y_ / total, gamut)
 
 
 class HueStreamEncoder:
@@ -202,12 +219,22 @@ class HueStreamEncoder:
         us shrinking RGB magnitudes into the bridge's coarse low-value range.
         """
         def encode(cid: int, r: float, g: float, b: float) -> tuple[int, int, int]:
+            gamut = self._channel_gamuts.get(cid, GAMUT_C)
             bri = max(r, g, b)
             if bri <= 1e-6:
-                # Black: keep the last hue so the next lit frame slews from it
-                # rather than popping out of the gamut origin.
-                return 0, 0, 0
-            gamut = self._channel_gamuts.get(cid, GAMUT_C)
+                # Black: hold the last chromaticity (falling back to the gamut's
+                # centroid) and send brightness 0. Emitting xy=(0,0) here would
+                # be an out-of-gamut point the bridge snaps unpredictably, and it
+                # would make the next lit frame slew from that corner instead of
+                # from the hue we were actually showing.
+                prev = self._prev_xy.get(cid)
+                if prev is None:
+                    prev = (
+                        sum(p[0] for p in gamut) / 3.0,
+                        sum(p[1] for p in gamut) / 3.0,
+                    )
+                    self._prev_xy[cid] = prev
+                return float_to_16(prev[0]), float_to_16(prev[1]), 0
             x, y = rgb_to_xy(r / bri, g / bri, b / bri, gamut)
             x, y = self._slew_xy(cid, x, y)
             return float_to_16(x), float_to_16(y), float_to_16(bri)
@@ -245,7 +272,7 @@ class HueStreamEncoder:
     ) -> list[bytes]:
         """Encode one logical frame as one or more datagrams.
 
-        The Entertainment API caps a packet at ~10 lights, so areas with more
+        The Entertainment API caps a packet at 20 channels, so areas with more
         channels (several lamps plus gradient-strip segments) are split across
         multiple datagrams. Each datagram is a complete HueStream frame carrying
         an explicit channel id per entry, so the bridge applies each subset
@@ -275,6 +302,7 @@ class DtlsStream:
         client_key: str,
         port: int = HUE_DTLS_PORT,
         psk_identity: str | None = None,
+        on_revoked: "Callable[[], None] | None" = None,
     ) -> None:
         self._host = host
         self._app_key = app_key
@@ -291,6 +319,13 @@ class DtlsStream:
         self._last_frame: bytes | None = None
         self._write_lock = asyncio.Lock()
         self._closed = False
+        # Set once the bridge tells us the stream is over (close_notify /
+        # user_canceled). Latched so every later send fails fast as a revocation
+        # instead of looking like a transient network error.
+        self._revoked: DtlsPeerClosed | None = None
+        # Called from the keepalive loop when a revocation is detected, so the
+        # session can tear down promptly rather than waiting for the next send.
+        self._on_revoked = on_revoked
         # Dedicated single-thread executor for the socket work: at up to
         # ~50-100 datagrams/s, bouncing every frame off HA's SHARED default
         # executor contends with everything else in the process (file I/O,
@@ -332,6 +367,7 @@ class DtlsStream:
             raise
         self._client = client
         self._closed = False
+        self._revoked = None  # fresh session; a previous revocation is history
         self._keepalive_task = asyncio.ensure_future(self._keepalive_loop())
 
     async def send(self, frame: bytes) -> None:
@@ -339,22 +375,74 @@ class DtlsStream:
         client = self._client
         if client is None or self._closed:
             raise ConnectionError("DTLS channel is not connected")
+        if self._revoked is not None:
+            raise StreamRevoked(str(self._revoked))
         async with self._write_lock:
             self._last_frame = frame
             loop = asyncio.get_running_loop()
             try:
                 await loop.run_in_executor(self._executor, client.send, frame)
+            except DtlsPeerClosed as err:
+                self._revoked = err
+                raise StreamRevoked(str(err)) from err
             except (DtlsError, OSError) as err:
                 raise ConnectionError(f"DTLS send failed: {err}") from err
 
+    async def check_alert(self) -> DtlsPeerClosed | None:
+        """Read any pending DTLS alert; returns the close reason if revoked.
+
+        Cheap enough to call from the keepalive loop (once per ~9 s), which
+        keeps it off the 60 Hz send path entirely while still catching a
+        bridge-side teardown within one keepalive period.
+        """
+        client = self._client
+        if client is None or self._closed:
+            return None
+        loop = asyncio.get_running_loop()
+        try:
+            alert = await loop.run_in_executor(self._executor, client.poll_alert)
+        except (DtlsError, OSError):
+            return None
+        if alert is None:
+            return None
+        level, desc = alert
+        if desc in (ALERT_CLOSE_NOTIFY, ALERT_USER_CANCELED):
+            closed = DtlsPeerClosed(desc)
+            self._revoked = closed
+            return closed
+        _LOGGER.debug(
+            "DTLS alert from bridge: level=%d %s",
+            level, ALERT_NAMES.get(desc, desc),
+        )
+        return None
+
+    @property
+    def revoked(self) -> DtlsPeerClosed | None:
+        """The alert that ended this stream, if the bridge revoked it."""
+        return self._revoked
+
     async def _keepalive_loop(self) -> None:
-        """Resend the last frame if idle, so the bridge keeps the channel open."""
+        """Resend the last frame if idle, so the bridge keeps the channel open.
+
+        Doubles as the alert reader: the bridge announces a CLIP-side stop with
+        ``close_notify``, and this is the only place that ever reads the socket.
+        """
         try:
             while not self._closed and self.connected:
                 await asyncio.sleep(KEEPALIVE_INTERVAL)
+                if not self.connected:
+                    break
+                if await self.check_alert() is not None:
+                    if self._on_revoked is not None:
+                        self._on_revoked()
+                    break
                 if self._last_frame is not None and self.connected:
                     try:
                         await self.send(self._last_frame)
+                    except StreamRevoked:
+                        if self._on_revoked is not None:
+                            self._on_revoked()
+                        break
                     except ConnectionError:
                         break
         except asyncio.CancelledError:

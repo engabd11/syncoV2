@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Connect to your Hue bridge",
-        "description": "Enter the IP address of the Philips Hue bridge that owns your entertainment areas.",
+        "description": "Enter the IP address of the Philips Hue bridge that owns your entertainment areas. Bridges on your network are usually discovered automatically — if one was found, its address is filled in below.",
         "data": {
           "host": "Bridge IP address"
         }
@@ -26,8 +26,12 @@
     },
     "abort": {
       "already_configured": "This bridge is already configured.",
-      "no_areas": "No entertainment areas were found on this bridge. Create one in the Hue app first."
-    }
+      "no_areas": "No entertainment areas were found on this bridge. Create one in the Hue app first.",
+      "not_hue_bridge": "The discovered device does not look like a Philips Hue bridge.",
+      "certificate_mismatch": "The bridge presented a TLS certificate for a different bridge. Pairing was stopped so your credentials are not exposed.",
+      "certificate_invalid": "The bridge's TLS certificate could not be validated against the official Philips Hue root certificates. Update the bridge firmware from the Hue app and try again."
+    },
+    "flow_title": "Hue bridge ({host})"
   },
   "options": {
     "step": {
