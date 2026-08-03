@@ -103,6 +103,17 @@ def _find_mass_client(hass: HomeAssistant):
     return None
 
 
+# Public alias: the coordinator needs the MA server host to find the Sendspin
+# server, which runs alongside Music Assistant on its own port.
+find_mass_client = _find_mass_client
+
+
+def ma_server_base_url(hass: HomeAssistant) -> str | None:
+    """Music Assistant's own base URL, or None when MA is not reachable."""
+    mass = _find_mass_client(hass)
+    return getattr(getattr(mass, "server_info", None), "base_url", None)
+
+
 def ma_player_provider(hass: HomeAssistant, entity_id: str) -> str | None:
     """The Music Assistant provider backing this player (e.g. ``snapcast``,
     ``sendspin``, ``slimproto``), or None when it cannot be determined."""
@@ -725,6 +736,20 @@ class MusicAssistantSource:
         # The coordinator uses this to detect song changes (album-art re-extract,
         # tempo reset). Report the per-song id, not the constant flow-stream URL.
         return self._song_id or self._track_id
+
+    @property
+    def playback_lead_ms(self) -> int:
+        """How far the decoded analysis runs ahead of the audible sound.
+
+        The decoder is started at ``info.position + latency`` and paced from
+        ``_wall0``, so the analyser leads the speakers by exactly ``latency``.
+        Reporting it lets the coordinator hold frames for (lead - light
+        pipeline) instead of falling back to the generic buffer — which, for
+        this source, was a systematic ~150 ms late bias that auto timing could
+        not see, because it measured the deviation from a lead the delay path
+        was not actually using.
+        """
+        return int(round(self._latency * 1000.0))
 
     @property
     def decoded_position(self) -> float | None:

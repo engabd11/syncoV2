@@ -31,6 +31,7 @@ from .const import (
     CONF_CLIENT_KEY,
     CONF_HOST,
     CONF_RESTORE_LIGHTS,
+    CONF_SENDSPIN_HOST,
     CONF_SNAPSERVER_HOST,
     CONF_SUBSONIC_PASSWORD,
     CONF_SUBSONIC_URL,
@@ -346,6 +347,7 @@ class HueMusicSyncOptionsFlow(OptionsFlow):
             self.hass.config_entries.async_update_entry(entry, data=new_data)
             new_options = dict(entry.options)
             new_options[CONF_SNAPSERVER_HOST] = user_input.get(CONF_SNAPSERVER_HOST, "").strip()
+            new_options[CONF_SENDSPIN_HOST] = user_input.get(CONF_SENDSPIN_HOST, "").strip()
             new_options[CONF_RESTORE_LIGHTS] = user_input.get(
                 CONF_RESTORE_LIGHTS, DEFAULT_RESTORE_LIGHTS
             )
@@ -371,6 +373,12 @@ class HueMusicSyncOptionsFlow(OptionsFlow):
                     vol.Optional(
                         CONF_SNAPSERVER_HOST,
                         default=entry.options.get(CONF_SNAPSERVER_HOST, ""),
+                    ): str,
+                    # Only needed when the Sendspin server cannot be found from
+                    # Music Assistant's own base URL; blank auto-detects.
+                    vol.Optional(
+                        CONF_SENDSPIN_HOST,
+                        default=entry.options.get(CONF_SENDSPIN_HOST, ""),
                     ): str,
                     vol.Optional(
                         CONF_RESTORE_LIGHTS,

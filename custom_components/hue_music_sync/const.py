@@ -37,6 +37,12 @@ CONF_AUTO_TIMING: Final = "auto_timing"
 CONF_ADVANCED: Final = "advanced"  # show + apply the advanced tunables
 CONF_TUNABLES: Final = "tunables"  # dict {name: factor}; 1.0 = the mode's coded value
 CONF_SNAPSERVER_HOST: Final = "snapserver_host"
+# Where Music Assistant serves the Sendspin protocol. Normally derived from MA's
+# own base URL (same host, own port), so this is only an escape hatch for setups
+# where that lookup fails. Sendspin carries a synchronised microsecond clock and
+# timestamped progress anchors, which is a far better light-timing reference
+# than the player's coarse media_position -- see audio/sendspin.py.
+CONF_SENDSPIN_HOST: Final = "sendspin_host"
 # OpenSubsonic / Navidrome library (optional): lets us fetch & analyse library
 # tracks directly when Music Assistant won't expose a tappable stream URL
 # (e.g. Sendspin playing an OpenSubsonic track).
@@ -55,7 +61,17 @@ BACKEND_SUBSONIC: Final = "subsonic"  # browse/play a Navidrome/OpenSubsonic ser
 DEFAULT_BACKEND: Final = BACKEND_MA
 
 # --- Defaults ------------------------------------------------------------
-DEFAULT_LATENCY_MS: Final = 150
+# How far ahead of the audible position the Music Assistant tap decodes. It is
+# also the lead the tap *reports*, so the delay buffer holds frames for
+# (latency - LIGHT_PIPELINE_MS) and the photons land on the beat. Set equal to
+# TIMING_BUFFER_MS + LIGHT_PIPELINE_MS (see below) so the applied baseline works
+# out to TIMING_BUFFER_MS: the live tap then has exactly the same symmetric
+# +-200 ms of trim headroom that scheduled track-map playback has.
+DEFAULT_LATENCY_MS: Final = 300
+# The previous default. latency_ms has never been settable from the UI, a
+# service or an entity, so a stored value equal to this is the old default
+# rather than a deliberate choice, and is migrated (coordinator.AreaSettings).
+LEGACY_DEFAULT_LATENCY_MS: Final = 150
 DEFAULT_INTENSITY: Final = 1.0
 DEFAULT_STREAM_FPS: Final = 60  # Hue Entertainment API recommends 50-60 Hz streaming
 # The bridge relays to bulbs at max 25 Hz over Zigbee, so the visible effect rate
@@ -139,9 +155,12 @@ MELBANK_FMAX: Final = 11000.0
 DEFAULT_RESTORE_LIGHTS: Final = False  # opt-in: restore exact pre-sync light state
 DEFAULT_BRIGHTNESS: Final = 1.0  # master brightness ceiling (0..1)
 DEFAULT_TIMING_MS: Final = 0  # +ve delays lights, -ve advances (within buffer)
-# Auto timing: when on, the per-song calibrator estimates the analyzer-vs-audible
-# offset at each song start and applies it in place of the manual timing offset,
-# cancelling the variable startup-hang lag. Opt-in; manual is unchanged when off.
+# Auto timing: when on, the lights are kept locked to the player automatically —
+# through seeks, skips and playback stutters — and on a live tap the analyser's
+# own startup slippage is measured and corrected per song. It is applied *on top
+# of* the manual timing offset, never in place of it: the room's acoustic delay
+# (speakers, bulb ramp, taste) has no software reference to be discovered from,
+# so that stays the user's. Opt-in; manual is unchanged when off.
 DEFAULT_AUTO_TIMING: Final = False
 TIMING_BUFFER_MS: Final = 200  # baseline delay buffer enabling -ve offsets
 # Estimated latency of the light pipeline itself, from the moment we emit a

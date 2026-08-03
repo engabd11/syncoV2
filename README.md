@@ -54,7 +54,7 @@ You choose which player drives the lights — pick any player right from the car
 
 | Player type | Audio source |
 |---|---|
-| **Sendspin** | Position-locked decoding of the track's stream — real live audio, full beat accuracy |
+| **Sendspin** | Position-locked decoding of the track's stream — real live audio, full beat accuracy, and an exact playhead from Sendspin's own synchronised clock |
 | **Squeezelite / Slimproto** | Position-locked stream decoding (re-syncs on drift) |
 | **AirPlay, Chromecast, Sonos, DLNA, ESPHome, groups** | Pre-analysed track map — full beat accuracy with no live stream needed |
 | **Any player at all** | Metadata fallback — gentle animation, upgraded to a real source automatically the moment one becomes tappable |
@@ -194,12 +194,31 @@ Each entertainment area gets:
 | Effect | Select | Rendering style (Music, Movies, Fireworks) |
 | Colour | Select | Colour palette source |
 | Brightness | Number | Master brightness ceiling (5–100%) |
-| Timing offset | Number | Manual sync trim in milliseconds (−500 to +500) |
+| Timing offset | Number | Manual sync trim in milliseconds (−500 to +500) — see [Timing and Auto timing](#timing-and-auto-timing) |
 | Advanced controls | Switch | Reveal + apply a set of live **tunable knobs** under the intensity |
 
 ### Advanced controls
 
 Turn on **Advanced controls** (from the switch entity or the toggle on the card) to reveal a row of live sliders under the intensity picker — **Reactivity**, **Glow**, **Movement**, **Contrast**, **Colour speed** and **Loudness**. Each is a 0–200% multiplier on the active mode's behaviour (100% = the mode as designed), applied **live during the song** so you can dial the room in by ear. They scale whatever the current mode uses and quietly no-op on anything it doesn't (e.g. Movement only spins Extreme's spatial map), and turning Advanced back off restores the mode's defaults. *Reset to 100%* clears them.
+
+### Timing and Auto timing
+
+Two different things line the lights up with the music, and they solve two different problems.
+
+**Auto timing** keeps the lights locked to the *player*. It follows seeks, track skips and playback stutters, cancels any drift between the player's clock and Home Assistant's, and on a live Music Assistant tap it also measures the decoder's own startup slippage each song. On a Sendspin player it does this from Sendspin's synchronised microsecond clock, so the playhead is exact rather than estimated; on everything else it anchors on the player's reported position and tracks it with a drift-corrected rate. Corrections are eased in rather than jumped, so you never see a hitch.
+
+**The ± timing offset** is the delay of your *room* — how long your speakers, amplifier and bulbs take to actually produce sound and light. Nothing in software can measure that: there is no microphone and no reference to compare against. So Auto never touches it, and the steppers stay live while Auto is on. Set it once by ear and leave it.
+
+Auto is applied **on top of** your trim, never instead of it. The card shows your trim as the main number and Auto's contribution as a small chip beside it:
+
+| Chip | Meaning |
+|---|---|
+| `A ✓` | Locked to the player — this source needs no correction beyond tracking |
+| `A +120` | Auto is adding 120 ms on top of your trim (a live tap's startup slippage) |
+| `A ⟳` | Measuring this song |
+| `A —` | This source reports its timing exactly; there is nothing to correct |
+
+While an area is syncing, the switch exposes `timing_applied_ms` (the delay actually in effect) and `clock_source` (`sendspin` or `ha-state`), and the card's WebSocket feed carries the full breakdown — clock confidence, estimated rate, residual error and the base/trim/auto split — if you want to see exactly what it is doing.
 
 Plus, once per installation, a **Hue Synco Library** device for managing the analysis cache:
 
@@ -325,10 +344,10 @@ Audio-reactive lighting can produce rapid whole-room brightness swings. Most mod
 ## Troubleshooting
 
 - **Card shows "Custom element doesn't exist"** — usually a stale cached app shell; reload the page once. The integration registers the card as a Lovelace resource automatically; if you removed that resource by hand, re-add `/hue_music_sync/hue-music-sync-card.js` under **Settings → Dashboards → Resources**, or reload the integration.
-- **Lights react late/early** — use the card's timing-offset stepper (±ms) to land the flashes exactly on the audible beat in your room, or flip the timing **Auto** toggle to have the per-song startup delay calibrated automatically.
+- **Lights react late/early** — use the card's timing-offset stepper (±ms) to land the flashes exactly on the audible beat in your room. Leave **Auto** on as well: the two are complementary (see [Timing and Auto timing](#timing-and-auto-timing)).
 - **"Metadata only" pill stays amber** — no tappable stream and no track map yet. Run **Analyse library** once, or configure the OpenSubsonic options so tracks can be fetched for analysis.
 - **First play of a new track reacts generically** — full offline analysis takes ~10 s on slower hardware; the show upgrades mid-song when it lands. `prewarm_library` removes this entirely.
-- **Position-coarse players (e.g. Sonos)** — ~500 ms position granularity reduces track-map timing precision; the timing stepper helps.
+- **Position-coarse players (e.g. Sonos)** — a player that reports its position rarely and roughly gives the playback clock less to work with. It still tracks correctly (the clock free-runs at a drift-corrected rate between reports), but a large glitch takes a little longer to confirm.
 - **Bridge unreachable after a factory reset** — the certificate no longer matches the paired bridge id (by design). Remove and re-add the integration.
 - **Sync restarts after you stop it in the Hue app** — fixed in 1.54.0. Hue Synco now subscribes to the bridge's event stream and checks who owns the area before reconnecting, so stopping from the Hue app turns the Home Assistant switch off instead of taking the area back.
 

@@ -39,8 +39,10 @@ activate:
     auto_timing:
       name: Auto timing
       description: >-
-        Auto-calibrate the light delay per song (cancels the variable
-        startup-hang lag) instead of using the manual timing offset.
+        Keep the lights locked to the player automatically - through seeks,
+        skips and playback stutters - and correct the analyser's own startup
+        slippage on a live tap. Applied on top of your manual timing offset,
+        which stays yours for speaker/bulb delay.
       required: false
       selector:
         boolean:
@@ -142,8 +144,10 @@ set_options:
     auto_timing:
       name: Auto timing
       description: >-
-        Auto-calibrate the light delay per song (cancels the variable
-        startup-hang lag) instead of using the manual timing offset.
+        Keep the lights locked to the player automatically - through seeks,
+        skips and playback stutters - and correct the analyser's own startup
+        slippage on a live tap. Applied on top of your manual timing offset,
+        which stays yours for speaker/bulb delay.
       required: false
       selector:
         boolean:

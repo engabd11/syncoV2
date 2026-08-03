@@ -354,6 +354,8 @@ const CARD_CSS = `
     display: flex; align-items: baseline; justify-content: center; gap: 3px; }
   .hue-timing-num { font-size: 16px; font-weight: 800; font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
   .hue-timing-unit { font-size: 11px; font-weight: 700; color: var(--hue-faint); }
+  .hue-timing-chip { font-size: 10px; font-weight: 800; font-variant-numeric: tabular-nums;
+    padding: 1px 5px; margin-left: 6px; border-radius: 6px; background: #ffffff14; }
 
   /* -- advanced live tunables -- */
   .hue-advanced { display: flex; flex-direction: column; }
@@ -1200,10 +1202,13 @@ class HueMusicSyncCard extends HTMLElement {
     const brightMin = brightEnt ? Number(brightEnt.attributes.min ?? 5) : 5;
     const brightMax = brightEnt ? Number(brightEnt.attributes.max ?? 100) : 100;
 
+    // Fallbacks match the real number entity (number.py TimingNumber), so a
+    // card rendered before the entity loads cannot clamp to a narrower range
+    // than the integration actually accepts.
     const timingVal = timingEnt ? Number(timingEnt.state) : this._ui.timing;
-    const timingMin = timingEnt ? Number(timingEnt.attributes.min ?? -200) : -200;
-    const timingMax = timingEnt ? Number(timingEnt.attributes.max ?? 200) : 200;
-    const timingStep = timingEnt ? Number(timingEnt.attributes.step ?? 5) : 5;
+    const timingMin = timingEnt ? Number(timingEnt.attributes.min ?? -500) : -500;
+    const timingMax = timingEnt ? Number(timingEnt.attributes.max ?? 500) : 500;
+    const timingStep = timingEnt ? Number(timingEnt.attributes.step ?? 10) : 10;
 
     // now playing - prefer the *live* player the integration is actually
     // following (published as `source_player` on the switch; zero config),
@@ -1281,6 +1286,12 @@ class HueMusicSyncCard extends HTMLElement {
     const autoTiming = !!this._ui.autoTiming;
     const timingAutoMs = swAttr.timing_auto_ms != null ? Number(swAttr.timing_auto_ms) : null;
     const timingLocked = !!swAttr.timing_locked;
+    // What auto can honestly do on the current source: "measuring" (a live tap
+    // with real startup slippage), "tracking" (the playback clock guarantees
+    // alignment), "n/a" (nothing to measure), or "off".
+    const timingMode = swAttr.auto_timing_mode || null;
+    const timingApplied = swAttr.timing_applied_ms != null
+      ? Number(swAttr.timing_applied_ms) : null;
 
     // Advanced tunables: the toggle + the live knob factors, both optimistic
     // (kept until the integration echoes them back) like the auto rungs/timing.
@@ -1311,6 +1322,7 @@ class HueMusicSyncCard extends HTMLElement {
       timing: {
         entity: area.timing, value: timingVal, min: timingMin, max: timingMax,
         step: timingStep, auto: autoTiming, autoMs: timingAutoMs, locked: timingLocked,
+        mode: timingMode, appliedMs: timingApplied,
       },
       now,
       advanced, tunables,
@@ -2660,20 +2672,21 @@ class HueMusicSyncCard extends HTMLElement {
   }
 
   _timing(m, accent) {
-    const { value, min, max, step, entity, auto, autoMs, locked } = m.timing;
+    const { value, min, max, step, entity, auto, autoMs, locked, mode, appliedMs } = m.timing;
     const clamp = (v) => Math.max(min, Math.min(max, v));
     const wrap = document.createElement("div");
     wrap.className = "hue-timing";
 
-    // Auto toggle: calibrate the light delay per song instead of the manual
-    // trim. When on, the steppers are disabled and the readout shows the live
-    // calibrated value.
+    // Auto toggle: keep the lights locked to the player automatically. It is
+    // applied ON TOP of the manual trim, never instead of it — the room's own
+    // acoustic delay has no software reference to be discovered from, so that
+    // stays the user's to set. The steppers therefore stay live either way.
     const autoBtn = document.createElement("button");
     autoBtn.className = "hue-step hue-timing-auto" + (auto ? " on" : "");
     autoBtn.textContent = "A";
     autoBtn.title = auto
-      ? "Auto timing on — the delay is calibrated per song"
-      : "Auto timing — calibrate the light delay per song";
+      ? "Auto timing on — the lights follow the player automatically. The ± trim is still yours, for speaker/bulb delay."
+      : "Auto timing — keep the lights locked to the player through seeks, skips and stutters";
     autoBtn.setAttribute("aria-pressed", auto ? "true" : "false");
     if (auto) { autoBtn.style.color = "#fff"; autoBtn.style.background = accent; }
     autoBtn.addEventListener("click", () => {
@@ -2686,43 +2699,50 @@ class HueMusicSyncCard extends HTMLElement {
       b.className = "hue-step";
       b.textContent = sym;
       b.setAttribute("aria-label", label);
-      if (auto) {
-        b.disabled = true;
-        b.style.opacity = "0.4";
-      } else {
-        b.addEventListener("click", () => {
-          this._callNumber(entity, clamp(value + delta), "timing");
-          this._render();
-        });
-      }
+      b.addEventListener("click", () => {
+        this._callNumber(entity, clamp(value + delta), "timing");
+        this._render();
+      });
       return b;
     };
 
     const readout = document.createElement("div");
     readout.className = "hue-timing-readout";
     readout.style.boxShadow = `inset 0 0 0 1px ${accent}33`;
+    // The big number is always the manual trim, so ± feels direct; auto's
+    // contribution rides alongside as a chip.
     const num = document.createElement("span");
     num.className = "hue-timing-num";
+    num.style.color = value === 0 ? "var(--hue-dim)" : accent;
+    num.textContent = (value > 0 ? "+" : "") + value;
     const unit = document.createElement("span");
     unit.className = "hue-timing-unit";
-    if (auto) {
-      if (locked && autoMs != null) {
-        num.style.color = accent;
-        num.textContent = (autoMs > 0 ? "+" : "") + autoMs;
-        unit.textContent = "ms";
-      } else {
-        // Still settling on this song.
-        num.style.color = "var(--hue-dim)";
-        num.textContent = "Auto";
-        unit.textContent = "";
-      }
-    } else {
-      num.style.color = value === 0 ? "var(--hue-dim)" : accent;
-      num.textContent = (value > 0 ? "+" : "") + value;
-      unit.textContent = "ms";
-    }
+    unit.textContent = "ms";
+    if (appliedMs != null) readout.title = `applied delay ${appliedMs} ms`;
     readout.appendChild(num);
     readout.appendChild(unit);
+    if (auto) {
+      const chip = document.createElement("span");
+      chip.className = "hue-timing-chip";
+      let label, tip, dim = false;
+      if (mode === "n/a") {
+        label = "A —"; dim = true;
+        tip = "This source reports its own timing exactly — nothing to correct";
+      } else if (mode === "tracking") {
+        label = "A ✓";
+        tip = "Locked to the player: seeks, skips and stutters are followed automatically";
+      } else if (locked && autoMs != null) {
+        label = "A " + (autoMs > 0 ? "+" : "") + autoMs;
+        tip = `Auto is adding ${autoMs} ms on top of your trim`;
+      } else {
+        label = "A ⟳"; dim = true;
+        tip = "Measuring this song's startup offset";
+      }
+      chip.textContent = label;
+      chip.title = tip;
+      chip.style.color = dim ? "var(--hue-dim)" : accent;
+      readout.appendChild(chip);
+    }
 
     wrap.appendChild(autoBtn);
     wrap.appendChild(mk("-", -step, "Earlier"));

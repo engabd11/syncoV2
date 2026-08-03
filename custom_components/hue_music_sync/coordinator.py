@@ -17,23 +17,28 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_send
+from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.util import dt as dt_util
 
+from .audio.clock import CONFIDENCE_NONE, PlaybackClock
 from .audio.map_source import TrackMapSource
 from .audio.metadata import MetadataSource
 from .audio.ma_stream import is_snapcast_backed
 from .audio.snapcast import SnapcastSource
+from .audio.sendspin import SendspinClient, server_url as sendspin_url
 from .audio.source import (
     MusicAssistantSource,
     ha_track_query,
     ma_player_provider,
+    ma_server_base_url,
     resolve_map_url,
     resolve_next_map,
     track_label,
+    track_signature,
 )
 from .audio.structure import StructureTracker
 from .audio.tempo import BeatGrid, TempoTracker
@@ -57,6 +62,7 @@ from .const import (
     CONF_MEDIA_PLAYER,
     CONF_MODE,
     CONF_RESTORE_LIGHTS,
+    CONF_SENDSPIN_HOST,
     CONF_SNAPSERVER_HOST,
     CONF_SUBSONIC_PASSWORD,
     CONF_SUBSONIC_URL,
@@ -69,6 +75,7 @@ from .const import (
     DEFAULT_COLOUR,
     DEFAULT_EFFECT,
     DEFAULT_LATENCY_MS,
+    LEGACY_DEFAULT_LATENCY_MS,
     DEFAULT_MODE,
     DEFAULT_RESTORE_LIGHTS,
     DEFAULT_STREAM_FPS,
@@ -88,7 +95,7 @@ from .effects.modes import (
     AutoIntensityPicker,
     sanitize_auto_levels,
 )
-from .timing import TimingCalibrator
+from .timing import TimingCalibrator, slew_toward
 from .effects.safety import RELAXED_MAX_FLASHES_PER_S, FieldSafety
 from .hue.bridge import EntertainmentConfig, HueBridge
 from .hue.events import HueEventStream
@@ -140,6 +147,16 @@ _MAP_COMMIT_WINDOW_S = 6.0
 # ~1 bar at 120 BPM — long enough for the pre-drop pull-down to read as
 # deliberate tension, short enough that it always resolves.
 _PREDROP_WINDOW_S = 2.0
+# How fast the applied delay may move, in ms of delay per second of real time.
+# The delay buffer drains by sending the newest frame older than (now - delay),
+# so shrinking the delay drops frames and growing it holds them back. At
+# 120 ms/s that is about one 20 ms frame every eighth tick either way —
+# invisible behind the bridge's ~25 Hz Zigbee ceiling — while a full +-200 ms
+# correction still completes in under 1.7 s.
+_DELAY_SLEW_MS_PER_S = 120.0
+# Ceiling on the auto correction. Anything beyond this is not a startup hang,
+# it is a broken measurement, and applying it would be worse than doing nothing.
+_AUTO_TRIM_MAX_MS = 400.0
 
 # Album-art refresh: how long to wait for a new track's entity_picture to
 # catch up with its title (HA writes them in separate state updates) before
@@ -262,6 +279,13 @@ class AreaSettings:
             colour = ColorScheme(data.get(CONF_COLOUR, DEFAULT_COLOUR))
         except ValueError:
             colour = DEFAULT_COLOUR
+        # latency_ms has never been writable from the UI, a service or an
+        # entity, so a stored value equal to the old default *is* the old
+        # default rather than a choice — migrate it so existing areas pick up
+        # the corrected live-tap lead. A hand-edited value is left alone.
+        latency = int(data.get(CONF_LATENCY_MS, DEFAULT_LATENCY_MS))
+        if latency == LEGACY_DEFAULT_LATENCY_MS:
+            latency = DEFAULT_LATENCY_MS
         return cls(
             mode=mode,
             effect=effect,
@@ -269,7 +293,7 @@ class AreaSettings:
             brightness=float(data.get(CONF_BRIGHTNESS, DEFAULT_BRIGHTNESS)),
             timing_ms=int(data.get(CONF_TIMING_MS, DEFAULT_TIMING_MS)),
             media_player=data.get(CONF_MEDIA_PLAYER),
-            latency_ms=int(data.get(CONF_LATENCY_MS, DEFAULT_LATENCY_MS)),
+            latency_ms=latency,
             auto_levels=sanitize_auto_levels(
                 data.get(CONF_AUTO_LEVELS, DEFAULT_AUTO_LEVELS)
             ),
@@ -308,6 +332,7 @@ class SyncSession:
         config: EntertainmentConfig,
         settings: AreaSettings,
         snapserver_host: str = "",
+        sendspin_host: str = "",
         restore_lights: bool = False,
         subsonic=None,
         on_finished: Callable[[], None] | None = None,
@@ -322,6 +347,9 @@ class SyncSession:
         self._config = config
         self._settings = settings
         self._snapserver_host = snapserver_host
+        # Optional override for where the Sendspin server lives; normally it is
+        # derived from Music Assistant's own base URL (same host, own port).
+        self._sendspin_host = sendspin_host
         self._restore_lights = restore_lights
         self._light_snapshot: list[dict] | None = None
         self._on_finished = on_finished
@@ -405,7 +433,15 @@ class SyncSession:
         self._reset_task: asyncio.Task | None = None  # player-switch source reset
         self._art_grace: float | None = None  # deadline for a lagging artwork URL
         self._art_retry_at = 0.0  # pacing after a failed extraction
-        self._delay_buf: deque[tuple[float, dict]] = deque()
+        # Bounded purely as a safety net: the legitimate depth is
+        # (base + trim + auto) / frame period, about 55 frames at the widest.
+        self._delay_buf: deque[tuple[float, dict]] = deque(maxlen=200)
+        # The applied delay is slewed toward its target rather than stepped, so
+        # a correction never drains several buffered frames at once (a visible
+        # skip) or starves the send (a visible freeze). None = adopt instantly.
+        self._applied_delay_ms: float | None = None
+        self._delay_ms_t = 0.0
+        self._last_logged_target = -1e9
         # Last frame actually sent to the bridge (for the skip-unchanged
         # optimisation — see _safe_send). Reset on reconnect.
         self._last_sent_colors: dict[int, tuple[float, float, float]] | None = None
@@ -422,8 +458,17 @@ class SyncSession:
         # rung, gated to the user's enabled set. Reset on every track change.
         self._auto_picker = AutoIntensityPicker()
         # Per-song light-timing calibrator (opt-in via settings.auto_timing):
-        # estimates the startup slippage and locks a delay correction per track.
+        # estimates the live tap's decoder startup slippage.
         self._timing_cal = TimingCalibrator()
+        self._cal_anchor_seq = -1  # last player report folded into the calibrator
+        self._seen_disc_seq = 0  # last clock discontinuity the session reacted to
+        # The one playback clock for this area: where the speakers are in the
+        # song. Fed by the Sendspin server when it is available (an exact,
+        # timestamped playhead) and by Home Assistant player state otherwise.
+        self._clock = PlaybackClock(config.name)
+        self._sendspin: SendspinClient | None = None
+        self._player_unsub: Callable[[], None] | None = None
+        self._watched_player: str | None = None
         self._beat_anchor: float | None = None  # stable downbeat ref for the card
         self._last_publish = 0.0
         # Background probe that upgrades the metadata fallback to a real tap.
@@ -664,6 +709,8 @@ class SyncSession:
         # pick until the track id actually changes. The timing calibrator IS
         # per-song: the startup slippage is measured fresh each track.
         self._timing_cal.reset()
+        self._cal_anchor_seq = -1
+        self._applied_delay_ms = None  # the new source may have a different lead
 
     async def _reset_source(self) -> None:
         await self._cancel_meta_upgrade()
@@ -671,6 +718,102 @@ class SyncSession:
             await self._source.close()
             self._source = None
         self._reset_rhythm_models()
+
+    # -- the playback clock --------------------------------------------------
+
+    @callback
+    def _watch_player(self, entity_id: str | None) -> None:
+        """(Re)subscribe the fast player listener. Idempotent; safe every loop.
+
+        Polling the player's state at 0.5-1.0 s meant a track change was noticed
+        up to half a second late, and the *previous* song's map was replayed into
+        the new one for that whole window — the "lights start before the song"
+        complaint. A state listener reacts in milliseconds instead.
+        """
+        if entity_id == self._watched_player:
+            return
+        if self._player_unsub is not None:
+            self._player_unsub()
+            self._player_unsub = None
+        self._watched_player = entity_id
+        self._clock.rebind(entity_id)
+        self._cal_anchor_seq = -1
+        self._seen_disc_seq = self._clock.disc_seq
+        if entity_id is None:
+            self._stop_sendspin()
+            return
+        _LOGGER.debug("%s following player %s", self._config.name, entity_id)
+        self._player_unsub = async_track_state_change_event(
+            self._hass, [entity_id], self._on_player_state
+        )
+        # Open the Sendspin feed *before* priming, so the first player report
+        # already tells it which song to expect.
+        self._start_sendspin()
+        self._ingest_player_state(self._hass.states.get(entity_id))
+
+    @callback
+    def _on_player_state(self, event) -> None:
+        self._ingest_player_state(event.data.get("new_state"))
+
+    @callback
+    def _ingest_player_state(self, state) -> None:
+        """Fold one player report into the clock (and steer the Sendspin feed)."""
+        if state is None:
+            self._clock.note_unavailable()
+            return
+        attrs = state.attributes
+        key = track_signature(
+            attrs.get("media_content_id"),
+            attrs.get("media_artist"),
+            attrs.get("media_title"),
+        )
+        if self._sendspin is not None:
+            # Both feeds must key tracks identically, or switching between them
+            # would read as a track change each time.
+            self._sendspin.expect_track(attrs.get("media_title"), key)
+            # Hand authority back the moment the socket drops or the metadata
+            # turns out to be another group's, so the show falls back to the
+            # Home Assistant clock instead of free-running on a dead feed.
+            if not self._sendspin.synced:
+                self._clock.set_authoritative(False)
+        self._clock.observe(
+            state=state.state,
+            media_position=attrs.get("media_position"),
+            updated_at=attrs.get("media_position_updated_at"),
+            track_key=key,
+            now_mono=time.monotonic(),
+            now_wall=dt_util.utcnow(),
+        )
+
+    def _start_sendspin(self) -> None:
+        """Open the Sendspin metadata feed for this area, if one is reachable.
+
+        Strictly an upgrade: everything works on the Home Assistant clock alone,
+        so a missing server, a refused connection or another group's metadata
+        just leaves the area on that feed.
+        """
+        url = sendspin_url(ma_server_base_url(self._hass), self._sendspin_host)
+        if url is None:
+            # Music Assistant not loaded (yet). Leave any working client alone
+            # and try again on the next pass; teardown belongs to _watch_player.
+            return
+        if self._sendspin is not None and self._sendspin.url == url:
+            return
+        self._stop_sendspin()
+        self._sendspin = SendspinClient(
+            self._hass, url, self._clock, name=self._config.name
+        )
+        self._sendspin.start()
+
+    def _stop_sendspin(self) -> None:
+        client, self._sendspin = self._sendspin, None
+        self._clock.set_authoritative(False)
+        if client is None:
+            return
+        try:
+            self._hass.async_create_task(client.stop())
+        except Exception:  # noqa: BLE001 - teardown must never raise (shutdown)
+            _LOGGER.debug("Sendspin teardown for %s deferred", self._config.name)
 
     def _resolve_player(self) -> str | None:
         if self._settings.media_player:
@@ -726,6 +869,9 @@ class SyncSession:
         entity_id = self._resolve_player()
         if entity_id is None:
             return None
+        # Bind the clock before opening anything: a source primes it in open(),
+        # and rebinding afterwards would reset that straight back off.
+        self._watch_player(entity_id)
         # The snapcast tap is only ever offered for a Music Assistant player:
         # ma_player_provider() returns None for anything else, and
         # is_snapcast_backed(None) is deliberately True, so without this a
@@ -750,7 +896,9 @@ class SyncSession:
         if ma is not None:
             return ma
         return await self._try_open(
-            TrackMapSource(self._hass, entity_id, self._mapper, self._subsonic)
+            TrackMapSource(
+                self._hass, entity_id, self._mapper, self._subsonic, self._clock
+            )
         )
 
     async def _ensure_source(self) -> bool:
@@ -913,6 +1061,11 @@ class SyncSession:
                             self._config.name, exc_info=True,
                         )
 
+                # Absorb any pending clock correction. Runs in every branch,
+                # including while idle, so a resume never starts on a clock
+                # that has been holding a stale error since the last pause.
+                self._clock.step(now)
+
                 try:
                     if self._source is None:
                         if now - last_reopen >= _IDLE_REOPEN_S:
@@ -950,6 +1103,20 @@ class SyncSession:
                         self._update_live_chroma(frame)
                     if now - self._map_check >= 1.0:
                         self._map_check = now
+                        # Cheap and idempotent: covers _resolve_player changing
+                        # its mind, the metadata->tap upgrade, and any source swap.
+                        self._watch_player(self._source.entity_id)
+                        # Retry the Sendspin feed too: Music Assistant may have
+                        # loaded after us, so a URL that was unresolvable at
+                        # session start can become available later.
+                        if self._watched_player is not None:
+                            self._start_sendspin()
+                        # And hand authority back promptly if it dropped. Waiting
+                        # for the next player state change could take minutes on
+                        # a long track, during which the Home Assistant feed
+                        # would stay muted behind a dead socket.
+                        if self._sendspin is None or not self._sendspin.synced:
+                            self._clock.set_authoritative(False)
                         self._maybe_track_map()
                         self._maybe_prefetch_next()
                         self._maybe_live_song_palette(now)
@@ -996,6 +1163,32 @@ class SyncSession:
                         self._chroma_applied = None
                         self._chroma_applied_at = 0.0
                         self._song_palette_from_map = False
+                        # The startup slippage is measured fresh each song. This
+                        # was missing, so a value locked during track one was
+                        # held for the whole session — the lights kept starting
+                        # the next song at the previous song's offset.
+                        self._timing_cal.reset()
+                        self._cal_anchor_seq = -1
+                        # Frames buffered for the previous song must not bleed
+                        # into this one, and the new delay is adopted at once
+                        # rather than slewed across the gap.
+                        self._delay_buf.clear()
+                        self._applied_delay_ms = None
+                        _LOGGER.debug(
+                            "%s track -> %s (clock %s, rate %.4f)",
+                            self._config.name, tid, self._clock.confidence,
+                            self._clock.rate,
+                        )
+                    # A seek inside the current track is just as much a reason to
+                    # re-measure: the decoder restarts and slips again.
+                    if self._clock.disc_seq != self._seen_disc_seq:
+                        self._seen_disc_seq = self._clock.disc_seq
+                        self._timing_cal.reset()
+                        self._cal_anchor_seq = -1
+                        # grid_at() reports a beat crossing between the previous
+                        # query and this one; across a jump that would fire a
+                        # beat for music nobody heard.
+                        self._map_prev_pos = None
                     # Causal beat grid (always running; the fallback rhythm model).
                     beatgrid = self._tempo.update(
                         frame.t_audio, frame.flux, frame.beat, frame.beat_strength,
@@ -1013,8 +1206,11 @@ class SyncSession:
                         beatgrid = map_grid
                     self._last_beatgrid = beatgrid
                     self._maybe_apply_auto_intensity(frame, beatgrid, period)
-                    if self._settings.auto_timing and not self._timing_cal.locked:
-                        self._feed_timing_calibrator(beatgrid, period)
+                    if self._settings.auto_timing:
+                        # The honest wall dt, not the nominal frame period: the
+                        # loop runs at the 50 fps analysis rate, so feeding it
+                        # 1/60 made the settle window ~17 % longer than it read.
+                        self._feed_timing_calibrator(beatgrid, dt)
                     # Drum-pad mode (card taps drive the beats) auto-expires, so
                     # set it from the live window every frame before rendering.
                     self._engine.set_manual_only(now < self._drum_until)
@@ -1066,6 +1262,10 @@ class SyncSession:
         except Exception:  # noqa: BLE001
             _LOGGER.exception("Music sync loop crashed for %s", self._config.name)
         finally:
+            # Drop the player listener even when the loop ended on its own
+            # (DTLS gave up, crash): an orphaned state callback would keep this
+            # dead session alive for the lifetime of the entity.
+            self._watch_player(None)
             # If the loop ended on its own (DTLS gave up, crash) rather than via
             # stop(), hand the area back to the bridge so it restores the prior
             # light state immediately, instead of leaving the lamps frozen on the
@@ -1097,42 +1297,86 @@ class SyncSession:
         )
         await self._safe_send(self._engine.render_idle_show(phase, show))
 
+    def _base_delay_ms(self) -> float:
+        """The baseline hold that aligns the lights with the *audible* sound.
+
+        A source whose analysis runs ahead of the speakers (snapcast decodes
+        chunks ``bufferMs`` before clients play them; the live tap seeks ahead
+        by ``latency_ms``; the track map generates frames early) reports that
+        lead, and we hold frames for the lead minus the light pipeline's own
+        latency. A source that reports no lead gets the fixed buffer, which
+        exists so a negative trim has somewhere to go.
+        """
+        lead_ms = getattr(self._source, "playback_lead_ms", 0) or 0
+        return float(
+            max(0, lead_ms - LIGHT_PIPELINE_MS) if lead_ms > 0 else TIMING_BUFFER_MS
+        )
+
+    def _target_delay_ms(self) -> float:
+        """The delay we want right now: source lead + user trim + auto trim.
+
+        ``timing_ms`` is the user's own acoustic calibration — speaker delay,
+        bulb ramp, room taste. That is unobservable from software (there is no
+        microphone and no reference), so auto can never discover it and must
+        never overwrite it. Auto *adds* its measured correction on top.
+        """
+        base_ms = self._base_delay_ms()
+        trim_ms = float(self._settings.timing_ms)
+        if self._settings.auto_timing:
+            # Advancing is only possible within the baseline, and that varies
+            # by source, so tell the calibrator what it may actually ask for.
+            self._timing_cal.set_clamp(-base_ms, _AUTO_TRIM_MAX_MS)
+            auto = self._timing_cal.offset_ms
+            if auto is not None:
+                trim_ms += auto
+        target = max(0.0, base_ms + trim_ms)
+        if abs(target - self._last_logged_target) > 10.0:
+            self._last_logged_target = target
+            _LOGGER.debug(
+                "%s delay target %.0f ms = base %.0f + trim %d + auto %s (%s)",
+                self._config.name, target, base_ms, self._settings.timing_ms,
+                self._timing_cal.offset_ms if self._settings.auto_timing else "off",
+                self._auto_timing_mode(),
+            )
+        return target
+
     async def _send_timed(self, colors: dict, features: dict | None = None) -> None:
         """Send the frame through the timing-offset delay buffer.
 
-        The baseline delay aligns the lights with the *audible* sound: a source
-        whose analysis runs ahead of the speakers (snapcast decodes chunks
-        ``bufferMs`` before clients play them) reports that lead, and we hold
-        frames for the lead minus the light pipeline's own latency. Sources
-        already position-locked to playback use the small fixed buffer instead.
-        The user's timing offset remains a fine trim on top (positive = lights
-        later; negative = earlier, within the baseline buffer). ``features``
-        (the live-card payload for this frame) rides the same buffer so the
-        card's visualizer matches what the room is showing/hearing.
+        The applied delay is *slewed* toward its target rather than stepped.
+        The drain below sends the newest frame older than ``now - delay``, so
+        moving the delay in one jump would drop several buffered frames at once
+        (a visible skip) or starve the send for the difference (a visible
+        freeze) — which is why auto timing could only ever be a one-shot lock
+        before. At the slew rate a full 200 ms correction still lands inside
+        two seconds, invisibly.
+
+        ``features`` (the live-card payload for this frame) rides the same
+        buffer so the card's visualizer matches what the room is showing.
         """
         # Drum-pad mode: the user is driving the beats, so audio alignment is
         # irrelevant — skip the delay buffer entirely so taps reach the bulbs
         # with the least possible latency.
         if self._engine.manual_only:
             self._delay_buf.clear()
+            self._applied_delay_ms = None
             await self._safe_send(colors, features)
             return
-        lead_ms = getattr(self._source, "playback_lead_ms", 0) or 0
-        base_ms = max(0, lead_ms - LIGHT_PIPELINE_MS) if lead_ms > 0 else TIMING_BUFFER_MS
-        # Auto timing (opt-in): the calibrator's per-song correction replaces the
-        # manual trim on top of the same baseline; falls back to the manual
-        # offset until it has a value (and on sources with no position data).
-        trim_ms = self._settings.timing_ms
-        if self._settings.auto_timing:
-            auto = self._timing_cal.offset_ms
-            if auto is not None:
-                trim_ms = auto
-        delay_s = max(0.0, (base_ms + trim_ms) / 1000.0)
+
+        now = time.monotonic()
+        prev_t, self._delay_ms_t = self._delay_ms_t, now
+        self._applied_delay_ms = slew_toward(
+            self._applied_delay_ms,
+            self._target_delay_ms(),
+            now - prev_t,
+            _DELAY_SLEW_MS_PER_S,
+        )
+        delay_s = max(0.0, self._applied_delay_ms / 1000.0)
+
         if delay_s <= 0.001:
             self._delay_buf.clear()
             await self._safe_send(colors, features)
             return
-        now = time.monotonic()
         self._delay_buf.append((now, (colors, features)))
         target = now - delay_s
         send = None
@@ -1294,22 +1538,65 @@ class SyncSession:
             state = self._hass.states.get(src.entity_id)
             if state is not None:
                 payload["playing"] = state.state == "playing"
-                pos = state.attributes.get("media_position")
-                if pos is not None:
-                    live = float(pos)
-                    updated = state.attributes.get("media_position_updated_at")
-                    if state.state == "playing" and updated is not None:
-                        try:
-                            live += max(
-                                0.0, (dt_util.utcnow() - updated).total_seconds()
-                            )
-                        except (TypeError, ValueError):
-                            pass
+                live = self._clock.position(time.monotonic())
+                if live is None:
+                    pos = state.attributes.get("media_position")
+                    if pos is not None:
+                        live = float(pos)
+                        updated = state.attributes.get("media_position_updated_at")
+                        if state.state == "playing" and updated is not None:
+                            try:
+                                live += max(
+                                    0.0, (dt_util.utcnow() - updated).total_seconds()
+                                )
+                            except (TypeError, ValueError):
+                                pass
+                if live is not None:
                     payload["position"] = round(live, 2)
                 duration = state.attributes.get("media_duration")
                 if duration:
                     payload["duration"] = float(duration)
+        payload["clock"] = self.clock_diagnostics()
+        payload["timing"] = self.timing_diagnostics()
         return payload
+
+    def clock_diagnostics(self) -> dict:
+        """Live clock health for the card. Fast-changing: never an entity attribute."""
+        diag = {
+            "source": (
+                "sendspin"
+                if self._clock.authoritative and self._sendspin is not None
+                and self._sendspin.synced
+                else "ha-state"
+            ),
+            "confidence": self._clock.confidence,
+            "rate": round(self._clock.rate, 5),
+            "pending_ms": round(self._clock.pending_ms, 1),
+            "stale": self._clock.stale,
+            "anchors": self._clock.anchor_seq,
+            "discontinuities": self._clock.disc_seq,
+        }
+        residual = self._clock.residual_ms
+        if residual is not None:
+            diag["residual_ms"] = round(residual, 1)
+        if self._sendspin is not None:
+            diag["sendspin"] = self._sendspin.diagnostics
+        return diag
+
+    def timing_diagnostics(self) -> dict:
+        """The full delay breakdown, so a wrong number is inspectable."""
+        lead_ms = getattr(self._source, "playback_lead_ms", 0) or 0
+        return {
+            "applied_ms": (
+                None if self._applied_delay_ms is None
+                else round(self._applied_delay_ms)
+            ),
+            "target_ms": round(self._target_delay_ms()),
+            "source_lead_ms": lead_ms,
+            "trim_ms": self._settings.timing_ms,
+            "auto_ms": self._timing_cal.offset_ms if self._settings.auto_timing else None,
+            "mode": self._auto_timing_mode(),
+        }
 
     @property
     def externally_stopped(self) -> bool:
@@ -1409,6 +1696,7 @@ class SyncSession:
                 await self._safe_release_stream()
                 return False
             self._delay_buf.clear()  # drop stale frames buffered before the drop
+            self._applied_delay_ms = None  # re-adopt, don't slew across the gap
             self._safety.reset()  # field history is stale after the gap
             self._safety_relaxed.reset()
             self._last_safe_t = None
@@ -1471,21 +1759,30 @@ class SyncSession:
         self._mapper.ensure(key, next_url)
 
     def _audible_position(self) -> float | None:
-        """The player's reported audible position (s): media_position + elapsed.
+        """Where the *speakers* are in the song, in seconds.
 
-        Distinct from :meth:`_analysis_position` — this is where the *speakers*
-        are, never the analysis playhead — so the calibrator can compare the two.
+        Distinct from :meth:`_analysis_position`, which is where our analysis
+        playhead is — the calibrator compares the two.
+
+        The playback clock owns this: it is anchored on exact Sendspin progress
+        reports when they are available and on Home Assistant player state
+        otherwise, and it holds a drift-corrected rate rather than assuming 1.0x.
+        The raw-attribute path below is the fallback for the moments before the
+        clock has anything to anchor to.
         """
         src = self._source
         if src is None:
             return None
+        pos = self._clock.position(time.monotonic())
+        if pos is not None and self._clock.playing:
+            return pos
         state = self._hass.states.get(src.entity_id)
         if state is None or state.state != "playing":
             return None
-        pos = state.attributes.get("media_position")
-        if pos is None:
+        raw = state.attributes.get("media_position")
+        if raw is None:
             return None
-        live = float(pos)
+        live = float(raw)
         updated = state.attributes.get("media_position_updated_at")
         if updated is not None:
             try:
@@ -1494,37 +1791,73 @@ class SyncSession:
                 pass
         return live
 
-    def _feed_timing_calibrator(self, beatgrid: BeatGrid | None, dt: float) -> None:
-        """Sample the analyser-vs-audible gap into the per-song timing calibrator.
+    def _auto_timing_mode(self) -> str:
+        """What auto timing can honestly do on the current source.
 
-        The analyser playhead is the live tap's decoded position (or a map
-        source's own analysis position); the audible reference is the player's
-        media position. ``expected_lead`` is the seek-ahead the source already
-        intends, so the no-hang deviation is ~0 and the working baseline stays.
+        Being explicit matters: the card used to spin "Auto" forever on sources
+        where nothing was ever going to be measured, while also disabling the
+        manual steppers — so the user had no control and no explanation.
+
+        * ``measuring`` — the live tap's decoder starts at ``position + latency``
+          and paces itself, so startup slippage is a real, observable quantity.
+        * ``tracking``  — track-map playback is *driven* by the playback clock,
+          so alignment is guaranteed by construction. Measuring the clock's own
+          residual would just be measuring a number it is driving to zero.
+        * ``n/a``       — snapcast reports its buffer exactly, and the metadata
+          fallback has no analyser playhead at all.
         """
         src = self._source
-        if src is None:
+        if src is None or not self._settings.auto_timing:
+            return "off"
+        if isinstance(src, MusicAssistantSource):
+            return "measuring"
+        if isinstance(src, TrackMapSource):
+            return "tracking"
+        return "n/a"
+
+    def _feed_timing_calibrator(self, beatgrid: BeatGrid | None, dt: float) -> None:
+        """Sample the analyser-vs-audible gap, once per distinct player report.
+
+        ``dt`` is the honest wall delta, so the settle window is real seconds of
+        playback. The sample itself is taken only when the clock has accepted a
+        genuinely new report — see the module docstring in :mod:`.timing` for
+        why per-frame sampling produced confident nonsense.
+        """
+        self._timing_cal.tick(dt)
+        src = self._source
+        if src is None or self._auto_timing_mode() != "measuring":
             return
+        if self._clock.anchor_seq == self._cal_anchor_seq:
+            return  # no new player report since the last sample
+        self._cal_anchor_seq = self._clock.anchor_seq
+        if self._clock.confidence == CONFIDENCE_NONE or self._clock.stale:
+            return  # nothing trustworthy to measure against
         analyzer_pos = getattr(src, "decoded_position", None)
-        if analyzer_pos is None:
-            analyzer_pos = getattr(src, "analysis_position", None)
-        lead_ms = getattr(src, "playback_lead_ms", 0) or 0
-        expected_lead_s = (
-            lead_ms if lead_ms > 0 else self._settings.latency_ms
-        ) / 1000.0
-        beat_period_s = (
-            60.0 / beatgrid.bpm
-            if beatgrid is not None and beatgrid.locked and beatgrid.bpm > 0
-            else None
+        audible = self._audible_position()
+        if analyzer_pos is None or audible is None:
+            return
+        # The same playback_lead_ms drives the applied baseline in
+        # _target_delay_ms, so the two can no longer disagree about how far
+        # ahead the source is running (they used to, by 50 ms).
+        lead_s = (getattr(src, "playback_lead_ms", 0) or 0) / 1000.0
+        before = self._timing_cal.offset_ms
+        self._timing_cal.observe(
+            (analyzer_pos - audible - lead_s) * 1000.0,
+            beat_period_s=(
+                60.0 / beatgrid.bpm
+                if beatgrid is not None and beatgrid.locked and beatgrid.bpm > 0
+                else None
+            ),
         )
-        self._timing_cal.update(
-            dt,
-            analyzer_pos=analyzer_pos,
-            audible_pos=self._audible_position(),
-            expected_lead_s=expected_lead_s,
-            playing=True,
-            beat_period_s=beat_period_s,
-        )
+        after = self._timing_cal.offset_ms
+        if after is not None and after != before:
+            spread = self._timing_cal.spread_ms
+            _LOGGER.debug(
+                "%s auto timing %+d ms (n=%d spread=%s settled=%s)",
+                self._config.name, after, self._timing_cal.samples,
+                "?" if spread is None else f"{spread:.0f} ms",
+                self._timing_cal.settled,
+            )
 
     def _analysis_position(self) -> float | None:
         """The track position our *analysis frames* currently correspond to.
@@ -1540,6 +1873,10 @@ class SyncSession:
         own = getattr(src, "analysis_position", None)
         if own is not None:
             return float(own)
+        lead_ms = getattr(src, "playback_lead_ms", 0) or 0
+        live = self._clock.position(time.monotonic())
+        if live is not None:
+            return live + lead_ms / 1000.0
         state = self._hass.states.get(src.entity_id)
         if state is None:
             return None
@@ -1553,7 +1890,6 @@ class SyncSession:
                 live += max(0.0, (dt_util.utcnow() - updated).total_seconds())
             except (TypeError, ValueError):
                 pass
-        lead_ms = getattr(src, "playback_lead_ms", 0) or 0
         return live + lead_ms / 1000.0
 
     def _apply_track_map(self, structure) -> BeatGrid | None:
@@ -1777,14 +2113,22 @@ class SyncSession:
             # The rungs Auto may pick from, so the card can show/drive the
             # enabled-set checklist.
             state["auto_levels"] = [str(m) for m in self._settings.auto_levels]
-        # Auto timing: surface the live calibrated correction + lock state so the
-        # card's Timing control can show "Auto ⟳ / Auto +120 ms".
+        # Auto timing: surface the live correction and what auto can honestly
+        # do on this source, so the card can show "Auto ✓ / Auto +120 ms / —"
+        # instead of spinning forever on sources with nothing to measure.
         if self._settings.auto_timing:
             state["auto_timing"] = True
+            state["auto_timing_mode"] = self._auto_timing_mode()
             off = self._timing_cal.offset_ms
             if off is not None:
                 state["timing_auto_ms"] = off
-            state["timing_locked"] = self._timing_cal.locked
+            state["timing_locked"] = self._timing_cal.settled
+        # The effective delay actually being applied, quantised to 10 ms:
+        # _maybe_publish only writes on change, so an exact value would churn
+        # the recorder every second. The unrounded figure lives in ws_meta.
+        if self._applied_delay_ms is not None:
+            state["timing_applied_ms"] = int(round(self._applied_delay_ms / 10.0) * 10)
+        state["clock_source"] = self.clock_diagnostics()["source"]
         if self._map_section is not None:
             # Current track-map section loudness (0..1) for dashboards.
             state["section_energy"] = round(self._map_section.energy, 2)
@@ -1824,16 +2168,18 @@ class SyncSession:
         (re-published only when it shifts meaningfully), so steady tempo doesn't
         churn the recorder.
         """
-        pos = attrs.get("media_position")
-        if pos is None:
-            return None
-        live = float(pos)
-        updated = attrs.get("media_position_updated_at")
-        if updated is not None:
-            try:
-                live += max(0.0, (dt_util.utcnow() - updated).total_seconds())
-            except (TypeError, ValueError):
-                pass
+        live = self._clock.position(time.monotonic())
+        if live is None:
+            pos = attrs.get("media_position")
+            if pos is None:
+                return None
+            live = float(pos)
+            updated = attrs.get("media_position_updated_at")
+            if updated is not None:
+                try:
+                    live += max(0.0, (dt_util.utcnow() - updated).total_seconds())
+                except (TypeError, ValueError):
+                    pass
         # The track map knows the beats at the *audible* position directly; the
         # live grid's phase refers to the analysis playhead (which leads the
         # speakers on a snapcast tap), so the map is both simpler and righter.
@@ -1876,6 +2222,9 @@ class SyncSession:
         """
         self._stopping = True
         self._running = False
+        # Synchronous, non-blocking, never raises: drop the player listener and
+        # the Sendspin socket before anything that can await.
+        self._watch_player(None)
         task = self._task
         self._task = None
         if task is not None:
@@ -1977,6 +2326,7 @@ class SyncManager:
         self.configs: dict[str, EntertainmentConfig] = {c.id: c for c in configs}
         self.enabled_areas: list[str] = list(entry.data.get(CONF_AREAS, []))
         self._snapserver_host: str = entry.options.get(CONF_SNAPSERVER_HOST, "") or ""
+        self._sendspin_host: str = entry.options.get(CONF_SENDSPIN_HOST, "") or ""
         self._restore_lights: bool = bool(
             entry.options.get(CONF_RESTORE_LIGHTS, DEFAULT_RESTORE_LIGHTS)
         )
@@ -2240,6 +2590,7 @@ class SyncManager:
             self.hass, self.bridge, self._host, self._app_key, self._client_key,
             self._ffmpeg, config, self.get_settings(area_id),
             snapserver_host=self._snapserver_host,
+            sendspin_host=self._sendspin_host,
             restore_lights=self._restore_lights,
             subsonic=self._subsonic,
             on_finished=lambda: self._on_session_finished(area_id),

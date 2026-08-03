@@ -1,50 +1,66 @@
-"""Per-song light-timing auto-calibration.
+"""Per-song light-timing calibration and the applied-delay slew limiter.
 
-The live tap anchors its real-time clock at track start, then the decoder spins
-up for a *variable* amount of time — so some songs begin with a small residual
-offset between the analysed audio and what the speakers actually play (the
-"startup hang" the user otherwise trims by hand). This estimates that offset and
-holds it for the track.
+The live Music Assistant tap anchors its real-time clock at track start, then
+the decoder spins up for a *variable* amount of time — so some songs begin with
+a small residual offset between the analysed audio and what the speakers
+actually play (the "startup hang" the user otherwise trims by hand). The
+calibrator estimates that offset.
 
-The signal is how much the analyser's playhead (``analyzer_pos``) leads the
-player's reported audible position (``audible_pos``) *beyond the seek-ahead the
-source already intends* (``expected_lead_s``). In the no-hang case the analyser
-leads by exactly that intended amount, so the measured deviation is ~0 and the
-working baseline delay is left untouched. When the decoder stalls at startup its
-paced playhead slips ahead, the deviation grows, and that surplus is the extra
-delay to apply — exactly the manual trim, found automatically. It is
-deliberately robust (median, outlier rejection) because some players report a
-jumpy ``media_position``; noisy data simply settles the correction near 0.
+The signal is how much the analyser's playhead leads the audible position
+*beyond the seek-ahead the source already intends*. In the no-hang case the
+analyser leads by exactly that intended amount, the deviation is ~0, and the
+working baseline delay is left untouched.
 
-Pure logic, no Home Assistant imports, so the settling / locking / clamping is
-unit-tested directly. This only chooses a *delay*; it never changes how a frame
-is rendered.
+Two properties are load-bearing and easy to lose:
+
+**One sample per player report, never per render frame.** The player's position
+between reports is our own arithmetic, not new information. Sampling it at 50 fps
+turns a single measurement into fifty identical ones, which produces a beautifully
+tight median-and-MAD around a number that may simply be wrong — the estimator
+convinces itself a guess is a well-agreed estimate. Callers must feed
+:meth:`~TimingCalibrator.observe` only when the player genuinely reported
+something new; :meth:`~TimingCalibrator.tick` carries wall time separately.
+
+**Nothing locks permanently.** The committed value is held through a hysteresis
+band so it does not twitch, but it can always re-open: tracks change, players
+seek, and a value that was right for song one has no claim on song two.
+
+Pure logic, no Home Assistant imports, so the settling, robustness and clamping
+are unit-tested directly. This only ever chooses a *delay*; it never changes how
+a frame is rendered.
 """
 
 from __future__ import annotations
 
 from collections import deque
+from typing import Final
 
 from .const import TIMING_BUFFER_MS
 
-# Settle over the first few seconds of steady playback, then lock for the track.
-_SETTLE_S = 4.0
-# Force a lock even if the estimate stays noisy, so a jumpy player still ends up
-# on a stable value instead of drifting all song.
-_HARD_LOCK_S = 8.0
-_MIN_SAMPLES = 10          # need this many before a normal (spread-gated) lock
-_PROVISIONAL_MIN = 3       # emit a provisional value this early so the start aligns
-# Reject a raw sample this far from the running median (a position glitch / seek).
-_OUTLIER_MS = 400.0
-# Lock once the sample spread (MAD) is under this — or under ~this fraction of a
-# beat when a track map supplies the beat period (a musically-meaningful bound).
-_LOCK_SPREAD_MS = 35.0
-_LOCK_BEAT_FRAC = 0.15
-# Applied-delay clamp. Delaying (analysis leads sound — the startup-hang case) is
-# unbounded; advancing is only possible within the baseline delay buffer.
-_CLAMP_LO_MS = -TIMING_BUFFER_MS
-_CLAMP_HI_MS = 400
-_MAX_SAMPLES = 320         # ~settle window at 50 fps, bounded
+_MIN_OBS: Final = 4
+"""A median of four rejects one outlier — the smallest honestly robust set."""
+
+_MIN_SPAN_S: Final = 2.0
+"""...and they must not all arrive in one burst, or the "spread" is meaningless."""
+
+_PROVISIONAL_OBS: Final = 2
+"""Emit a value this early so the *start* of a track is already roughly right."""
+
+_OUTLIER_MS: Final = 400.0
+"""Reject a sample this far from the running median (a position glitch/seek)."""
+
+_HYST_MS: Final = 25.0
+"""Re-commit only when the estimate has moved enough to *see*: below the ~50 ms
+audio-visual asynchrony floor, above the 20 ms analysis frame period."""
+
+_LOCK_BEAT_FRAC: Final = 0.15
+"""When a track map supplies the beat period, judge spread against a musically
+meaningful bound rather than a fixed millisecond count."""
+
+_MAX_OBS: Final = 24
+"""A rolling window of real reports (~24 s on a player reporting at 1 Hz)."""
+
+_DEFAULT_CLAMP_HI_MS: Final = 400.0
 
 
 def _median(values: list[float]) -> float:
@@ -59,78 +75,113 @@ def _mad(values: list[float], centre: float) -> float:
     return _median([abs(v - centre) for v in values])
 
 
-class TimingCalibrator:
-    """Estimate and lock the per-song light delay from the analyser/sound gap."""
+def slew_toward(current: float | None, target: float, dt: float, rate: float) -> float:
+    """Move ``current`` toward ``target`` by at most ``rate`` per second.
 
-    def __init__(self) -> None:
+    ``None`` adopts the target immediately, which is what a genuine
+    discontinuity wants (nothing buffered to protect). ``dt`` is clamped so a
+    stalled loop cannot authorise one large step.
+    """
+    if current is None:
+        return target
+    step = rate * min(0.25, max(0.0, dt))
+    delta = target - current
+    return current + max(-step, min(step, delta))
+
+
+class TimingCalibrator:
+    """Estimate the source's residual analysis-lead error, in milliseconds."""
+
+    def __init__(
+        self,
+        *,
+        clamp_lo_ms: float = -TIMING_BUFFER_MS,
+        clamp_hi_ms: float = _DEFAULT_CLAMP_HI_MS,
+    ) -> None:
+        self._lo = float(clamp_lo_ms)
+        self._hi = float(clamp_hi_ms)
         self.reset()
 
     def reset(self) -> None:
-        """Forget the current track (call on every track change)."""
-        self._samples: deque[float] = deque(maxlen=_MAX_SAMPLES)
-        self._elapsed = 0.0          # seconds of steady playback sampled
-        self._value: float | None = None  # current applied offset (ms), or None
-        self._locked = False
+        """Forget the current track. Called on every track change and seek."""
+        self._obs: deque[tuple[float, float]] = deque(maxlen=_MAX_OBS)  # (t, dev_ms)
+        self._elapsed = 0.0
+        self._value: float | None = None
+        self._settled = False
+
+    def set_clamp(self, lo_ms: float, hi_ms: float) -> None:
+        """Bound the correction to what the delay buffer can actually apply.
+
+        Advancing is only possible within the baseline delay, which varies by
+        source, so the caller supplies it rather than assuming one value.
+        """
+        self._lo, self._hi = float(lo_ms), float(hi_ms)
+        if self._value is not None:
+            self._value = self._clamp(self._value)
+
+    # -- state ---------------------------------------------------------------
 
     @property
     def offset_ms(self) -> int | None:
-        """The delay to apply (ms), or ``None`` before a value exists."""
+        """The correction to apply (ms), or None before a value exists."""
         return None if self._value is None else int(round(self._value))
 
     @property
-    def locked(self) -> bool:
-        return self._locked
+    def settled(self) -> bool:
+        """True once the estimate is stable enough to present as a number."""
+        return self._settled
 
-    def update(
-        self,
-        dt: float,
-        *,
-        analyzer_pos: float | None,
-        audible_pos: float | None,
-        expected_lead_s: float,
-        playing: bool,
-        beat_period_s: float | None = None,
-    ) -> None:
-        """Feed one frame. Holds its value once locked or when data is missing.
+    # The card reads `timing_locked`; the name is kept, the meaning is now
+    # "settled" rather than "locked forever".
+    locked = settled
 
-        ``expected_lead_s`` is the seek-ahead the source already intends (so the
-        no-hang deviation is ~0); the resulting offset is a *correction added to*
-        the existing baseline delay, never a replacement for it.
-        """
-        if self._locked:
-            return
-        if not playing or analyzer_pos is None or audible_pos is None:
-            return
+    @property
+    def samples(self) -> int:
+        return len(self._obs)
 
-        # Surplus lead beyond the intended seek-ahead: the startup slippage.
-        raw = (analyzer_pos - audible_pos - expected_lead_s) * 1000.0
-        if self._samples:
-            centre = _median(list(self._samples))
-            if abs(raw - centre) > _OUTLIER_MS:
-                return  # a position glitch / seek — don't poison the estimate
-        self._samples.append(raw)
+    @property
+    def spread_ms(self) -> float | None:
+        if len(self._obs) < _MIN_OBS:
+            return None
+        vals = [d for _, d in self._obs]
+        return _mad(vals, _median(vals))
+
+    # -- feeding -------------------------------------------------------------
+
+    def tick(self, dt: float) -> None:
+        """Advance the settle clock with the honest wall ``dt``."""
         self._elapsed += max(0.0, dt)
 
-        if len(self._samples) < _PROVISIONAL_MIN:
+    def observe(self, deviation_ms: float, *, beat_period_s: float | None = None) -> None:
+        """Fold in one genuinely independent measurement."""
+        if self._obs:
+            centre = _median([d for _, d in self._obs])
+            if abs(deviation_ms - centre) > _OUTLIER_MS:
+                return  # a position glitch / seek — don't poison the estimate
+        self._obs.append((self._elapsed, deviation_ms))
+
+        n = len(self._obs)
+        if n < _PROVISIONAL_OBS:
+            return
+        vals = [d for _, d in self._obs]
+        centre = _median(vals)
+
+        if self._value is None:
+            self._value = self._clamp(centre)  # provisional: applied at once
             return
 
-        vals = list(self._samples)
-        centre = _median(vals)
-        self._value = _clamp(centre)  # provisional: applied immediately
+        span = self._obs[-1][0] - self._obs[0][0]
+        if n < _MIN_OBS or span < _MIN_SPAN_S:
+            return
 
-        # Normal lock: enough settled samples AND a tight spread.
-        spread_gate = _LOCK_SPREAD_MS
+        gate = _HYST_MS
         if beat_period_s and beat_period_s > 0:
-            spread_gate = max(_LOCK_SPREAD_MS, _LOCK_BEAT_FRAC * beat_period_s * 1000.0)
-        settled = self._elapsed >= _SETTLE_S and len(self._samples) >= _MIN_SAMPLES
-        if settled and _mad(vals, centre) <= spread_gate:
-            self._value = _clamp(centre)
-            self._locked = True
-        elif self._elapsed >= _HARD_LOCK_S:
-            # Noisy player: stop chasing it and commit the best estimate we have.
-            self._value = _clamp(centre)
-            self._locked = True
+            gate = max(_HYST_MS, _LOCK_BEAT_FRAC * beat_period_s * 1000.0)
+        # Move only when the change would be visible; otherwise hold, so a
+        # steady estimate does not twitch the show every report.
+        if abs(centre - self._value) > gate:
+            self._value = self._clamp(centre)
+        self._settled = _mad(vals, centre) <= gate
 
-
-def _clamp(ms: float) -> float:
-    return max(_CLAMP_LO_MS, min(_CLAMP_HI_MS, ms))
+    def _clamp(self, ms: float) -> float:
+        return max(self._lo, min(self._hi, ms))

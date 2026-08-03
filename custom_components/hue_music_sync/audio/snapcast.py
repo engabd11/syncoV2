@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from ..const import ANALYSIS_HOP
+from ..const import ANALYSIS_HOP, ANALYSIS_SAMPLE_RATE
 from .analyzer import AnalysisFrame, Analyzer
 
 if TYPE_CHECKING:
@@ -44,6 +44,7 @@ CONTROL_PORT = 1705
 STREAM_PORT = 1704
 CLIENT_ID = "hue_music_sync"
 _HOP_BYTES = ANALYSIS_HOP * 2  # s16le mono
+_FRAME_PERIOD_MS = ANALYSIS_HOP / ANALYSIS_SAMPLE_RATE * 1000.0  # ~20 ms
 
 # Snapcast message types
 _T_CODEC_HEADER = 1
@@ -141,16 +142,25 @@ class SnapcastSource:
         self._track_id: str | None = None
         self._meta_ts = 0.0
         self._buffer_ms = DEFAULT_BUFFER_MS  # updated from ServerSettings
+        self._lead_ema: float | None = None
 
     @property
     def playback_lead_ms(self) -> int:
         """How far this tap's analysis runs ahead of the audible sound.
 
         Snapcast clients play each chunk ``bufferMs`` after its server
-        timestamp; we decode chunks the moment they arrive, so our feature
-        frames lead the speakers by the server's buffer.
+        timestamp, so decoded frames lead the speakers by the server's buffer —
+        *less* whatever has already aged in our own decode queue. A frame
+        waiting behind four others is four frame periods older than it looks,
+        and ignoring that was unmodelled lag. Smoothed, because queue depth
+        varies frame to frame and the baseline should not.
         """
-        return self._buffer_ms
+        queued_ms = self._frames.qsize() * _FRAME_PERIOD_MS
+        lead = max(0.0, self._buffer_ms - queued_ms)
+        self._lead_ema = (
+            lead if self._lead_ema is None else self._lead_ema + 0.1 * (lead - self._lead_ema)
+        )
+        return int(round(self._lead_ema))
 
     @property
     def entity_id(self) -> str:

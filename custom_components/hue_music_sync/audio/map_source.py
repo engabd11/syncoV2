@@ -9,11 +9,17 @@ integration uses. The runtime cost is an array lookup per frame (cheaper than a
 live ffmpeg decode), and beats come from the offline DP tracker, so universal
 support arrives with *better* timing, not worse.
 
-A position PLL smooths the player's coarse position reports: an internal clock
-free-runs at 1.0× and is gently pulled toward the reported position, snapping
-only on real seeks. Frames are generated slightly *ahead* of the audible
-position so the standard delay buffer + light pipeline land photons on the
-beat.
+The playhead comes from the shared :class:`~.clock.PlaybackClock` — anchored on
+Sendspin's exact timestamped progress when that feed is up, and on Home
+Assistant player state otherwise. Frames are generated slightly *ahead* of the
+audible position so the standard delay buffer + light pipeline land photons on
+the beat.
+
+This used to be a private proportional PLL advancing off a frame counter, which
+lagged whenever the render loop did (and settled just under its own snap
+threshold, where the lag became permanent and invisible), had no rate state to
+cancel player-vs-host clock skew, and took ~8 s to absorb a 250 ms glitch. The
+clock fixes all three; see :mod:`.clock` for the control law.
 
 While the map for the current track is still being analysed (a few seconds),
 gentle metadata-style frames keep the lights alive; the source upgrades itself
@@ -32,6 +38,7 @@ from homeassistant.util import dt as dt_util
 
 from ..const import ANALYSIS_HOP, ANALYSIS_SAMPLE_RATE, BANDS, LIGHT_PIPELINE_MS, TIMING_BUFFER_MS
 from .analyzer import AnalysisFrame
+from .clock import PlaybackClock
 from .library_match import LibraryEntry
 from .source import (
     ha_track_query,
@@ -40,6 +47,8 @@ from .source import (
     track_label,
     track_signature,
 )
+
+__all__ = ["TrackMapSource"]
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -56,22 +65,36 @@ _FRAME_PERIOD = ANALYSIS_HOP / ANALYSIS_SAMPLE_RATE
 # +-TIMING_BUFFER_MS user trim available.
 _AHEAD_MS = TIMING_BUFFER_MS + LIGHT_PIPELINE_MS
 
-# Position PLL: gentle pull toward the reported position on each poll; a
-# larger error than the snap threshold is a seek and re-anchors immediately.
-_POS_GAIN = 0.15
-_POS_SNAP_S = 0.40
+# Safety-net poll. The coordinator's state listener normally feeds the clock the
+# instant Home Assistant writes a new position; this only covers a session
+# running without one (and costs nothing when it does, because the clock ignores
+# a report it has already seen).
 _POS_POLL_S = 0.5
+
+# If the render loop falls this far behind its frame deadline, re-base the pacing
+# clock instead of burning a burst of catch-up frames: the position comes from
+# the playback clock now, so there is nothing to catch up *to*.
+_PACE_RESET_S = 0.25
 
 
 class TrackMapSource:
     """Analysis-frame playback for players with no tappable audio stream."""
 
     def __init__(
-        self, hass: HomeAssistant, entity_id: str, mapper: TrackMapper, subsonic=None
+        self,
+        hass: HomeAssistant,
+        entity_id: str,
+        mapper: TrackMapper,
+        subsonic=None,
+        clock: PlaybackClock | None = None,
     ) -> None:
         self._hass = hass
         self._entity_id = entity_id
         self._mapper = mapper
+        # Normally the session's shared clock (so the Sendspin feed and the
+        # coordinator's state listener drive it); default-constructed when this
+        # source is used standalone, which keeps it independently testable.
+        self._clock = clock if clock is not None else PlaybackClock(entity_id)
         self._subsonic = subsonic  # (url, user, password) for OpenSubsonic, or None
         self._lib = library_index(hass, subsonic)
         # The map key: the matched library track's signature once we know it
@@ -81,12 +104,13 @@ class TrackMapSource:
         self._label: str | None = None  # "Artist - Title" for failure records
         self._native_url: str | None = None  # per-track URL from MA, if it has one
         self._album_art_url: str | None = None
-        self._pos = 0.0  # smoothed audible position (PLL clock)
+        self._last_pos: float | None = None  # last playhead served (for placeholders)
         self._prev_query: float | None = None  # last frame_at position queried
         self._frames = 0
         self._wall0 = 0.0
         self._last_poll = 0.0
         self._last_meta = 0.0
+        self._seen_track_seq = -1
 
     @property
     def entity_id(self) -> str:
@@ -106,30 +130,41 @@ class TrackMapSource:
         return _AHEAD_MS
 
     @property
-    def analysis_position(self) -> float:
+    def analysis_position(self) -> float | None:
         """The track position the current analysis frames correspond to."""
-        return self._pos + _AHEAD_MS / 1000.0
+        pos = self._clock.position(time.monotonic())
+        return None if pos is None else pos + _AHEAD_MS / 1000.0
 
     # -- player state -------------------------------------------------------
 
     def _state(self):
         return self._hass.states.get(self._entity_id)
 
-    def _reported_position(self) -> float | None:
+    def _ingest_state(self) -> None:
+        """Feed the player's current report to the clock (safety net).
+
+        The coordinator's state listener normally does this the moment Home
+        Assistant writes a new position. The clock ignores a report whose
+        ``media_position_updated_at`` it has already seen, so calling this on a
+        timer costs nothing when the listener is doing its job.
+        """
         st = self._state()
-        if st is None or st.state not in ("playing", "paused"):
-            return None
-        pos = st.attributes.get("media_position")
-        if pos is None:
-            return None
-        live = float(pos)
-        updated = st.attributes.get("media_position_updated_at")
-        if st.state == "playing" and updated is not None:
-            try:
-                live += max(0.0, (dt_util.utcnow() - updated).total_seconds())
-            except (TypeError, ValueError):
-                pass
-        return live
+        if st is None:
+            self._clock.note_unavailable()
+            return
+        attrs = st.attributes
+        self._clock.observe(
+            state=st.state,
+            media_position=attrs.get("media_position"),
+            updated_at=attrs.get("media_position_updated_at"),
+            track_key=track_signature(
+                attrs.get("media_content_id"),
+                attrs.get("media_artist"),
+                attrs.get("media_title"),
+            ),
+            now_mono=time.monotonic(),
+            now_wall=dt_util.utcnow(),
+        )
 
     def _refresh_meta(self) -> None:
         st = self._state()
@@ -149,12 +184,8 @@ class TrackMapSource:
             self._label = track_label(
                 attrs.get("media_artist"), attrs.get("media_title")
             )
-            self._prev_query = None
-            # Re-anchor the replay clock to the new song immediately (it starts
-            # near 0) so we don't replay the previous track's position into it.
-            reported = self._reported_position()
-            if reported is not None:
-                self._pos = reported
+            # The clock owns re-anchoring on a track change (and knows not to
+            # extrapolate the new song from the old song's timestamp).
             # Music Assistant's own per-track URL, if this player has one. When it
             # doesn't (a player MA doesn't own), matching the song in the MA
             # library is the only route to its audio — and the only players that
@@ -234,9 +265,10 @@ class TrackMapSource:
             tm = await self._mapper.ensure_ready(self._track_id, url, self._label)
             if tm is None and url is None:
                 return False  # radio/flow & never analysed: nothing to play
-        pos = self._reported_position()
-        self._pos = pos if pos is not None else 0.0
+        self._ingest_state()
+        self._last_pos = self._clock.position(time.monotonic())
         self._prev_query = None
+        self._seen_track_seq = self._clock.track_seq
         self._frames = 0
         self._wall0 = time.monotonic()
         _LOGGER.info(
@@ -251,33 +283,45 @@ class TrackMapSource:
         # Pace to wall clock (deadline-based, like the live sources).
         self._frames += 1
         target = self._wall0 + self._frames * _FRAME_PERIOD
-        delay = target - time.monotonic()
-        if delay > 0:
-            await asyncio.sleep(delay)
-
         now = time.monotonic()
-        # Refresh on the same cadence as the position poll: on a gapless boundary
-        # the track id changes here and re-anchors the clock, so the smaller this
-        # is the shorter the window where the *previous* track's map is queried.
-        if now - self._last_meta >= _POS_POLL_S:
+        if target > now:
+            await asyncio.sleep(target - now)
+            now = target
+        elif now - target > _PACE_RESET_S:
+            # Badly behind (event-loop congestion, a slow render). Re-base
+            # rather than sprint through catch-up frames: the playhead comes
+            # from the clock, so racing the counter would only burn CPU.
+            self._wall0 = now - self._frames * _FRAME_PERIOD
+
+        # React to a track change the instant the clock sees one, rather than
+        # up to half a second later: that window is exactly how long the
+        # *previous* song's map used to be replayed into the new one.
+        if self._clock.track_seq != self._seen_track_seq:
+            self._seen_track_seq = self._clock.track_seq
+            self._last_meta = now
+            self._refresh_meta()
+        elif now - self._last_meta >= _POS_POLL_S:
             self._last_meta = now
             self._refresh_meta()
 
-        # Advance the PLL clock; periodically pull it toward the reported
-        # position (gently, so coarse position reports can't cause stutter).
-        self._pos += _FRAME_PERIOD
         if now - self._last_poll >= _POS_POLL_S:
             self._last_poll = now
-            reported = self._reported_position()
-            if reported is not None:
-                err = reported - self._pos
-                if abs(err) > _POS_SNAP_S:  # seek / gross drift: re-anchor
-                    self._pos = reported
-                    self._prev_query = None
-                else:
-                    self._pos += _POS_GAIN * err
+            self._ingest_state()
 
-        query = self._pos + _AHEAD_MS / 1000.0
+        pos = self._clock.position(now)
+        if pos is None:
+            # Awaiting a fresh anchor (first frames, or just after a track
+            # change): keep the lights breathing rather than freezing.
+            self._prev_query = None
+            return self._placeholder_frame(self._last_pos or 0.0)
+        if self._clock.take_discontinuity():
+            # The timeline jumped. Dropping prev_query is deliberate: beats
+            # between the old and new positions were never heard, so firing
+            # them would flash the room for music that did not play.
+            self._prev_query = None
+        self._last_pos = pos
+
+        query = pos + _AHEAD_MS / 1000.0
         tm = self._mapper.get(self._track_id)
         frame = tm.frame_at(query, self._prev_query) if tm is not None else None
         self._prev_query = query
