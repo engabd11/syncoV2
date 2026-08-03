@@ -619,9 +619,9 @@ class SyncSession:
         """When Auto is selected, resolve the music to a rung and apply it.
 
         Feeds the live features (loudness, salience, tempo, beat) to the musical
-        picker, which spreads them ACROSS the user's enabled set
-        (``settings.auto_levels``): calm passages sit on the lowest enabled rung,
-        big moments reach the highest. The picker owns its own smoothing,
+        picker, which places the moment on the band of the ladder the SONG's
+        character earns and then on the user's enabled set
+        (``settings.auto_levels``). The picker owns its own smoothing,
         hysteresis and dwell, so this only reacts on an actual change.
         """
         if self._settings.mode is not SyncMode.AUTO:
@@ -629,8 +629,9 @@ class SyncSession:
         bpm = beatgrid.bpm if beatgrid is not None and beatgrid.locked else 0.0
         # The song's own intensity profile (offline map playback stamps it on the
         # frame; live tap / metadata leave the neutral defaults, so the picker
-        # keeps its fixed window). It spreads the enabled rungs across THIS song's
-        # quiet↔loud range and shades the pick by its mood.
+        # falls back to its fixed window and estimates character itself). It says
+        # where in THIS song's quiet↔loud range the moment sits and shades the
+        # pick by its mood.
         prof_kw = {}
         if frame.intensity_lo is not None and frame.intensity_hi is not None:
             prof_kw = dict(
@@ -646,6 +647,13 @@ class SyncSession:
             bpm=bpm,
             beat=frame.beat,
             allowed=self._settings.auto_levels,
+            # How hard the song goes, absolute: sets the band of the ladder it
+            # may use. None off a live tap → the picker estimates it from the
+            # three below, which is why they're passed unconditionally.
+            character=frame.intensity_character,
+            onset_width=frame.onset_width,
+            centroid=frame.centroid,
+            flux=frame.flux,
             # Offline lag-free section-intensity (map playback): mapped directly so
             # the rung switch lands on time. None on live/metadata → picker smooths.
             signal=frame.intensity_signal,

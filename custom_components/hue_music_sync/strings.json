@@ -117,7 +117,7 @@
         },
         "auto_levels": {
           "name": "Auto rungs",
-          "description": "With mode auto, the intensities the picker may choose from. It climbs into Intense/Extreme only if included and the moment earns it."
+          "description": "With mode auto, the intensities the picker may choose from. The ladder is rescaled onto your selection, so a heavy track reaches the top of it and a chill one stays low. Intense/Extreme need the song itself to earn them, not just a loud moment."
         },
         "auto_timing": {
           "name": "Auto timing",
@@ -155,7 +155,7 @@
         },
         "auto_levels": {
           "name": "Auto rungs",
-          "description": "With mode auto, the intensities the picker may choose from. It climbs into Intense/Extreme only if included and the moment earns it."
+          "description": "With mode auto, the intensities the picker may choose from. The ladder is rescaled onto your selection, so a heavy track reaches the top of it and a chill one stays low. Intense/Extreme need the song itself to earn them, not just a loud moment."
         },
         "auto_timing": {
           "name": "Auto timing",

@@ -56,9 +56,13 @@ from ..util import redact_url
 # its percentile window matches what the live picker actually reaches. This is a
 # leaf import (effects.modes only depends on const + color) — no import cycle.
 from ..effects.modes import (
+    _CHAR_ATTACK_HI,
+    _CHAR_ATTACK_LO,
+    _CHAR_BUSY_FULL,
     _PICK_BEAT_FULL,
     _PICK_BPM_HI,
     _PICK_BPM_LO,
+    song_character,
 )
 from .analyzer import (
     LONG_FLUX_FLOOR_FRAC,
@@ -279,11 +283,12 @@ _PROFILE_LOOKAHEAD_S = 0.35
 class IntensityProfile:
     """Per-song Auto-intensity shaping, derived from the cached features.
 
-    Lets the Auto picker spread the enabled rungs across THIS song's own quiet↔
-    loud range (not one fixed global window), slide the operating point by the
-    song's character, and — via ``curve`` — switch rungs *on time*. Cheap to
-    derive from :class:`TrackFeatures`, so the existing pre-warmed library gets it
-    on load with **no re-analysis**.
+    Tells the Auto picker two things: how hard this song goes on an absolute
+    scale (``character``, which sets the band of the ladder it may use), and
+    where each moment sits within its own quiet↔loud range (the window plus
+    ``curve``, which also makes rung switches land *on time*). Cheap to derive
+    from :class:`TrackFeatures`, so the existing pre-warmed library gets it on
+    load with **no re-analysis**.
     """
 
     sig_lo: float    # ~p10 of the song's section-intensity curve (window floor)
@@ -291,6 +296,11 @@ class IntensityProfile:
     dynamics: float  # true p95-p10 span: how much the song actually moves (0..1)
     tilt: float      # spectral balance, -1 (bright) .. +1 (bass-heavy), 0 neutral
     tempo: float     # bpm mapped 0 (ballad) .. 1 (club) over _PICK_BPM_LO.._HI
+    # How hard this song goes, on an ABSOLUTE 0..1 scale comparable across
+    # tracks (see effects.modes.song_character). This is what decides the band
+    # of the ladder Auto may use for it — the window above only says where each
+    # moment sits *within* that band. 0.5 (neutral) when it can't be derived.
+    character: float = 0.5
     # Per-frame lag-free section-intensity (0..1). The picker maps this DIRECTLY
     # (no live smoothing), so switches follow the song's real section arc with no
     # envelope lag. In-memory only (recomputed from features on load).
@@ -352,13 +362,19 @@ def build_intensity_profile(
 ) -> "IntensityProfile | None":
     """Derive a song's :class:`IntensityProfile` from its cached per-frame features.
 
-    Builds the *same* 0..1 intensity signal the live picker blends (loudness
-    gates, tempo + percussiveness lift), smooths it the same way, and takes the
-    song's own p10/p95 as the picker's normalisation window — so Auto spreads the
-    enabled rungs across THIS song's quiet↔loud span. ``dynamics`` (the true
-    p95-p10 spread) tells the picker how much of the range the song has earned;
-    ``tilt``/``tempo`` give the moderate mood shift. Pure function of the features
-    (no audio decode), so a pre-warmed library gets it for free on load.
+    Two independent things come out of this:
+
+    * ``character`` — how hard the song goes on an ABSOLUTE scale, which decides
+      the band of the ladder Auto may use for it. Built only from terms that
+      survive the per-track p95 normalisation, so a chill track scores low
+      however loud its own chorus is.
+    * the window (``sig_lo``/``sig_hi``/``dynamics``/``curve``) — where each
+      moment sits *within* that band, from the same 0..1 intensity signal the
+      live picker blends, smoothed the same way and normalised to the song's own
+      p10/p95. ``tilt``/``tempo`` also give the moderate mood shift.
+
+    Pure function of the cached features (no audio decode), so a pre-warmed
+    library gets all of it for free on load.
     """
     if features is None:
         return None
@@ -397,8 +413,41 @@ def build_intensity_profile(
         low = float(band_mean[0] + band_mean[1])            # sub_bass + bass
         high = float(band_mean[3] + band_mean[4])           # mid + high
         tilt = max(-1.0, min(1.0, (low - high) / (low + high + 1e-9)))
+    # ABSOLUTE character: how hard this song goes, on a scale that compares
+    # across tracks. Everything above is *relative* to the track itself (energy
+    # is p95-normalised at analysis, so a lofi chorus and an EDM drop both read
+    # 1.0), which is exactly why Auto used to hand the top rung to every song.
+    # These five terms survive that normalisation:
+    #   attack  — onset broadbandness is stored un-normalised (see
+    #             TrackFeatures.width): a drum kit splashes across the
+    #             filterbank, a pad or a sung tone does not.
+    #   busy    — mean onset flux: how much of the track carries strong onsets
+    #             at all. Note this is NOT beats/second — on a gridded map that
+    #             would just be bpm/60, i.e. the tempo term again, and a
+    #             half/double-time BPM lock would then swing two terms at once.
+    #   tempo   — BPM, absolute by construction.
+    #   bass    — the tilt above, folded to 0..1.
+    # Both curve-derived terms are energy-weighted, so a quiet intro doesn't get
+    # an equal vote with the body of the track.
+    wsum = float(energy.sum()) + 1e-9
+    attack = 0.5
+    width = np.asarray(features.width, dtype=np.float64)
+    if width.size == n:  # empty on pre-v2 caches -> neutral, not "pure pad"
+        mean_width = float((width * energy).sum() / wsum)
+        attack = (mean_width - _CHAR_ATTACK_LO) / (_CHAR_ATTACK_HI - _CHAR_ATTACK_LO)
+    flux = np.asarray(features.flux, dtype=np.float64)
+    busy = 0.5 * _CHAR_BUSY_FULL
+    if flux.size == n:
+        busy = float((flux * energy).sum() / wsum)
+    character = song_character(
+        tempo=tempo,
+        busy=busy / _CHAR_BUSY_FULL,
+        attack=attack,
+        bass=0.5 + 0.5 * tilt,
+    )
     return IntensityProfile(
-        sig_lo=lo, sig_hi=hi, dynamics=dynamics, tilt=tilt, tempo=tempo, curve=curve
+        sig_lo=lo, sig_hi=hi, dynamics=dynamics, tilt=tilt, tempo=tempo,
+        character=character, curve=curve,
     )
 
 
@@ -645,6 +694,7 @@ class TrackMap:
             intensity_hi=prof.sig_hi if prof is not None else None,
             intensity_dynamics=prof.dynamics if prof is not None else None,
             intensity_mood=prof.mood if prof is not None else 0.0,
+            intensity_character=prof.character if prof is not None else None,
             intensity_signal=intensity_sig,
         )
 

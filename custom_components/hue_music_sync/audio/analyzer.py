@@ -106,6 +106,11 @@ class AnalysisFrame:
     intensity_hi: float | None = None
     intensity_dynamics: float | None = None
     intensity_mood: float = 0.0
+    # How hard this SONG goes, absolute 0..1 and comparable across tracks — it
+    # decides which band of the intensity ladder Auto may use (the window above
+    # only places each moment inside that band). None on live/metadata frames:
+    # the picker then estimates it itself from the live features.
+    intensity_character: float | None = None
     # Precomputed, lag-free section-intensity for THIS frame (0..1), from the
     # offline analysis sampled slightly ahead. When present the Auto picker maps
     # it directly — no live smoothing lag — so a rung switch lands on the section

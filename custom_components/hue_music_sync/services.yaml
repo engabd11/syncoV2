@@ -24,8 +24,10 @@ activate:
     auto_levels:
       name: Auto rungs
       description: >-
-        With mode "auto", the intensities the picker may choose from. It climbs
-        into Intense/Extreme only if they are included AND the moment earns it.
+        With mode "auto", the intensities the picker may choose from. The ladder
+        is rescaled onto your selection, so a heavy track reaches the top of it
+        and a chill one stays low. Intense/Extreme need the song itself to earn
+        them, not just a loud moment.
       required: false
       selector:
         select:
@@ -129,8 +131,10 @@ set_options:
     auto_levels:
       name: Auto rungs
       description: >-
-        With mode "auto", the intensities the picker may choose from. It climbs
-        into Intense/Extreme only if they are included AND the moment earns it.
+        With mode "auto", the intensities the picker may choose from. The ladder
+        is rescaled onto your selection, so a heavy track reaches the top of it
+        and a chill one stays low. Intense/Extreme need the song itself to earn
+        them, not just a loud moment.
       required: false
       selector:
         select:

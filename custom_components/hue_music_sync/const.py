@@ -246,12 +246,23 @@ AUTO_BPM_HIGH: Final = 125.0
 AUTO_BPM_MARGIN: Final = 6.0
 
 # The intensity ladder in ascending order (Auto is the picker itself, not a
-# rung). The Auto picker maps a live musical-intensity signal onto the user's
-# enabled set, spread across *each song's own* dynamic range (measured offline —
-# see ``trackmap.build_intensity_profile``): the quiet parts sit on the lowest
-# enabled rung and the biggest moments reach the highest, so a song that breathes
-# uses every enabled rung while a flat one honestly stays compressed. Enabling
-# Intense / Extreme unlocks the ceiling; making High the lowest makes it the floor.
+# rung). Roughly what each rung is *for*:
+#
+#   Subtle   very soft music — lofi, ambient. Most songs never qualify.
+#   Medium   Subtle with a bit more movement.
+#   High     lights dance, brightness fairly steady. Soft/dance, mid vibes.
+#   Intense  lots of beats, fast melody — common on energetic tracks.
+#   Extreme  the highest peaks only, where Intense doesn't cut it.
+#
+# The Auto picker honours that by scoring how hard a song goes on an ABSOLUTE
+# scale (``effects.modes.song_character``, measured offline by
+# ``trackmap.build_intensity_profile``) and letting that decide the band of the
+# ladder the song may use; its own section arc then moves within that band. So a
+# chill track tops out low however loud its own chorus is, and only a genuinely
+# heavy one reaches Extreme. The enabled set is a palette rather than a forced
+# range: the ladder is rescaled onto whatever you selected, so a banger reaches
+# the top of your selection and a chill track doesn't — and no song has to use
+# every rung. Making High the lowest enabled rung still makes it the floor.
 INTENSITY_LADDER: Final = (
     SyncMode.SUBTLE,
     SyncMode.MEDIUM,

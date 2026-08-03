@@ -450,24 +450,37 @@ def auto_mode_for_bpm(bpm: float, current: SyncMode) -> SyncMode:
 
 
 # --- musical Auto intensity picker ------------------------------------------
-# The intensity signal is mapped across the ENABLED set: the loud parts of a
-# song reach the highest enabled rung and the quiet parts sit on the lowest, so
-# the range you pick is the range you get (add Intense/Extreme and they get
-# used; make High the lowest and it becomes the floor). BPM/mood still decide
-# *where* in that range a moment lands, via the signal itself.
+# Rungs follow the music's REAL character, not each track's self-relative
+# loudness. Three layers:
 #
-# The signal is first put on a 0..1 scale against the loudness window real music
-# actually occupies (near-silence .. a full drop) so every enabled rung is
-# reachable regardless of how many are enabled — a fast, busy track simply rides
-# higher in the band than a sparse one.
-_SIG_LO_REF = 0.25   # ~a quiet intro maps to the bottom of the enabled range
-_SIG_HI_REF = 0.88   # ~a full drop maps to the top of it
-# Anti-flicker dead-band on a band boundary (on the 0..1 normalised scale), a
-# floor on seconds between committed switches (kept long so a switch is never
-# rushed and the new rung has time to breathe), and the asymmetric smoothing on
-# the raw signal: rise reasonably quick so a drop is caught, fall slow so a
-# brief dip doesn't drop the room out of the chorus.
-_PICK_HYST = 0.07
+#   A. character — one absolute 0..1 score for the song (how percussive its
+#      onsets are, how constantly they fire, tempo, low-end weight). Built only
+#      from features that survive the analysis' per-track p95 normalisation, so
+#      it compares ACROSS songs: a lofi track scores low however loud its own
+#      chorus gets. Loudness deliberately isn't a term — it can't be one, since
+#      every track is normalised to its own peak before the picker sees it.
+#   B. the earned band — character maps to an absolute floor..ceiling on the
+#      ladder. A chill song's ceiling is Medium; only a genuinely heavy track
+#      earns a ceiling in Extreme. This is also where the floor comes from: a
+#      house track simply can't reach Subtle, with no special-casing.
+#   C. the moment — the song's own section curve moves within that band, so
+#      verse↔chorus↔drop still switches on time.
+#
+# The enabled set (``allowed``) is a PALETTE, not a forced range: the absolute
+# ladder position is remapped proportionally onto the rungs you picked, keeping
+# each rung's relative prominence. A banger reaches the top of your selection, a
+# chill track never does — and no song has to use every rung you enabled.
+_SIG_LO_REF = 0.25   # ~a quiet intro sits at the bottom of the song's band
+_SIG_HI_REF = 0.88   # ~a full drop sits at the top of it
+# Anti-flicker dead-band on a rung boundary, a floor on seconds between committed
+# switches (kept long so a switch is never rushed and the new rung has time to
+# breathe), and the asymmetric smoothing on the raw signal: rise reasonably quick
+# so a drop is caught, fall slow so a brief dip doesn't drop the room out of the
+# chorus. The dead-band is a *fraction of a cell* rather than an absolute width,
+# because rung cells are deliberately unequal (see ``_RUNG_SHARE``): a fixed
+# 0.07 would swallow narrow Extreme whole. 0.35 of the narrower neighbouring cell
+# reproduces the old feel exactly on the equal-width case it was tuned for.
+_PICK_HYST_FRAC = 0.35
 _PICK_DWELL_S = 3.5
 # A *big* move (a real drop/breakdown — the target is this many ladder rungs from
 # the current one) commits on a much shorter dwell, so the room reaches the new
@@ -479,12 +492,11 @@ _PICK_ATTACK = 0.10   # per-frame EMA weight while the signal is rising
 _PICK_DECAY = 0.03    # per-frame EMA weight while it is falling
 # Section-level smoothing used ONLY on the per-song-profile path: rung selection
 # should follow the song's *sections* (verse↔chorus↔drop), not individual beats.
-# Stretching a song's own quiet↔loud across the enabled set amplifies beat-to-
-# beat pumping, so mapping a much slower envelope keeps switches unhurried while
-# still reaching every rung on real section changes. Asymmetric like the fast
-# one (rise in ~1.2 s to catch a drop, fall over ~3.5 s so a brief dip doesn't
-# leave the chorus). The default (no-profile / live-tap) path is untouched — it
-# keeps mapping the fast ``_signal`` exactly as before.
+# Mapping a much slower envelope keeps switches unhurried while still tracking
+# real section changes. Asymmetric like the fast one (rise in ~1.2 s to catch a
+# drop, fall over ~3.5 s so a brief dip doesn't leave the chorus). The default
+# (no-profile / live-tap) path is untouched — it keeps mapping the fast
+# ``_signal`` exactly as before.
 _PICK_SLOW_ATTACK = 0.017  # ~1.2 s rise at 50 fps
 _PICK_SLOW_DECAY = 0.006   # ~3.5 s fall at 50 fps
 # Beats/second that reads as fully percussive (fast 16-note-ish groove).
@@ -494,16 +506,93 @@ _PICK_BPM_LO = 85.0
 _PICK_BPM_HI = 150.0
 # Per-song "dynamics-honest" spread (only when a song intensity profile is
 # supplied). ``dynamics`` is the song's own quiet..loud signal span (see
-# ``trackmap.build_intensity_profile``): at/above this reference a song is
-# treated as fully dynamic and its quiet↔loud is stretched across the WHOLE
-# enabled range (so every selected rung gets used); below it the spread is
-# proportionally pulled back toward the (mood-shifted) centre so a flat,
-# constant-loudness track sits still instead of twitching between rungs. Kept
-# low so ordinary songs (which do breathe verse↔chorus) reach full spread.
+# ``trackmap.build_intensity_profile``): at/above this reference a song moves
+# through its whole earned band; below it the moment is proportionally pulled
+# back toward the (mood-shifted) middle of the band, so a flat, constant-loudness
+# track sits still instead of twitching between rungs.
 _PICK_DYN_REF = 0.26
-# Cap on how far the mood term (spectral tilt + tempo) may slide the operating
-# point away from centre: a moderate bias, never a takeover.
+# Cap on how far the mood term (spectral tilt + tempo) may slide the moment
+# within the song's band: a moderate bias, never a takeover.
 _PICK_MOOD_MAX = 0.16
+# Shaping of the moment inside the song's earned band. >1 means the top of the
+# band is a *peak*, not a plateau: the offline window's ceiling is a p95, so ~5%
+# of every track sits at the very top of its own range and a linear map would
+# hand the ceiling rung out that often. Mild — enough that the ceiling reads as
+# a moment rather than a section.
+_PICK_PEAK_GAMMA = 1.3
+
+# --- Layer A: the absolute character score ----------------------------------
+# Weights of the character terms (they sum to 1.0). Attack and busyness carry
+# the most because they measure the thing most directly — how percussive and how
+# constantly active the music is — and are the most robust in practice. Tempo is
+# weighted lower on purpose: a half/double-time BPM lock is a real failure mode,
+# so it must not be able to move a song a whole band on its own. Spectral tilt
+# is lower still; it is the noisiest of the four (a bass-register drone reads as
+# "heavy" on tilt alone, and only attack/busy tell them apart).
+#
+# NB busyness is measured from onset flux, NOT from beats-per-second. On a
+# gridded map beats/second IS bpm/60 — it would just be the tempo term again,
+# and a BPM octave error would then swing two terms at once.
+#
+# There is deliberately NO "how relentlessly loud is it" term. It sounds like it
+# belongs, but ``energy`` is p95-normalised per track, so mean loudness measures
+# sustained-vs-transient rather than intensity: a constant drone scores ~1.0 and
+# a busy drum track (energy spiking between near-silent gaps) scores ~0.2. It
+# ranks real music almost exactly backwards.
+_CHAR_W_TEMPO = 0.20
+_CHAR_W_BUSY = 0.32
+_CHAR_W_ATTACK = 0.34
+_CHAR_W_BASS = 0.14
+# Onset broadbandness (``AnalysisFrame.onset_width``, energy-weighted mean over
+# the track) spans roughly this range on real material: sustained/tonal content
+# sits near zero, a full drum kit near the top. Measured off the analyser rather
+# than assumed — the raw values are much lower than the per-frame width scale
+# suggests, because most frames of any track are between transients.
+_CHAR_ATTACK_LO = 0.04
+_CHAR_ATTACK_HI = 0.30
+# Mean onset flux that reads as constantly busy. Flux is p95-normalised per
+# track, so its *mean* says how much of the song carries strong onsets: constant
+# 16ths sit high, a sparse ballad spikes and falls back. Tempo-independent — a
+# slow track with a busy groove scores busy, which is the point.
+_CHAR_BUSY_FULL = 0.34
+# Character assumed when the song is unknown — metadata-only playback, or the
+# live estimator before it has warmed up. Mid-ladder and deliberately shy of the
+# top, so an unidentified track opens around High and never on Extreme.
+_CHAR_NEUTRAL = 0.50
+# Live character estimator (no offline profile): EMA time-constant on the
+# per-frame terms, how long before the estimate fully displaces _CHAR_NEUTRAL,
+# and the energy below which a frame is too quiet to say anything about the song.
+_CHAR_TAU_S = 12.0
+_CHAR_WARMUP_S = 20.0
+_CHAR_MIN_ENERGY = 0.15
+
+# --- Layer B: character -> the ladder band it earns --------------------------
+# Anchors on the 0..1 ladder axis (see ``_RUNG_SHARE`` for where each rung sits
+# on it), linearly interpolated between. Deliberately non-linear at the top: only
+# a genuinely heavy track's ceiling reaches into Extreme's cell, which is what
+# makes Extreme rare rather than "the loudest 3% of literally every song".
+_CHAR_BAND_ANCHORS = (
+    # character  floor  ceiling      what it sounds like      ≈ rungs
+    (0.00,       0.00,  0.16),     # ambient / drone          Subtle .. Medium
+    (0.25,       0.03,  0.22),     # lofi / very chill        Subtle .. Medium
+    (0.40,       0.14,  0.58),     # soft indie / acoustic    Medium .. High
+    (0.60,       0.30,  0.86),     # pop / house              High   .. Intense
+    (0.75,       0.34,  0.99),     # energetic dance          High   .. Intense
+    (1.00,       0.40,  1.00),     # EDM / heavy              High   .. Extreme
+)
+# Note the floors rise much more slowly than the ceilings: a heavy track earns a
+# high ceiling but must keep somewhere to *fall* to, or a breakdown has nowhere
+# to go and the room sits on one rung for the whole song — especially under a
+# narrow selection, where the cells are wide.
+
+# --- Layer C: how wide each rung's cell is -----------------------------------
+# Target share of playtime per rung, library-wide, ascending (Subtle..Extreme).
+# The 0..1 ladder axis is divided in these proportions instead of a flat 1/n per
+# rung, which is what encodes the intended feel: High and Intense carry the
+# music, Medium/Subtle are for genuinely soft passages, and Extreme is a narrow
+# spike at the very top. Renormalised over whatever subset the user enabled, so
+# the relative prominence survives a narrower selection.
+_RUNG_SHARE = (0.07, 0.16, 0.38, 0.36, 0.03)
 
 
 def _intensity_signal(energy: float, salience: float, tempo: float, perc: float) -> float:
@@ -521,17 +610,85 @@ def _intensity_signal(energy: float, salience: float, tempo: float, perc: float)
     return max(0.0, min(1.0, raw))
 
 
-class AutoIntensityPicker:
-    """Resolve Auto to a concrete rung from the music, spread over an enabled set.
+def _unit(x: float) -> float:
+    return 0.0 if x < 0.0 else 1.0 if x > 1.0 else x
 
-    Fed the live per-frame features, it maintains a smoothed intensity signal and
-    maps it ACROSS the rungs the user enabled (``allowed``): the quietest parts
-    sit on the lowest enabled rung and the biggest moments reach the highest, so
-    enabling Intense/Extreme really does put them on the loud parts, and making
-    High the lowest makes High the floor. BPM/mood shape the signal, so they
-    decide where in that range each moment lands. A wide hysteresis dead-band and
-    a long dwell floor keep switches slow and unhurried. This is purely a
-    *selection* — it never changes how any rung renders.
+
+def song_character(tempo: float, busy: float, attack: float, bass: float) -> float:
+    """Blend the absolute character terms into one 0..1 score for a song.
+
+    Every term is chosen to survive the analysis' per-track p95 normalisation, so
+    the score is comparable *across* songs — which is the whole point: a lofi
+    track has to score low even though its own chorus normalises to 1.0 exactly
+    like an EDM drop does. ``tempo`` is BPM over the ballad..club span, ``busy``
+    how constantly onsets fire, ``attack`` their broadbandness (drums are
+    broadband, pads and sung tones are not), ``bass`` the low-end weight.
+
+    Shared by the offline profile (:func:`trackmap.build_intensity_profile`) and
+    the picker's live estimator so a track scores the same either way.
+    """
+    return _unit(
+        _CHAR_W_TEMPO * _unit(tempo)
+        + _CHAR_W_BUSY * _unit(busy)
+        + _CHAR_W_ATTACK * _unit(attack)
+        + _CHAR_W_BASS * _unit(bass)
+    )
+
+
+def _character_band(character: float) -> tuple[float, float]:
+    """The floor..ceiling of the 0..1 ladder axis a song of this character earns.
+
+    Interpolated between :data:`_CHAR_BAND_ANCHORS`. This is Layer B: it decides
+    how high a song *can* go before a single moment of it is looked at, so a
+    chill track's biggest moment tops out at Medium while a banger's reaches
+    Extreme. It also supplies the floor, which is why an energetic track never
+    drops to Subtle without any explicit rule saying so.
+    """
+    c = _unit(character)
+    for (c0, f0, t0), (c1, f1, t1) in zip(_CHAR_BAND_ANCHORS, _CHAR_BAND_ANCHORS[1:]):
+        if c <= c1:
+            w = 0.0 if c1 <= c0 else (c - c0) / (c1 - c0)
+            return f0 + (f1 - f0) * w, t0 + (t1 - t0) * w
+    return _CHAR_BAND_ANCHORS[-1][1], _CHAR_BAND_ANCHORS[-1][2]
+
+
+def _rung_cells(rungs: list[SyncMode]) -> tuple[list[float], list[float]]:
+    """Cell widths and interior edges of ``rungs`` on the 0..1 ladder axis.
+
+    Each rung keeps its :data:`_RUNG_SHARE` of the axis, renormalised over the
+    selection — so High stays the workhorse and Extreme stays a narrow spike
+    whether you enabled three rungs or five. This is the "soft remap": the
+    selection rescales the axis rather than clipping it, so the top of a narrow
+    selection is still reached by the tracks that earn it.
+    """
+    shares = [_RUNG_SHARE[INTENSITY_LADDER.index(m)] for m in rungs]
+    total = sum(shares) or 1.0
+    widths = [s / total for s in shares]
+    edges: list[float] = []
+    acc = 0.0
+    for w in widths[:-1]:
+        acc += w
+        edges.append(acc)
+    return edges, widths
+
+
+class AutoIntensityPicker:
+    """Resolve Auto to a concrete rung from what the music actually is.
+
+    The song's absolute *character* (Layer A) decides the band of the ladder it
+    earns (Layer B); its own section curve then moves within that band (Layer C).
+    The enabled set (``allowed``) rescales the ladder axis rather than clipping
+    it, so a heavy track reaches the top of your selection, a chill one stays
+    low in it, and no song is forced to use every rung you enabled.
+
+    Character comes from the offline profile when a track map is playing back;
+    on a live tap the picker estimates the same terms itself over a warm-up
+    window, starting from :data:`_CHAR_NEUTRAL` so an unidentified track opens
+    around High and can't jump to Extreme on its first loud bar.
+
+    A hysteresis dead-band proportional to the rung's cell and a long dwell floor
+    keep switches slow and unhurried. This is purely a *selection* — it never
+    changes how any rung renders.
     """
 
     def __init__(self) -> None:
@@ -539,10 +696,16 @@ class AutoIntensityPicker:
 
     def reset(self) -> None:
         """Start fresh (session start). Seeds the signal mid-range so the room
-        opens around the middle of the enabled range, not ramping up from black."""
+        opens around the middle of the song's band, not ramping up from black."""
         self._signal = 0.56  # ≈ the middle of the real-music loudness window
         self._slow = 0.56    # section-level envelope (profile path only)
         self._beat_rate = 0.0
+        # Live character terms, seeded neutral so the blend starts at
+        # _CHAR_NEUTRAL before any music has been heard.
+        self._char_attack = 0.5 * (_CHAR_ATTACK_LO + _CHAR_ATTACK_HI)
+        self._char_busy = 0.5 * _CHAR_BUSY_FULL
+        self._char_bass = 0.5
+        self._char_age = 0.0  # seconds of actual music seen (warm-up progress)
         self._level: SyncMode | None = None  # emitted rung
         self._since_switch = _PICK_DWELL_S   # allow the first pick immediately
 
@@ -569,6 +732,10 @@ class AutoIntensityPicker:
         hi: float = _SIG_HI_REF,
         dynamics: float | None = None,
         mood: float = 0.0,
+        character: float | None = None,
+        onset_width: float = 0.5,
+        centroid: float = 0.5,
+        flux: float = _CHAR_BUSY_FULL * 0.5,
     ) -> SyncMode:
         """Advance one frame and return the rung Auto should be at now.
 
@@ -576,9 +743,14 @@ class AutoIntensityPicker:
         (from the map's :class:`IntensityProfile` curve). When given it is mapped
         DIRECTLY — no live smoothing — so the switch lands on the section change
         instead of a time-constant later. Without it (live tap / metadata) the
-        picker smooths live as before. ``lo``/``hi``/``dynamics``/``mood`` are the
-        song's intensity window + character; they default to the historical fixed
-        window with no per-song shaping.
+        picker smooths live as before.
+
+        ``character`` is the song's absolute 0..1 energy character, which decides
+        the band of the ladder it earns. Supplied by the offline profile; when
+        omitted the picker estimates it live from ``onset_width``/``flux``/
+        ``centroid`` and its own tempo/envelope state. ``lo``/``hi``/
+        ``dynamics``/``mood`` are the song's intensity window and shading,
+        defaulting to the fixed real-music window with no per-song shaping.
         """
         # Percussiveness: a leaky-integrator estimate of beats/second (decays
         # through quiet bridges, climbs on a busy groove). With time-constant
@@ -600,6 +772,16 @@ class AutoIntensityPicker:
         self._slow += (raw - self._slow) * slow_alpha
         self._since_switch += dt
 
+        # Live character terms, tracked only while music is actually playing so a
+        # silent intro or a gap between tracks can't drag the estimate down.
+        if character is None and energy >= _CHAR_MIN_ENERGY:
+            ema = min(1.0, dt / _CHAR_TAU_S)
+            self._char_attack += (onset_width - self._char_attack) * ema
+            self._char_busy += (flux - self._char_busy) * ema
+            self._char_bass += ((1.0 - centroid) - self._char_bass) * ema
+            self._char_age += dt
+        char = self._character(tempo) if character is None else _unit(character)
+
         # Prefer the offline lag-free curve (map playback) — mapped directly so
         # the pick follows the song's real section arc with no envelope lag. Fall
         # back to the live section envelope when a profile is active without a
@@ -610,7 +792,7 @@ class AutoIntensityPicker:
             sig = self._slow
         else:
             sig = self._signal
-        target = self._resolve(sig, allowed, lo, hi, dynamics, mood)
+        target = self._resolve(sig, allowed, lo, hi, dynamics, mood, char)
         if self._level is None:
             self._level = target  # first frame: adopt without waiting on dwell
         elif target is not self._level:
@@ -623,6 +805,24 @@ class AutoIntensityPicker:
                 self._since_switch = 0.0
         return self._level
 
+    def _character(self, tempo: float) -> float:
+        """The live character estimate, eased in from neutral over the warm-up.
+
+        Same terms as the offline profile, tracked off the live frames: BPM and
+        the smoothed onset flux, broadbandness and spectral tilt. Blended toward
+        :data:`_CHAR_NEUTRAL` until ``_CHAR_WARMUP_S`` of music has been heard, so
+        the opening bars of an unknown track can't earn it a high ceiling.
+        """
+        raw = song_character(
+            tempo=tempo,
+            busy=self._char_busy / _CHAR_BUSY_FULL,
+            attack=(self._char_attack - _CHAR_ATTACK_LO)
+            / (_CHAR_ATTACK_HI - _CHAR_ATTACK_LO),
+            bass=self._char_bass,
+        )
+        w = _unit(self._char_age / _CHAR_WARMUP_S)
+        return _CHAR_NEUTRAL + (raw - _CHAR_NEUTRAL) * w
+
     def _resolve(
         self,
         signal: float,
@@ -631,38 +831,49 @@ class AutoIntensityPicker:
         hi: float = _SIG_HI_REF,
         dynamics: float | None = None,
         mood: float = 0.0,
+        character: float = _CHAR_NEUTRAL,
     ) -> SyncMode:
-        """Map the signal onto a band of the enabled set, with hysteresis.
+        """Place this moment on the ladder, then on the enabled set, with hysteresis.
 
-        The signal is first normalised against the loudness window ``lo..hi`` (the
-        song's own quiet..loud span when a profile is supplied, else the fixed
-        real-music window), then the [0, 1] range is split into one equal band per
-        enabled rung. A wide dead-band on each boundary means a moment must move
-        well past the edge before the rung changes, so the pick is stable.
-
-        When a song profile is supplied, the spread is **dynamics-honest**: a song
-        with real dynamics stretches its quiet↔loud across the whole enabled range
-        (every selected rung gets used), while a flat, constant-loudness track is
-        pulled back toward a mood-shifted centre instead of twitching between rungs.
-        With no profile (``dynamics is None``) the mapping is the historical
-        full-window one, unchanged.
+        1. Where the moment sits *in the song*: the signal normalised against the
+           loudness window ``lo..hi`` (the song's own quiet..loud span when a
+           profile is supplied, else the fixed real-music window), compressed
+           toward the middle when the song is **dynamics-honest** flat, shaded by
+           ``mood``, and gamma-shaped so the top of the band reads as a peak.
+        2. Where that lands *on the ladder*: scaled into the floor..ceiling band
+           the song's ``character`` earned. A chill song's band tops out around
+           Medium however loud its own chorus is — the fix for Auto reaching
+           Intense/Extreme on music that doesn't call for it.
+        3. Which enabled rung that is: the 0..1 ladder axis is divided by
+           :data:`_RUNG_SHARE` renormalised over the enabled set, so High stays
+           the workhorse and Extreme a narrow spike at any selection size. The
+           dead-band on each edge scales with the cell, so switches stay stable
+           without making a narrow cell unreachable.
         """
         rungs = sorted(
             (m for m in allowed if m in INTENSITY_LADDER), key=INTENSITY_LADDER.index
         ) or list(DEFAULT_AUTO_LEVELS)
         n = len(rungs)
         span = max(1e-3, hi - lo)
-        norm = max(0.0, min(1.0, (signal - lo) / span))
+        p = _unit((signal - lo) / span)
         if dynamics is not None:
-            # How much of the full range this song has earned (0 flat .. 1 dynamic).
-            w = max(0.0, min(1.0, dynamics / _PICK_DYN_REF))
-            mood = max(-_PICK_MOOD_MAX, min(_PICK_MOOD_MAX, mood))
-            center = max(0.15, min(0.85, 0.5 + mood))
-            norm = max(0.0, min(1.0, center + w * (norm - 0.5)))
-        b = rungs.index(self._level) if self._level in rungs else min(n - 1, int(norm * n))
-        while b < n - 1 and norm > (b + 1) / n + _PICK_HYST:
+            # How much of its band this song has earned (0 flat .. 1 dynamic).
+            w = _unit(dynamics / _PICK_DYN_REF)
+            p = 0.5 + w * (p - 0.5)
+        p = _unit(p + max(-_PICK_MOOD_MAX, min(_PICK_MOOD_MAX, mood)))
+        floor, ceiling = _character_band(character)
+        pos = floor + (ceiling - floor) * (p ** _PICK_PEAK_GAMMA)
+
+        edges, widths = _rung_cells(rungs)
+        if self._level in rungs:
+            b = rungs.index(self._level)
+        else:
+            b = 0
+            while b < n - 1 and pos >= edges[b]:
+                b += 1
+        while b < n - 1 and pos > edges[b] + _PICK_HYST_FRAC * min(widths[b], widths[b + 1]):
             b += 1
-        while b > 0 and norm < b / n - _PICK_HYST:
+        while b > 0 and pos < edges[b - 1] - _PICK_HYST_FRAC * min(widths[b - 1], widths[b]):
             b -= 1
         return rungs[b]
 

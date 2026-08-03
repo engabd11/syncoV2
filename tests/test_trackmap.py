@@ -367,6 +367,7 @@ def test_intensity_profile_recomputed_on_load_without_reanalysis(
     assert b.sig_hi == pytest.approx(a.sig_hi)
     assert b.dynamics == pytest.approx(a.dynamics)
     assert b.tilt == pytest.approx(a.tilt)
+    assert b.character == pytest.approx(a.character)
 
 
 def test_dynamic_song_has_more_dynamics_than_a_uniform_one(map_120: TrackMap):
@@ -405,6 +406,75 @@ def test_build_intensity_profile_flat_vs_dynamic():
     assert build_intensity_profile(None, 120.0, beats, 60.0) is None
 
 
+def test_character_separates_a_chill_track_from_a_driving_one():
+    # ``character`` is the ABSOLUTE score that decides how high Auto may take a
+    # song. It has to work off terms that survive the p95 energy normalisation,
+    # so both tracks below peak at 1.0 and must still score differently.
+    n = 3000  # ~60 s at 50 fps
+    t = np.linspace(0.0, 1.0, n)
+    swell = (0.12 + 0.85 * np.sin(np.pi * t) ** 2).astype(np.float32)
+    z = np.zeros(n, dtype=np.float32)
+
+    def feats(bands, width, flux):
+        return TrackFeatures(
+            bands=np.tile(np.asarray(bands, dtype=np.float32), (n, 1)),
+            energy=swell, flux=np.full(n, flux, dtype=np.float32),
+            bass_flux=z, mid_flux=z, centroid=z,
+            width=np.full(n, width, dtype=np.float32),
+        )
+
+    # Slow, sparse, soft-attack, bright.
+    chill = build_intensity_profile(
+        feats((0.2, 0.25, 0.5, 0.6, 0.55), 0.20, 0.06), 70.0,
+        np.arange(0.0, 60.0, 1.2), 60.0,
+    )
+    # Fast, busy, percussive, bass-heavy.
+    driving = build_intensity_profile(
+        feats((0.85, 0.8, 0.4, 0.3, 0.2), 0.52, 0.42), 145.0,
+        np.arange(0.0, 60.0, 0.28), 60.0,
+    )
+    assert chill is not None and driving is not None
+    assert chill.character < 0.35 < 0.65 < driving.character
+
+
+def test_character_ignores_a_half_or_double_time_bpm_lock():
+    # Busyness is measured from onset flux, not beats/second, so a BPM octave
+    # error moves ONE term rather than two — it can't push a song a whole band.
+    n = 3000
+    z = np.zeros(n, dtype=np.float32)
+
+    def prof(bpm):
+        feat = TrackFeatures(
+            bands=np.tile(np.asarray((0.5,) * 5, dtype=np.float32), (n, 1)),
+            energy=np.full(n, 0.6, dtype=np.float32),
+            flux=np.full(n, 0.2, dtype=np.float32),
+            bass_flux=z, mid_flux=z, centroid=z,
+            width=np.full(n, 0.35, dtype=np.float32),
+        )
+        step = 60.0 / bpm
+        return build_intensity_profile(feat, bpm, np.arange(0.0, 60.0, step), 60.0)
+
+    half, double = prof(72.0), prof(144.0)
+    assert half is not None and double is not None
+    assert abs(double.character - half.character) <= 0.21
+
+
+def test_character_falls_back_to_neutral_without_onset_widths():
+    # Pre-v2 caches carry no per-frame width. The attack term must degrade to
+    # neutral rather than scoring the track as pure pad.
+    n = 3000
+    z = np.zeros(n, dtype=np.float32)
+    feat = TrackFeatures(
+        bands=np.tile(np.asarray((0.5,) * 5, dtype=np.float32), (n, 1)),
+        energy=np.full(n, 0.6, dtype=np.float32),
+        flux=z, bass_flux=z, mid_flux=z, centroid=z,
+    )  # width defaults empty
+    prof = build_intensity_profile(feat, 120.0, np.arange(0.0, 60.0, 0.5), 60.0)
+    assert prof is not None
+    assert 0.0 <= prof.character <= 1.0
+    assert prof.character == pytest.approx(0.5, abs=0.2)
+
+
 def test_section_curve_is_lag_free_at_a_step():
     # A hard quiet->loud step: the centred curve transitions *on* the step, not a
     # smoothing time-constant after it (that's what lets a rung switch land on
@@ -433,6 +503,7 @@ def test_frame_at_stamps_the_profile_on_playback_frames(map_120: TrackMap):
     assert fr.intensity_hi == pytest.approx(prof.sig_hi)
     assert fr.intensity_dynamics == pytest.approx(prof.dynamics)
     assert fr.intensity_mood == pytest.approx(prof.mood)
+    assert fr.intensity_character == pytest.approx(prof.character)
     # The lag-free section signal is stamped, sampled slightly AHEAD of the frame.
     i = int(12.0 / (1.0 / 50.0))
     la = i + int(round(_PROFILE_LOOKAHEAD_S * 50))
