@@ -68,6 +68,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from functools import lru_cache
 
 from ..const import (
     AUTO_BPM_HIGH,
@@ -593,6 +594,10 @@ _CHAR_BAND_ANCHORS = (
 # spike at the very top. Renormalised over whatever subset the user enabled, so
 # the relative prominence survives a narrower selection.
 _RUNG_SHARE = (0.07, 0.16, 0.38, 0.36, 0.03)
+# How far past a rung boundary's dead-band a trapped band is stretched (see
+# ``_ensure_crossing``). Small on purpose: enough that the switch actually
+# commits, not enough to turn the neighbouring rung into the song's home.
+_BAND_CROSS_EPS = 0.01
 
 
 def _intensity_signal(energy: float, salience: float, tempo: float, perc: float) -> float:
@@ -657,9 +662,9 @@ def _rung_cells(rungs: list[SyncMode]) -> tuple[list[float], list[float]]:
 
     Each rung keeps its :data:`_RUNG_SHARE` of the axis, renormalised over the
     selection — so High stays the workhorse and Extreme stays a narrow spike
-    whether you enabled three rungs or five. This is the "soft remap": the
-    selection rescales the axis rather than clipping it, so the top of a narrow
-    selection is still reached by the tracks that earn it.
+    whether you enabled three rungs or five. The axis this returns is therefore
+    the SELECTION's axis, not the full ladder's; :func:`_to_selection` is what
+    carries a full-ladder position onto it.
     """
     shares = [_RUNG_SHARE[INTENSITY_LADDER.index(m)] for m in rungs]
     total = sum(shares) or 1.0
@@ -670,6 +675,98 @@ def _rung_cells(rungs: list[SyncMode]) -> tuple[list[float], list[float]]:
         acc += w
         edges.append(acc)
     return edges, widths
+
+
+def _bounds(widths: list[float]) -> list[float]:
+    """Cumulative cell bounds ``[0, w0, w0+w1, ..., 1]`` for ``widths``."""
+    out = [0.0]
+    for w in widths:
+        out.append(out[-1] + w)
+    return out
+
+
+@lru_cache(maxsize=64)
+def _selection_knots(
+    rungs: tuple[SyncMode, ...],
+) -> tuple[tuple[float, ...], tuple[float, ...]]:
+    """Knots of the full-ladder axis -> enabled-selection axis map.
+
+    :data:`_CHAR_BAND_ANCHORS` are expressed on the FULL five-rung axis (a floor
+    of 0.30 means "the bottom of High"), while :func:`_rung_cells` renormalises
+    over the enabled set. Comparing one to the other directly is a category
+    error: with High/Intense/Extreme enabled, High's cell starts at 0.0 and runs
+    to 0.49, so every band whose full-ladder ceiling was below 0.49 collapsed
+    onto the lowest enabled rung and the room sat there for the whole song.
+
+    This builds the missing conversion: each enabled rung's full-ladder cell maps
+    linearly onto its cell in the selection, and the disabled rungs' shares
+    become the gaps between them. Monotone, and the identity when all five rungs
+    are enabled, so a full selection behaves exactly as before.
+    """
+    full = _bounds(_rung_cells(list(INTENSITY_LADDER))[1])
+    sel = _bounds(_rung_cells(list(rungs))[1])
+    src: list[float] = []
+    dst: list[float] = []
+    for j, mode in enumerate(rungs):
+        i = INTENSITY_LADDER.index(mode)
+        for s, d in ((full[i], sel[j]), (full[i + 1], sel[j + 1])):
+            if src and abs(s - src[-1]) < 1e-12:
+                continue  # adjacent enabled rungs share a knot
+            src.append(s)
+            dst.append(d)
+    return tuple(src), tuple(dst)  # cached: hand back something immutable
+
+
+def _to_selection(
+    pos: float, src: tuple[float, ...], dst: tuple[float, ...]
+) -> float:
+    """Carry ``pos`` from the full-ladder axis onto the enabled selection's axis.
+
+    Positions below the lowest enabled rung land on the bottom of the selection
+    and positions above the highest on its top — the sense in which the lowest
+    enabled rung really is the floor.
+    """
+    if not src:
+        return _unit(pos)
+    if pos <= src[0]:
+        return dst[0]
+    for k in range(1, len(src)):
+        if pos <= src[k]:
+            span = src[k] - src[k - 1]
+            if span <= 0.0:
+                return dst[k]
+            return dst[k - 1] + (dst[k] - dst[k - 1]) * (pos - src[k - 1]) / span
+    return dst[-1]
+
+
+def _ensure_crossing(
+    floor: float, ceiling: float, edges: list[float], widths: list[float]
+) -> tuple[float, float]:
+    """Widen a band that is trapped inside a single cell until it can switch.
+
+    A band that doesn't span the whole of some edge's dead-band — ``edge`` ±
+    :data:`_PICK_HYST_FRAC` of the narrower neighbouring cell — can never move
+    the room off one rung, whatever the song does. That is the "Auto sits on the
+    lowest rung all song" fault: character can legitimately place a narrow band
+    inside one cell, especially under a selection that omits the rungs the song
+    would otherwise have used.
+
+    So reach *just* past the nearest edge, both sides of its dead-band, and no
+    further: the song's peak lifts it a rung and its breakdown drops it back,
+    while the extra travel stays confined to those two adjacent rungs. A
+    single-rung selection has no edge and is left alone.
+    """
+    if not edges:
+        return floor, ceiling
+    hyst = [_PICK_HYST_FRAC * min(widths[i], widths[i + 1]) for i in range(len(edges))]
+    if any(floor <= e - h and ceiling >= e + h for e, h in zip(edges, hyst)):
+        return floor, ceiling
+    mid = 0.5 * (floor + ceiling)
+    i = min(range(len(edges)), key=lambda k: abs(edges[k] - mid))
+    return (
+        max(0.0, min(floor, edges[i] - hyst[i] - _BAND_CROSS_EPS)),
+        min(1.0, max(ceiling, edges[i] + hyst[i] + _BAND_CROSS_EPS)),
+    )
 
 
 class AutoIntensityPicker:
@@ -844,11 +941,14 @@ class AutoIntensityPicker:
            the song's ``character`` earned. A chill song's band tops out around
            Medium however loud its own chorus is — the fix for Auto reaching
            Intense/Extreme on music that doesn't call for it.
-        3. Which enabled rung that is: the 0..1 ladder axis is divided by
+        3. Which enabled rung that is: the band is carried from the full ladder
+           onto the selection's axis (:func:`_to_selection`), whose cells are
            :data:`_RUNG_SHARE` renormalised over the enabled set, so High stays
-           the workhorse and Extreme a narrow spike at any selection size. The
-           dead-band on each edge scales with the cell, so switches stay stable
-           without making a narrow cell unreachable.
+           the workhorse and Extreme a narrow spike at any selection size. A band
+           that lands inside a single cell is widened just enough to reach the
+           nearest boundary (:func:`_ensure_crossing`), so the song's arc always
+           has somewhere to go. The dead-band on each edge scales with the cell,
+           so switches stay stable without making a narrow cell unreachable.
         """
         rungs = sorted(
             (m for m in allowed if m in INTENSITY_LADDER), key=INTENSITY_LADDER.index
@@ -861,10 +961,19 @@ class AutoIntensityPicker:
             w = _unit(dynamics / _PICK_DYN_REF)
             p = 0.5 + w * (p - 0.5)
         p = _unit(p + max(-_PICK_MOOD_MAX, min(_PICK_MOOD_MAX, mood)))
+        edges, widths = _rung_cells(rungs)
+        # The band character earned is on the FULL ladder; carry it onto the
+        # selection's axis before it meets the selection's cells, then make sure
+        # it can actually reach a boundary — a band trapped inside one cell is a
+        # room that never moves, however dynamic the song is.
+        src, dst = _selection_knots(tuple(rungs))
         floor, ceiling = _character_band(character)
+        floor, ceiling = _ensure_crossing(
+            _to_selection(floor, src, dst), _to_selection(ceiling, src, dst),
+            edges, widths,
+        )
         pos = floor + (ceiling - floor) * (p ** _PICK_PEAK_GAMMA)
 
-        edges, widths = _rung_cells(rungs)
         if self._level in rungs:
             b = rungs.index(self._level)
         else:

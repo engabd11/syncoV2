@@ -90,6 +90,12 @@ def _floor(character: float, allowed=ALL_RUNGS) -> SyncMode:
     return min(_sweep(character, allowed), key=INTENSITY_LADDER.index)
 
 
+def _share(character: float, allowed=ALL_RUNGS) -> dict[SyncMode, float]:
+    """Fraction of an even sweep across the song's arc spent on each rung."""
+    picks = [_at(character, i / 100.0, allowed) for i in range(101)]
+    return {m: picks.count(m) / len(picks) for m in allowed}
+
+
 # --- the headline fix: character decides how high a song may go --------------
 
 def test_a_chill_song_never_reaches_the_top_even_with_everything_enabled():
@@ -156,13 +162,12 @@ def test_a_narrow_selection_is_rescaled_not_clipped():
 
 
 def test_the_lowest_enabled_rung_is_still_the_effective_floor():
-    # Selecting High..Extreme makes High the floor — nothing drops below it, and
-    # a genuinely chill track just sits there. Excluding the low rungs is a
-    # request to run hot, so the ladder rescales upward: a soft track's chorus
-    # may now touch Intense, which it never would with the full set enabled.
-    assert _sweep(LOFI, TOP_RUNGS) == {SyncMode.HIGH}
-    assert _floor(INDIE, TOP_RUNGS) is SyncMode.HIGH
-    assert _floor(HOUSE, TOP_RUNGS) is SyncMode.HIGH
+    # Selecting High..Extreme makes High the floor — nothing drops below it.
+    # Excluding the low rungs is a request to run hot, so the ladder rescales
+    # upward: a soft track's chorus may now touch Intense, which it never would
+    # with the full set enabled.
+    for character in (LOFI, INDIE, HOUSE, EDM):
+        assert _floor(character, TOP_RUNGS) is SyncMode.HIGH
     assert _top(HOUSE, TOP_RUNGS) is SyncMode.INTENSE
     assert _top(EDM, TOP_RUNGS) is SyncMode.EXTREME
 
@@ -175,11 +180,84 @@ def test_intense_and_extreme_need_enabling():
 
 
 def test_a_sparse_selection_still_spreads():
-    # Two far-apart rungs: the chill track sits on the low one, the banger
-    # reaches the high one.
+    # Two far-apart rungs: both tracks rest on the low one, and the banger is the
+    # one that actually lives up top. The chill track only reaches Extreme at the
+    # very peak of its arc, because with nothing enabled between the two there is
+    # no gentler rung for its chorus to use.
     allowed = (SyncMode.MEDIUM, SyncMode.EXTREME)
-    assert _sweep(LOFI, allowed) == {SyncMode.MEDIUM}
+    assert _floor(LOFI, allowed) is SyncMode.MEDIUM
+    assert _floor(EDM, allowed) is SyncMode.MEDIUM
     assert _top(EDM, allowed) is SyncMode.EXTREME
+    assert _share(LOFI, allowed)[SyncMode.EXTREME] < 0.25
+    assert _share(EDM, allowed)[SyncMode.EXTREME] > _share(LOFI, allowed)[SyncMode.EXTREME]
+
+
+# --- the regression: Auto must never sit on one rung for a whole song --------
+
+def test_every_selection_moves_on_every_song():
+    # THE bug this fixes. `_character_band` works on the full five-rung axis
+    # ("0.30 = the bottom of High") while the cells are renormalised over the
+    # enabled set, so with High/Intense/Extreme picked, High's cell ran 0..0.49
+    # and every band below that collapsed onto it: the room sat on the lowest
+    # enabled rung for the entire song, whatever the music did.
+    selections = [
+        DEFAULT, WITH_INTENSE, ALL_RUNGS, TOP_RUNGS,
+        (SyncMode.MEDIUM, SyncMode.HIGH, SyncMode.INTENSE),
+        (SyncMode.HIGH, SyncMode.INTENSE),
+        (SyncMode.INTENSE, SyncMode.EXTREME),
+        (SyncMode.MEDIUM, SyncMode.EXTREME),
+        (SyncMode.SUBTLE, SyncMode.INTENSE),
+    ]
+    for allowed in selections:
+        for character in (0.0, LOFI, 0.25, INDIE, 0.5, HOUSE, 0.75, EDM, 1.0):
+            visited = _sweep(character, allowed)
+            assert len(visited) >= 2, (
+                f"stuck on {visited} for character {character} with {allowed}"
+            )
+
+
+def test_a_selection_that_excludes_the_songs_rungs_still_rests_at_the_bottom():
+    # Moving is not the same as running hot: with the low rungs excluded, a chill
+    # track still spends most of its time on the lowest enabled rung and only
+    # visits the next one at its peak.
+    for allowed in (TOP_RUNGS, (SyncMode.HIGH, SyncMode.INTENSE)):
+        share = _share(LOFI, allowed)
+        assert share[SyncMode.HIGH] > 0.6
+        assert share[SyncMode.INTENSE] > 0.0
+
+
+def test_time_up_top_still_ranks_the_songs():
+    # The remap must not flatten the character model: under one selection, the
+    # heavier the track the more of its arc it spends above the floor rung.
+    for allowed in (TOP_RUNGS, (SyncMode.HIGH, SyncMode.INTENSE)):
+        above = [
+            1.0 - _share(c, allowed)[SyncMode.HIGH]
+            for c in (LOFI, INDIE, HOUSE, EDM)
+        ]
+        assert above == sorted(above), above
+
+
+def test_a_full_selection_is_unchanged_by_the_remap():
+    # With all five enabled the selection axis IS the full ladder, so the remap
+    # is the identity and every earlier guarantee holds untouched.
+    from hue_music_sync.effects.modes import _selection_knots, _to_selection
+
+    src, dst = _selection_knots(tuple(INTENSITY_LADDER))
+    for i in range(101):
+        pos = i / 100.0
+        assert _to_selection(pos, src, dst) == pytest.approx(pos, abs=1e-9)
+
+
+def test_the_remap_is_monotonic_and_spans_the_selection():
+    from hue_music_sync.effects.modes import _selection_knots, _to_selection
+
+    for allowed in (DEFAULT, TOP_RUNGS, (SyncMode.MEDIUM, SyncMode.EXTREME),
+                    (SyncMode.SUBTLE, SyncMode.INTENSE), (SyncMode.HIGH,)):
+        src, dst = _selection_knots(tuple(allowed))
+        vals = [_to_selection(i / 200.0, src, dst) for i in range(201)]
+        assert vals == sorted(vals)
+        assert vals[0] == pytest.approx(0.0)
+        assert vals[-1] == pytest.approx(1.0)
 
 
 def test_never_returns_a_rung_outside_the_enabled_set():
