@@ -75,6 +75,23 @@ def _devicetype(hass) -> str:
     return f"{DEFAULT_NAME}-{cleaned.replace(' ', '_')}" if cleaned else DEFAULT_NAME
 
 
+def _normalise_bridge_id(bridge_id: str) -> str:
+    """Canonical spelling of a bridge id, for use as the entry's unique id.
+
+    The same bridge announces itself in different cases depending on where the id
+    came from — mDNS TXT records are lower-cased, ``/api/config`` upper-cases —
+    so the raw value can't be the unique id: discovering a manually-added bridge
+    (or vice versa) would create a second entry for the same hardware. Lower-case
+    is the canonical form, matching Home Assistant's own Hue integration.
+
+    Only *new* entries are canonicalised; :meth:`_existing_unique_id` keeps an
+    already-configured entry's spelling, so upgrading doesn't orphan it.
+    Certificate validation is unaffected — :func:`matches_bridge_id` compares
+    case-insensitively.
+    """
+    return bridge_id.strip().lower()
+
+
 async def _fetch_bridge_id(session, host: str, ssl_ctx) -> str | None:
     """Read the bridge id from the unauthenticated config endpoint.
 
@@ -180,11 +197,12 @@ class HueMusicSyncConfigFlow(ConfigFlow, domain=DOMAIN):
         bridge_id = properties.get("bridgeid")
         if not bridge_id:
             return self.async_abort(reason="not_hue_bridge")
-        # mDNS reports the bridge id lower-cased while /api/config reports it
-        # upper-cased, and entries created through the manual step used the
-        # latter verbatim. Reuse an existing entry's exact spelling so a
-        # discovered bridge updates it instead of appearing as a second one.
-        self._bridge_id = self._existing_unique_id(bridge_id) or bridge_id.upper()
+        # Reuse an existing entry's exact spelling so a discovered bridge updates
+        # it instead of appearing as a second one; otherwise canonicalise (see
+        # _normalise_bridge_id) so this and the manual step agree.
+        self._bridge_id = (
+            self._existing_unique_id(bridge_id) or _normalise_bridge_id(bridge_id)
+        )
         self._host = host
         await self.async_set_unique_id(self._bridge_id)
         self._abort_if_unique_id_configured(updates={CONF_HOST: host})
@@ -193,9 +211,9 @@ class HueMusicSyncConfigFlow(ConfigFlow, domain=DOMAIN):
 
     def _existing_unique_id(self, bridge_id: str) -> str | None:
         """An already-configured entry's unique id for this bridge, if any."""
-        wanted = bridge_id.strip().lower()
+        wanted = _normalise_bridge_id(bridge_id)
         for entry in self._async_current_entries():
-            if entry.unique_id and entry.unique_id.strip().lower() == wanted:
+            if entry.unique_id and _normalise_bridge_id(entry.unique_id) == wanted:
                 return entry.unique_id
         return None
 
@@ -214,9 +232,11 @@ class HueMusicSyncConfigFlow(ConfigFlow, domain=DOMAIN):
             else:
                 # Match an existing entry's spelling if there is one (see
                 # _existing_unique_id) so re-adding a bridge aborts as a
-                # duplicate rather than silently creating a twin.
+                # duplicate rather than silently creating a twin, else use the
+                # canonical form the zeroconf step also produces.
                 self._bridge_id = (
-                    self._existing_unique_id(self._bridge_id) or self._bridge_id
+                    self._existing_unique_id(self._bridge_id)
+                    or _normalise_bridge_id(self._bridge_id)
                 )
                 await self.async_set_unique_id(self._bridge_id)
                 self._abort_if_unique_id_configured()
@@ -229,10 +249,12 @@ class HueMusicSyncConfigFlow(ConfigFlow, domain=DOMAIN):
         if not user_input:
             bridges = await _discover_bridges(self.hass)
             configured = {
-                e.unique_id for e in self._async_current_entries() if e.unique_id
+                _normalise_bridge_id(e.unique_id)
+                for e in self._async_current_entries()
+                if e.unique_id
             }
             for bid, ip in bridges.items():
-                if bid.lower() not in configured:
+                if _normalise_bridge_id(bid) not in configured:
                     suggested = ip
                     break
 

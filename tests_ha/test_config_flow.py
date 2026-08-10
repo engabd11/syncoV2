@@ -230,6 +230,78 @@ async def test_zeroconf_updates_the_host_of_a_known_bridge(hass: HomeAssistant) 
     assert entry.data[CONF_HOST] == HOST
 
 
+async def test_the_two_discovery_paths_agree_on_the_unique_id(
+    hass: HomeAssistant,
+) -> None:
+    # The same bridge reports its id in different cases depending on where the id
+    # came from: mDNS TXT records are lower-cased, /api/config upper-cases. If the
+    # flow carried that through, discovering an already-configured bridge would
+    # create a *second* entry for the same hardware, so both paths canonicalise.
+    info = ZeroconfServiceInfo(
+        ip_address=HOST,
+        ip_addresses=[HOST],
+        hostname="Philips-hue.local.",
+        name="Philips Hue - deadbe._hue._tcp.local.",
+        port=443,
+        type="_hue._tcp.local.",
+        properties={"bridgeid": BRIDGE_ID.lower(), "modelid": "BSB002"},
+    )
+    # Manual step first, with the endpoint shouting the id back in upper case.
+    p1, p2, p3, p4, p5 = _patches()
+    with patch(
+        "custom_components.hue_music_sync.config_flow._fetch_bridge_id",
+        AsyncMock(return_value=BRIDGE_ID.upper()),
+    ), p2, p3, p4, p5:
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_HOST: HOST}
+        )
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_AREAS: ["area-1"]}
+        )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_BRIDGE_ID] == BRIDGE_ID
+
+    # The same bridge then announcing itself over mDNS must update that entry.
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_ZEROCONF}, data=info
+    )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
+    assert len(hass.config_entries.async_entries(DOMAIN)) == 1
+
+
+async def test_a_legacy_upper_cased_entry_is_not_duplicated(
+    hass: HomeAssistant,
+) -> None:
+    # Entries created before the ids were canonicalised keep their spelling, so
+    # an upgrade must recognise them rather than pair the bridge a second time.
+    MockConfigEntry(
+        domain=DOMAIN, unique_id=BRIDGE_ID.upper(), data={CONF_HOST: "192.0.2.99"}
+    ).add_to_hass(hass)
+    info = ZeroconfServiceInfo(
+        ip_address=HOST,
+        ip_addresses=[HOST],
+        hostname="Philips-hue.local.",
+        name="Philips Hue - deadbe._hue._tcp.local.",
+        port=443,
+        type="_hue._tcp.local.",
+        properties={"bridgeid": BRIDGE_ID},
+    )
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_ZEROCONF}, data=info
+    )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
+    entries = hass.config_entries.async_entries(DOMAIN)
+    assert len(entries) == 1
+    assert entries[0].unique_id == BRIDGE_ID.upper()  # spelling preserved
+    assert entries[0].data[CONF_HOST] == HOST  # and the IP still updated
+
+
 async def test_zeroconf_without_a_bridge_id_is_ignored(hass: HomeAssistant) -> None:
     info = ZeroconfServiceInfo(
         ip_address=HOST,
