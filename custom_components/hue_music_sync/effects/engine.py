@@ -56,6 +56,37 @@ from .spatial import (
 
 _FLASH_DECAY = 0.80  # default per-frame fade of the beat flash (modes override)
 
+# The nominal render rate the per-frame easing coefficients below were tuned
+# against (the coordinator paces the loop at DEFAULT_STREAM_FPS = 60 but feeds
+# the engine the honest wall dt; analysis frames arrive at ~50 Hz, which is what
+# the envelope constants were measured at).
+TUNING_FPS = 50.0
+
+
+def frame_alpha(alpha50: float, dt: float) -> float:
+    """Re-express a per-frame easing coefficient for the frame time observed.
+
+    Every smoother here used to apply its coefficient once per rendered frame
+    regardless of how long that frame took, so the effective envelope tracked
+    loop timing rather than wall time — audible as brightness shimmer between
+    beats whenever scheduling moved the loop. The Hue EDK defines every
+    animation in milliseconds for exactly this reason; nothing in it is
+    frame-indexed.
+
+    The conversion is exact, so ``frame_alpha(a, 1/TUNING_FPS) == a`` and the
+    tuned constants keep their existing feel at the nominal rate.
+    """
+    if alpha50 >= 1.0:
+        return 1.0
+    return 1.0 - (1.0 - alpha50) ** (dt * TUNING_FPS)
+
+
+def frame_decay(decay50: float, dt: float) -> float:
+    """``frame_alpha`` for a coefficient applied multiplicatively as a decay."""
+    if decay50 <= 0.0:
+        return 0.0
+    return decay50 ** (dt * TUNING_FPS)
+
 # Below this loudness the track is treated as silent: all beat reactions (flash,
 # colour jump, waves) fade out and stop, so only real audio ever moves the
 # lights (a scheduled/stray beat can't strobe a finished or paused track).
@@ -318,22 +349,26 @@ class EffectEngine:
         """Asymmetric-follower band envelopes (read by :func:`.modes.render`)."""
         return self._env
 
-    def _update_env(self, frame: AnalysisFrame) -> None:
+    def _update_env(self, frame: AnalysisFrame, dt: float) -> None:
+        rise = frame_alpha(_ENV_RISE, dt)
+        fall = frame_alpha(_ENV_FALL, dt)
+        p_rise = frame_alpha(_PRESENCE_RISE, dt)
+        p_fall = frame_alpha(_PRESENCE_FALL, dt)
         for name, value in frame.bands.items():
             prev = self._env.get(name, 0.0)
-            alpha = _ENV_RISE if value > prev else _ENV_FALL
+            alpha = rise if value > prev else fall
             self._env[name] = prev + (value - prev) * alpha
             # Slow presence envelope: fast up, slow down (a band stays "present"
             # through brief gaps so roles don't flicker on every rest).
             pp = self._presence.get(name, 0.0)
-            pa = _PRESENCE_RISE if value > pp else _PRESENCE_FALL
+            pa = p_rise if value > pp else p_fall
             self._presence[name] = pp + (value - pp) * pa
         # Room loudness contour: snap up on a swell, ease down through quieter
         # passages, so the whole room follows the rhythm of the song.
-        a = _ENV_RISE if frame.energy > self._energy_env else _ENV_FALL
+        a = rise if frame.energy > self._energy_env else fall
         self._energy_env += (frame.energy - self._energy_env) * a
         # Fast peak-hold for the silence gate.
-        self._loud = max(frame.energy, self._loud * _GATE_DECAY)
+        self._loud = max(frame.energy, self._loud * frame_decay(_GATE_DECAY, dt))
 
     def _update_rhythm_conf(self, frame: AnalysisFrame, beatgrid) -> None:
         """Track evidence that the song currently has an actual beat.
@@ -354,7 +389,7 @@ class EffectEngine:
                 c += (ev - c) * _RHYTHM_EVENT_RISE
         self._rhythm_conf = c * (1.0 - _RHYTHM_FALL)
 
-    def _update_predrop(self, p, structure) -> float:
+    def _update_predrop(self, p, structure, dt: float) -> float:
         """Advance the pre-drop pull-down envelope; return its 0..1 value.
 
         See the _PREDROP_* constants for the full contract. On ``drop_now``
@@ -423,7 +458,7 @@ class EffectEngine:
         """Per-bin melbank transient (rise above the slow baseline, 0..1)."""
         return self._mel_transient
 
-    def _update_mel_transient(self, frame: AnalysisFrame) -> None:
+    def _update_mel_transient(self, frame: AnalysisFrame, dt: float) -> None:
         """Track each melbank bin's slow baseline and its transient over it.
 
         The transient is what makes the room react to *every* instrument: a kick
@@ -432,6 +467,8 @@ class EffectEngine:
         slice. It rides above the slow baseline so a sustained tone fades from
         the pop (only the attack reads), keeping the club bright<->dark snap.
         """
+        slow_rise = frame_alpha(_MEL_SLOW_RISE, dt)
+        slow_fall = frame_alpha(_MEL_SLOW_FALL, dt)
         mel = frame.melbank
         if not mel:
             self._mel_transient = []
@@ -447,7 +484,7 @@ class EffectEngine:
         prev = self._mel_prev
         for i, v in enumerate(mel):
             s = slow[i]
-            s += (v - s) * (_MEL_SLOW_RISE if v > s else _MEL_SLOW_FALL)
+            s += (v - s) * (slow_rise if v > s else slow_fall)
             slow[i] = s
             tr.append(v - s if v > s else 0.0)
             # Per-bin positive flux: rise vs the previous frame. Fires on EVERY
@@ -792,7 +829,7 @@ class EffectEngine:
             # Keep the loudness/band envelopes live (they're otherwise only updated
             # on the music/extreme paths) so Fireworks' energy-driven afterglow and
             # its quiet-passage auto-launch gate see a real, smoothed energy_env.
-            self._update_env(frame)
+            self._update_env(frame, dt)
             self.colour_phase += self.active_params.colour_speed * dt
             return self._fireworks.render(self, frame, dt)
         if self.active_params.graph_reactive:
@@ -828,8 +865,8 @@ class EffectEngine:
         it actually is.
         """
         p = self.active_params
-        self._update_env(frame)
-        self._update_mel_transient(frame)  # fills _mel_transient AND _mel_flux
+        self._update_env(frame, dt)
+        self._update_mel_transient(frame, dt)  # fills _mel_transient AND _mel_flux
         music_gate = min(1.0, self._loud / _SILENCE_GATE) if _SILENCE_GATE > 0 else 1.0
         # Colour: a smooth spatial gradient that only DRIFTS (loudness-scaled),
         # never jumps on a beat — colour never strobes, brightness carries the song.
@@ -912,10 +949,11 @@ class EffectEngine:
             return mx
 
         lf = self._light_flash
+        flash_fade = frame_decay(p.flash_decay, dt)
         for cid in lf:  # per-lamp peak flash fades each frame
-            lf[cid] *= p.flash_decay
+            lf[cid] *= flash_fade
 
-        colour_lerp = p.colour_lerp
+        colour_lerp = frame_alpha(p.colour_lerp, dt)
         have_bands = bool(mel) and bool(bands)
         # Absolute-loudness scale for the flash: a hit in a quiet passage can't
         # flash as bright as one in a drop (the melbank is AGC-relative). 1.0 when
@@ -982,7 +1020,9 @@ class EffectEngine:
                 + p.energy_gain * self._energy_env
             )
             prev_c, prev_b = self._state[cid]
-            alpha = p.bri_attack if target >= prev_b else p.bri_decay
+            alpha = frame_alpha(
+                p.bri_attack if target >= prev_b else p.bri_decay, dt
+            )
             new_b = prev_b + (target - prev_b) * alpha
             # Colour stays keyed to the lamp's fixed position (a stable spatial
             # gradient) + the drift phase: only the brightness/instrument activity
@@ -1086,8 +1126,8 @@ class EffectEngine:
         brightness as the max channel) even mid colour-transition.
         """
         p = self.active_params
-        self._update_env(frame)
-        self._update_mel_transient(frame)
+        self._update_env(frame, dt)
+        self._update_mel_transient(frame, dt)
         # Silence gate (item 2 — only audio moves lights): the smoothed room
         # loudness fades out on a paused / finished / silent track, so every
         # beat reaction (flash, colour jump, wavefront) fades with it and stops
@@ -1141,7 +1181,7 @@ class EffectEngine:
         # pulls in (dimmer, tighter, desaturated) so the detonation lands out
         # of held-back tension. ``pd`` scales every application below; the
         # music gate keeps a fade-to-silence from freezing a stuck dim.
-        pd = p.predrop_depth * self._update_predrop(p, structure) * music_gate
+        pd = p.predrop_depth * self._update_predrop(p, structure, dt) * music_gate
         # Scale the flash by the beat's actual HEIGHT (item 3 / fade-outs): the
         # scheduled accent is normalised to the passage, so without this a track
         # fading out keeps flashing full on tiny beats. The smoothed loudness
@@ -1310,7 +1350,7 @@ class EffectEngine:
         # shows punctuate a chorus. Ordinary highlights stay role-separated.
         full_room = kick > 0.0 and highlight and acc_now >= p.full_room_accent
         lf = self._light_flash
-        decay = p.flash_decay  # per-mode: lower = snappier firework fall
+        decay = frame_decay(p.flash_decay, dt)  # per-mode: lower = snappier fall
         for cid in lf:
             lf[cid] *= decay
         if not self.manual_only and (kick > 0.0 or midf > 0.0):
@@ -1340,16 +1380,16 @@ class EffectEngine:
                 # A drop that detonates out of a held pre-drop swells bigger:
                 # the released depth is the tension it earned.
                 drop = p.drop_boost * (1.0 + 0.35 * self.predrop_released)
-            self._swell = max(self._swell * 0.85, drop)
+            self._swell = max(self._swell * frame_decay(0.85, dt), drop)
             alpha = 1.0 - math.exp(-dt / 2.0)
             self.section_level += (structure.section_level - self.section_level) * alpha
         else:
-            self._swell *= 0.85
+            self._swell *= frame_decay(0.85, dt)
 
         targets = render(self, frame)
 
-        colour_lerp = p.colour_lerp
-        attack, decay = p.bri_attack, p.bri_decay
+        colour_lerp = frame_alpha(p.colour_lerp, dt)
+        attack, decay = frame_alpha(p.bri_attack, dt), frame_alpha(p.bri_decay, dt)
         slew = p.bri_slew  # max emitted brightness RISE per frame (anti-strobe)
         out: dict[int, RGB] = {}
         for cid, (target_color, target_b) in targets.items():

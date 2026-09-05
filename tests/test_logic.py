@@ -17,7 +17,12 @@ from hue_music_sync.const import (
     SyncEffect,
     SyncMode,
 )
-from hue_music_sync.effects.engine import EffectEngine
+from hue_music_sync.effects.engine import (
+    EffectEngine,
+    frame_alpha,
+    frame_decay,
+    TUNING_FPS,
+)
 from hue_music_sync.hue.bridge import (
     EntertainmentChannel,
     capture_light_state,
@@ -480,3 +485,44 @@ def test_analyzer_silence_no_beats():
     silence = np.zeros(ANALYSIS_HOP, dtype=np.float32)
     beats = sum(a.push(silence).beat for _ in range(200))
     assert beats == 0
+
+
+# --- frame-time normalisation (ported from CAMusic) -----------------------
+
+def test_frame_alpha_is_identity_at_the_nominal_rate():
+    # The conversion is exact: at the tuning frame time every coefficient is
+    # itself, so the tuned constants keep their existing feel.
+    for a in (0.04, 0.10, 0.16, 0.55, 0.85, 0.999):
+        assert frame_alpha(a, 1.0 / TUNING_FPS) == pytest.approx(a, abs=1e-9)
+        assert frame_decay(a, 1.0 / TUNING_FPS) == pytest.approx(a, abs=1e-9)
+
+
+def test_frame_alpha_tracks_wall_time_not_frame_count():
+    # Four 12.5 ms frames (50 ms total) must smooth exactly like one 50 ms
+    # frame — the whole point of expressing easing against the clock.
+    a = 0.16
+    one_big = 1.0 - (1.0 - frame_alpha(a, 0.05))
+    acc = 1.0
+    for _ in range(4):
+        acc *= 1.0 - frame_alpha(a, 0.0125)
+    assert 1.0 - acc == pytest.approx(one_big, rel=1e-6)
+    # A stalled loop (one 200 ms frame) eases further in that frame than the
+    # nominal one would have, instead of holding the envelope to loop timing.
+    assert frame_alpha(a, 0.2) > frame_alpha(a, 0.02)
+
+
+def test_engine_envelope_follows_wall_time():
+    # The band envelope's rise over one long frame must match the same total
+    # time spanned by several short frames (up to float error).
+    def render_span(dts):
+        eng = EffectEngine(_channels(5))
+        frame = AnalysisFrame(
+            bands={"bass": 1.0}, energy=0.5, melbank=[0.4] * 16,
+        )
+        for d in dts:
+            eng.render(frame, d)
+        return eng.band_env["bass"]
+
+    steady = render_span([0.02] * 10)
+    stalled = render_span([0.2])
+    assert stalled == pytest.approx(steady, rel=2e-2)
