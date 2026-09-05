@@ -241,6 +241,14 @@ def test_red_guard_leaves_non_red_palettes_alone():
 
 # --- gamut clamp + xy slew ----------------------------------------------
 
+def test_rgb_to_xy_matches_the_current_srgb_d65_matrix():
+    # The matrix was the deprecated "Wide-RGB D65" one from the 2013 docs,
+    # superseded on Philips' current Colour Conversion page by the standard
+    # sRGB transform. White is the sharpest check: it must land on D65.
+    wx, wy = rgb_to_xy(1.0, 1.0, 1.0)
+    assert abs(wx - 0.3127) < 0.002 and abs(wy - 0.3290) < 0.002
+
+
 def test_clamp_keeps_every_colour_inside_gamut_c():
     rng = np.random.default_rng(0)
     for _ in range(500):
@@ -305,24 +313,31 @@ def test_rgb_to_xy_respects_a_per_light_gamut():
     # The gamut fetched from CLIP v2 must reach the clamp. This used to be
     # accepted and then dropped, so every lamp got clamped to Gamut C no matter
     # what the API said about it.
-    green_c = rgb_to_xy(0.0, 1.0, 0.0, GAMUT_C)
-    green_a = rgb_to_xy(0.0, 1.0, 0.0, GAMUT_A)
-    assert green_c != green_a
-    assert _point_in_triangle(green_c, *GAMUT_C)
-    assert _point_in_triangle(green_a, *GAMUT_A)
+    #
+    # Blue is the witness: under the current sRGB→XYZ D65 matrix the sRGB
+    # triangle lies inside both Gamut A and Gamut C except a sliver at the blue
+    # end, so only there do the two clamps actually differ. (The deprecated
+    # 2013 matrix exaggerated every colour's distance out of gamut, which
+    # masked the geometry.)
+    blue_c = rgb_to_xy(0.0, 0.0, 1.0, GAMUT_C)
+    blue_a = rgb_to_xy(0.0, 0.0, 1.0, GAMUT_A)
+    assert blue_c != blue_a
+    assert _point_in_triangle(blue_c, *GAMUT_C)
+    assert _point_in_triangle(blue_a, *GAMUT_A)
 
 
 def test_encoder_clamps_each_channel_to_its_own_gamut():
     # A mixed-gamut area (a modern colour bulb next to a legacy strip) must not
-    # collapse to one triangle for both.
+    # collapse to one triangle for both. Blue is the witness — see the
+    # rgb_to_xy test above for why green no longer separates the gamuts.
     enc = HueStreamEncoder(
         "abcdefab-1234-1234-1234-0123456789ab",
         channel_gamuts={0: GAMUT_C, 1: GAMUT_A},
     )
-    frame = enc.build_frame_xy({0: (0.0, 1.0, 0.0), 1: (0.0, 1.0, 0.0)})
+    frame = enc.build_frame_xy({0: (0.0, 0.0, 1.0), 1: (0.0, 0.0, 1.0)})
     body = frame[16 + 36:]
     ch0, ch1 = body[0:7], body[7:14]
-    assert ch0[1:5] != ch1[1:5]  # different x,y for the same requested green
+    assert ch0[1:5] != ch1[1:5]  # different x,y for the same requested blue
 
 
 def test_black_frame_holds_the_last_chromaticity():

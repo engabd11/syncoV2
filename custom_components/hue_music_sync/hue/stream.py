@@ -114,17 +114,24 @@ def clamp_to_gamut(x: float, y: float, gamut=GAMUT_C) -> tuple[float, float]:
 def rgb_to_xy(
     r: float, g: float, b: float, gamut=GAMUT_C
 ) -> tuple[float, float]:
-    """Standard Hue RGB -> xy chromaticity (sRGB gamma + Wide-RGB D65), gamut-clamped.
+    """Hue RGB -> xy chromaticity (sRGB gamma + sRGB→XYZ D65), gamut-clamped.
 
     Chromaticity is scale-invariant, so callers should pass a full-brightness
     colour and carry brightness separately for stable dimming. The optional
     ``gamut`` parameter (default Gamut C) allows per-light gamut triangles
     fetched from the CLIP v2 API for accurate colour clamping on mixed setups.
+
+    The matrix is the sRGB → XYZ D65 transform on Philips' current Colour
+    Conversion page (0.4124 / 0.3576 / 0.1805 …). It replaced the "Wide-RGB
+    D65" matrix (0.649926 / 0.103455 / 0.197109 …) that came from the original
+    2013 developer docs and has since been superseded — the two disagree most
+    on saturated greens and blues, which is exactly where the old matrix read
+    wrong.
     """
     r, g, b = _gam(r), _gam(g), _gam(b)
-    x_ = r * 0.649926 + g * 0.103455 + b * 0.197109
-    y_ = r * 0.234327 + g * 0.743075 + b * 0.022673
-    z_ = r * 0.000000 + g * 0.053077 + b * 1.035763
+    x_ = r * 0.4124 + g * 0.3576 + b * 0.1805
+    y_ = r * 0.2126 + g * 0.7152 + b * 0.0722
+    z_ = r * 0.0193 + g * 0.1192 + b * 0.9505
     total = x_ + y_ + z_
     if total <= 0:
         return 0.0, 0.0
