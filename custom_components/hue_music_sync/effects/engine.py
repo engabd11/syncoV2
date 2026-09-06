@@ -332,8 +332,9 @@ class EffectEngine:
         self._mel_prev: list[float] = []
         self._mel_flux: list[float] = []
         self._light_flash: dict[int, float] = {}
-        # Last emitted per-light brightness, for the rise slew-rate limiter that
-        # turns a beat into a fast SWING instead of a 1-frame strobe (bri_slew).
+        # Last emitted per-light brightness, for the per-second rise/fall rate
+        # caps (bri_rise_rate / bri_fall_rate) that turn a beat into a fast
+        # SWING instead of a 1-frame hard edge on the bulbs.
         self._emit_b: dict[int, float] = {}
         self.roles = {}
         self._role_offset = 0
@@ -1042,7 +1043,17 @@ class EffectEngine:
                 nc = (nc[0] * s + (1 - s), nc[1] * s + (1 - s), nc[2] * s + (1 - s))
             cval = max(nc)
             # Glow (smoothed) + peak flash (sharp), theme-faithful value, master.
-            b = min(1.0, new_b + lf.get(cid, 0.0)) * (0.35 + 0.65 * cval) * self.brightness
+            # The per-second rise/fall ceiling still shapes Extreme's edges (the
+            # non-bypassable effect-rate limiter binds downstream regardless);
+            # clamped before the colour-value term and the user's ceiling,
+            # matching the music path.
+            prev_emit = self._emit_b.get(cid, 0.0)
+            lo = prev_emit - p.bri_fall_rate * dt
+            hi = prev_emit + p.bri_rise_rate * dt
+            swung = new_b + lf.get(cid, 0.0)
+            swung = lo if swung < lo else hi if swung > hi else swung
+            self._emit_b[cid] = swung
+            b = min(1.0, swung) * (0.35 + 0.65 * cval) * self.brightness
             out[cid] = (nc[0] * b, nc[1] * b, nc[2] * b)
         return out
 
@@ -1390,7 +1401,6 @@ class EffectEngine:
 
         colour_lerp = frame_alpha(p.colour_lerp, dt)
         attack, decay = frame_alpha(p.bri_attack, dt), frame_alpha(p.bri_decay, dt)
-        slew = p.bri_slew  # max emitted brightness RISE per frame (anti-strobe)
         out: dict[int, RGB] = {}
         for cid, (target_color, target_b) in targets.items():
             # Pre-drop pull-down: compress the brightness HEADROOM above the
@@ -1427,15 +1437,17 @@ class EffectEngine:
                     )
                     mx = max(nc) or 1.0
                     nc = (nc[0] / mx, nc[1] / mx, nc[2] / mx)
-            # Continuous brightness + flash/swell, slew-limited so a beat reads
-            # as a fast dim<->bright SWING rather than a 1-frame strobe. The rise
-            # is capped at ``bri_slew`` per frame (≈full in 1/bri_slew frames);
-            # falls pass through freely so the room still dims quickly between
-            # hits. bri_slew == 1.0 keeps the old instant snap (calm modes).
+            # Continuous brightness + flash/swell, rate-limited so a beat reads
+            # as a fast dim<->bright SWING rather than a 1-frame hard edge.
+            # Brightness moves no faster than the rung's rise/fall ceiling, in
+            # full scale per second. A single-frame jump is what bulbs render as
+            # a hard edge, and what the downstream rate limiter used to quantise
+            # into a staircase; capping the *rate* removes both. The fall is
+            # always the slower of the two, per Philips' guidance that brightness
+            # should transition more slowly than colour.
             b = min(1.0, new_b + overlay)
             prev_emit = self._emit_b.get(cid, 0.0)
-            if slew < 1.0 and b > prev_emit + slew:
-                b = prev_emit + slew
+            b = max(prev_emit - p.bri_fall_rate * dt, min(prev_emit + p.bri_rise_rate * dt, b))
             self._emit_b[cid] = b
             b *= self.brightness
             out[cid] = (nc[0] * b, nc[1] * b, nc[2] * b)

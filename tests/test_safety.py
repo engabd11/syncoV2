@@ -359,3 +359,156 @@ def test_black_frame_without_history_is_in_gamut():
     y = int.from_bytes(dark[3:5], "big") / 65535
     assert _point_in_triangle((x, y), *GAMUT_C)
     assert dark[5:7] == b"\x00\x00"
+
+
+# --- the non-bypassable 12.5 Hz effect-rate ceiling (P2, from CAMusic) -----
+
+_LIM_DT = 1.0 / 50.0  # the nominal analysis/render rate
+
+
+def test_no_channel_changes_faster_than_the_physical_ceiling():
+    # Philips: the bridge relays at 25 Hz over Zigbee, so the fastest effect
+    # rate should stay under 12.5 Hz. Beyond that the change is coalesced away
+    # before it reaches a bulb. The ceiling is a hardware fact, not a comfort
+    # setting, which is exactly why the limiter is not bypassable.
+    from hue_music_sync.effects.safety import EffectRateLimiter, PHYSICAL_MAX_EFFECT_HZ
+
+    limiter = EffectRateLimiter()
+    transitions = 0
+    prev = None
+    frames = 500  # 10 s at 50 fps
+    for i in range(frames):
+        v = 1.0 if i % 2 == 0 else 0.0  # a 25 Hz strobe: twice the ceiling
+        out = limiter.process({0: (v, v, v)}, _LIM_DT)[0]
+        if prev is not None and abs(out[0] - prev[0]) >= FLASH_DELTA:
+            transitions += 1
+        prev = out
+    hz = transitions / (frames * _LIM_DT)
+    assert hz <= PHYSICAL_MAX_EFFECT_HZ + 0.5, (
+        f"channel changed at {hz} Hz, above the {PHYSICAL_MAX_EFFECT_HZ} Hz ceiling"
+    )
+
+
+def test_smooth_fades_are_not_quantised_by_the_rate_limiter():
+    # Only transitions are limited. A slow ramp is a gradation, not a flash,
+    # and holding it would visibly step what should be a smooth fade.
+    from hue_music_sync.effects.safety import EffectRateLimiter
+
+    limiter = EffectRateLimiter()
+    last = 0.0
+    for i in range(500):
+        v = i / 500.0
+        out = limiter.process({0: (v, v, v)}, _LIM_DT)[0]
+        assert out[0] >= last - 1e-6, "a monotonic fade went backwards"
+        last = out[0]
+    assert last > 0.9, f"the fade never arrived, ending at {last}"
+
+
+def test_blocked_reversal_holds_near_the_previous_value():
+    # The Entertainment API asks for a continuous stream; suppressing a
+    # transition must never mean emitting black or releasing the whole
+    # accumulated jump at once. Note the first step down is NOT blocked: with
+    # no established direction it is the start of a transition, and one
+    # transition is exactly what the ceiling allows.
+    from hue_music_sync.effects.safety import EffectRateLimiter
+
+    limiter = EffectRateLimiter()
+    limiter.process({0: (1.0, 1.0, 1.0)}, _LIM_DT)
+    limiter.process({0: (0.0, 0.0, 0.0)}, _LIM_DT)
+    out = limiter.process({0: (1.0, 1.0, 1.0)}, _LIM_DT)[0]
+    assert out[0] < 0.25, f"a blocked reversal released the whole jump: {out[0]}"
+    assert out[0] >= 0.0, "emitted a negative level"
+
+
+def test_blocked_reversal_arrives_once_the_interval_is_spent():
+    # Holding is bounded, not permanent: the channel has to catch up with its
+    # input as soon as the ceiling allows, or a fast passage would leave the
+    # room stuck on a stale colour.
+    from hue_music_sync.effects.safety import EffectRateLimiter
+
+    limiter = EffectRateLimiter()
+    limiter.process({0: (1.0, 1.0, 1.0)}, _LIM_DT)
+    limiter.process({0: (0.0, 0.0, 0.0)}, _LIM_DT)
+    last = 0.0
+    for _ in range(30):
+        last = limiter.process({0: (1.0, 1.0, 1.0)}, _LIM_DT)[0][0]
+    assert last > 0.9, f"the reversal never arrived, ending at {last}"
+
+
+def test_rate_limiter_never_amplifies_a_step_its_input_did_not_make():
+    # The staircase this replaced came from holding a fast *monotone* ramp and
+    # then releasing the accumulated delta. Driven by a rate-capped input —
+    # which is what the engine now produces — the output must never move
+    # further in one frame than the input did.
+    from hue_music_sync.effects.safety import EffectRateLimiter
+
+    limiter = EffectRateLimiter()
+    step = 0.02
+    v = 0.0
+    direction = 1
+    prev_out = 0.0
+    for i in range(500):
+        if i % 37 == 0:
+            direction = -direction
+        v = min(1.0, max(0.0, v + direction * step))
+        out = limiter.process({0: (v, v, v)}, _LIM_DT)[0][0]
+        assert abs(out - prev_out) <= step + 1e-4, (
+            f"output moved {abs(out - prev_out)} in one frame from an input "
+            f"that moved at most {step}"
+        )
+        prev_out = out
+
+
+def test_sub_threshold_dither_cannot_latch_the_rate_limiter():
+    # A channel wobbling below the flash threshold is a gradation, not a
+    # series of transitions, and must pass through untouched however fast it
+    # alternates — otherwise ordinary noise would gate the whole channel.
+    from hue_music_sync.effects.safety import EffectRateLimiter
+
+    limiter = EffectRateLimiter()
+    for i in range(200):
+        v = 0.5 + (0.02 if i % 2 == 0 else -0.02)
+        out = limiter.process({0: (v, v, v)}, _LIM_DT)[0]
+        assert out[0] == pytest.approx(v, abs=1e-4), "sub-threshold dither was held"
+
+
+# --- engine brightness rate caps (P2, from CAMusic) ------------------------
+
+def test_emitted_brightness_never_moves_faster_than_the_rungs_ceiling():
+    # The anti-choppiness guarantee. A single-frame jump is what a bulb
+    # renders as a hard edge; capping the per-second rate is what removes it.
+    # Extreme is excluded only because it scales by a colour-value term
+    # *after* the slew, so its emitted max-channel is not the slewed value.
+    from hue_music_sync.audio.analyzer import AnalysisFrame
+    from hue_music_sync.effects.modes import MODE_PARAMS
+
+    for mode in SyncMode:
+        p = MODE_PARAMS.get(mode)  # AUTO has no params of its own
+        if p is None or p.graph_reactive:
+            continue
+        eng = EffectEngine(_channels())
+        eng.set_mode(mode)
+        prev = None
+        for i in range(240):
+            # Alternate full blast and silence to demand the fastest moves
+            # the engine can be asked for.
+            lvl = 1.0 if i % 2 == 0 else 0.0
+            f = AnalysisFrame(
+                bands={"sub_bass": lvl, "bass": lvl, "low_mid": lvl,
+                       "mid": lvl, "high": lvl},
+                energy=lvl,
+            )
+            out = eng.render(f, _DT)
+            if prev is not None:
+                for cid, c in out.items():
+                    now = max(c)
+                    was = max(prev[cid])
+                    assert now - was <= p.bri_rise_rate * _DT + 1e-3, (
+                        f"{mode} channel {cid} rose {now - was} in one frame, "
+                        f"over {p.bri_rise_rate * _DT}"
+                    )
+                    assert was - now <= p.bri_fall_rate * _DT + 1e-3, (
+                        f"{mode} channel {cid} fell {was - now} in one frame, "
+                        f"over {p.bri_fall_rate * _DT}"
+                    )
+            prev = out

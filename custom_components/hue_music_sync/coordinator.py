@@ -96,7 +96,11 @@ from .effects.modes import (
     sanitize_auto_levels,
 )
 from .timing import TimingCalibrator, slew_toward
-from .effects.safety import RELAXED_MAX_FLASHES_PER_S, FieldSafety
+from .effects.safety import (
+    RELAXED_MAX_FLASHES_PER_S,
+    EffectRateLimiter,
+    FieldSafety,
+)
 from .hue.bridge import EntertainmentConfig, HueBridge
 from .hue.events import HueEventStream
 from .hue.stream import DtlsStream, HueStreamEncoder, StreamRevoked
@@ -393,6 +397,12 @@ class SyncSession:
         )
         self._was_unrestrained = False
         self._was_bypass = False
+        # Philips' 12.5 Hz ceiling. Applied on every rung including Extreme
+        # -- it is a statement about what Zigbee can deliver, not a comfort
+        # setting, so exceeding it produces no visible change and only more
+        # strobing. Deliberately NOT part of the bypass below: Extreme skips
+        # the flash limiter (FieldSafety), never the physical ceiling.
+        self._rate_limiter = EffectRateLimiter()
         self._last_safe_t: float | None = None
         # Predictive beat grid + musical-structure trackers, fed the analyzer's
         # feature stream so the engine can anticipate beats and ride builds/drops.
@@ -578,6 +588,7 @@ class SyncSession:
             # Clear them so the new mode anchors to its own field from this frame.
             self._safety.reset()
             self._safety_relaxed.reset()
+            self._rate_limiter.reset()  # channel state is stale after the switch
             self._was_unrestrained = self._unrestrained()
             self._last_safe_t = None
         if settings.auto_levels != prev.auto_levels:
@@ -1430,16 +1441,22 @@ class SyncSession:
         bypass = self._bypass_limiter()
         unrestrained = self._unrestrained()
         if bypass:
-            # Extreme: no limiter at all. Keep the limiters' field history clean
-            # so they engage correctly if the user switches back to another mode.
+            # Extreme: no *flash* limiter. Keep the limiters' field history
+            # clean so they engage correctly if the user switches back to
+            # another mode. The physical rate ceiling still applies.
             if not self._was_bypass:
                 self._safety.reset()
                 self._safety_relaxed.reset()
+                self._rate_limiter.reset()  # channel state is stale after the switch
         else:
             limiter = self._safety_relaxed if unrestrained else self._safety
             if unrestrained != self._was_unrestrained or self._was_bypass:
                 limiter.reset()  # field history is stale after a limiter/bypass switch
+                self._rate_limiter.reset()
             colors = limiter.process(colors, dt)
+        # The 12.5 Hz per-channel transition ceiling binds on every path --
+        # including Extreme, which bypasses only the flash limiter above.
+        colors = self._rate_limiter.process(colors, dt)
         self._was_unrestrained = unrestrained
         self._was_bypass = bypass
         # Skip-unchanged optimisation: the bridge truncates brightness to 11
@@ -1707,6 +1724,7 @@ class SyncSession:
             self._applied_delay_ms = None  # re-adopt, don't slew across the gap
             self._safety.reset()  # field history is stale after the gap
             self._safety_relaxed.reset()
+            self._rate_limiter.reset()
             self._last_safe_t = None
             self._last_sent_colors = None  # force a full frame on reconnect
             _LOGGER.info("Reconnected DTLS stream for %s", self._config.name)

@@ -99,11 +99,26 @@ class ModeParams:
     bri_decay: float = 0.24  # per-frame brightness fall rate (lower = gentler)
     flash_decay: float = 0.80  # per-frame fade of the beat-flash burst (lower =
     #                            snappier, more strobe-like firework fall)
-    bri_slew: float = 1.0      # max emitted brightness RISE per frame: 1.0 =
-    #                            instant snap (a strobe); lower turns each beat
-    #                            into a fast dim<->bright SWING (≈full in
-    #                            1/bri_slew frames, e.g. 0.22 ≈ 90 ms at 50 fps).
-    #                            Falls are unlimited, so the room still dims fast.
+    bri_rise_rate: float = 16.0  # ceiling on emitted-brightness RISE, full scale
+    #                            per second. Replaced the per-frame ``bri_slew``
+    #                            cap (rise-only, disabled on three of five rungs),
+    #                            under which a beat attack was a single-frame
+    #                            discontinuity — what bulbs render as a hard edge
+    #                            and what the rate limiter quantised into a
+    #                            staircase. Philips' guidance is that people are
+    #                            far more sensitive to rapid brightness changes
+    #                            than to rapid colour changes, so the brightness
+    #                            transition should be the *slower* of the two;
+    #                            these stay under the encoder's xy slew
+    #                            (~4.8 full scale/s at the 12-bit xy slew cap)
+    #                            and the fall rate below stays well under the
+    #                            rise.
+    bri_fall_rate: float = 4.0  # ceiling on emitted-brightness FALL, full scale
+    #                            per second. See ``bri_rise_rate``. The fall is
+    #                            deliberately the looser of the two only in
+    #                            ratio to the music: it buys the smooth dimming
+    #                            between beats that an unlimited fall (the old
+    #                            behaviour) flattened into a hard cut.
     # --- 3D spatial choreography (0 = off, keeps the flat/legacy look) -------
     wave_gain: float = 0.0     # brightness from beat wavefronts sweeping the room
     wave_speed: float = 1.8    # wavefront speed (normalised room-units / second)
@@ -299,6 +314,7 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         # broadband, High cuts right above the vowel cluster, Extreme keeps
         # all but the purest tones.
         salience_gamma=1.6, width_min=0.20,
+        bri_rise_rate=4.0, bri_fall_rate=1.5,
     ),
     # Gentle club: visible dimming, soft flashes on the stronger beats, album
     # colours stepping each beat across a wide spatial spread. The calmest of
@@ -307,6 +323,7 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         base=0.12, floor=0.05, bass_gain=0.14, beat_gain=0.9, beat_threshold=1.4,
         spread=0.0, colour_speed=0.05, shimmer=0.10, colour_sat=0.7,
         colour_beat_step=0.0, colour_lerp=0.40, bri_attack=1.0, bri_decay=0.30,
+        bri_rise_rate=16.0, bri_fall_rate=3.0,
         wave_gain=0.75, wave_speed=2.2, wave_width=0.30, height_freq=0.30,
         depth_wash=0.08, anticipation_ms=80, drop_boost=0.50, build_desat=0.50,
         role_mix=(1.0, 0.0, 0.0),
@@ -329,11 +346,12 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         base=0.06, floor=0.035, bass_gain=0.30, beat_gain=1.6, beat_threshold=1.1,
         spread=0.0, colour_speed=0.06, shimmer=0.50, colour_sat=0.8,
         colour_beat_step=0.0, colour_lerp=0.38, bri_attack=1.0, bri_decay=0.38,
+        bri_rise_rate=20.0, bri_fall_rate=4.0,
         wave_gain=0.55, wave_speed=2.2, wave_width=0.32,
         anticipation_ms=80, drop_boost=0.60, build_desat=0.45,
         role_mix=(0.4, 0.3, 0.3), mid_gain=1.0, mid_threshold=1.25,
         vocal_dim=0.05, role_rotate_beats=16, dynamic_roles=True, hard_snap=True,
-        flash_decay=0.80, bri_slew=0.30,
+        flash_decay=0.80,
         highlight_quantile=0.40, weak_pulse=0.16, downbeat_pulse=0.45,
         colour_jump=0.09, colour_spread=0.55, full_room_accent=0.94,
         energy_gain=0.15,
@@ -355,7 +373,7 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         spread=0.0, colour_speed=0.05, shimmer=0.0, colour_sat=0.97,
         colour_beat_step=0.0, colour_lerp=0.55, energy_gain=0.16,
         bri_attack=1.0, bri_decay=0.40,
-        bri_slew=0.22, flash_decay=0.82,
+        bri_rise_rate=24.0, bri_fall_rate=5.0, flash_decay=0.82,
         wave_gain=0.55, wave_speed=2.4, wave_width=0.30,
         anticipation_ms=90, drop_boost=0.80, build_desat=0.50,
         role_mix=(1.0, 0.0, 0.0), hard_snap=True,
@@ -410,6 +428,7 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         energy_gain=0.06,                         # a touch of whole-room loudness lift (kept low)
         flash_decay=0.70,                         # per-frame fade of a peak flash
         bri_attack=0.5, bri_decay=0.4,            # glow smoothing (flash stays sharp)
+        bri_rise_rate=26.0, bri_fall_rate=6.0,
         colour_speed=0.05, colour_flow=0.05,      # smooth colour drift (no beat jumps)
         colour_spread=0.4, colour_lerp=0.4, colour_sat=0.97,
         pan_gain=0.6,                             # stereo → light the matching side
