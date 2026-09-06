@@ -1367,7 +1367,7 @@ class EffectEngine:
                 # the window) — selective modes only roll waves for the beats
                 # that matter; weak ticks barely ripple.
                 acc = max(0.0, min(1.0, beatgrid.accent))
-                nb = (beatgrid.beat_in_bar + 1) % 4
+                nb = (beatgrid.beat_in_bar + 1) % max(1, beatgrid.beats_per_bar)
                 hl = self._beat_highlight(p, acc, append=False)
                 w = pulse_weight(p, acc, nb, hl, beatgrid.beats_per_bar)
                 if w > 0.0:
