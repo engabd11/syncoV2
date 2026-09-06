@@ -316,6 +316,10 @@ class ModeParams:
     # EffectEngine.melbank_loud_weights).
     mel_peakiness: float = 0.0    # 0 = pure mean, 1 = pure hottest bin
 
+    # --- Colour tilt + spatial coupling (P4, from CAMusic)
+    colour_tilt: float = 0.0      # 0 = pure x-rank colour (legacy), 1 = full tilt
+    spatial_coupling: float = 0.0  # how much each lamp hears of its neighbours
+
 
 MODE_PARAMS: dict[SyncMode, ModeParams] = {
     # Seamless: NO dimming whatsoever (base == floor) — the lights hold a steady
@@ -335,6 +339,7 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         salience_gamma=1.6, width_min=0.20,
         bri_rise_rate=4.0, bri_fall_rate=1.5,
         mel_peakiness=0.20, band_loud_strength=0.15,
+        colour_tilt=0.50,
     ),
     # Gentle club: visible dimming, soft flashes on the stronger beats, album
     # colours stepping each beat across a wide spatial spread. The calmest of
@@ -356,6 +361,7 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         pan_gain=0.5,
         mel_peakiness=0.35, band_loud_strength=0.35,
         tonal_gain=0.22, tonal_attack_s=0.65, tonal_release_s=1.5,
+        colour_tilt=0.45, spatial_coupling=0.45,
     ),
     # The band on your lights: bass lights snap on kicks, guitar lights pop on
     # mid onsets, and vocal lights shimmer dimly with the singing — assignments
@@ -381,6 +387,7 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         salience_gamma=1.0, width_min=0.12, kick_bass_floor=0.35,
         mel_peakiness=0.40, band_loud_strength=0.45,
         tonal_gain=0.26,
+        colour_tilt=0.35, spatial_coupling=0.35,
         predrop_depth=0.45, phrase_bars=4, phrase_colour_shift=0.05,
         pan_gain=0.6,
     ),
@@ -407,6 +414,7 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         salience_gamma=0.8, width_min=0.08, nobeat_flash=0.30,
         mel_peakiness=0.40, band_loud_strength=0.40,
         tonal_gain=0.20, tonal_damp=1.4,
+        colour_tilt=0.25, spatial_coupling=0.40,
         # Phantom-beat guard: the offline track map force-fits a tempo grid across
         # the WHOLE song, so its scheduled beats keep ticking through tails and
         # breakdowns where the drums have stopped. Gate each scheduled beat by the
@@ -455,6 +463,7 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         flash_decay=0.70,                         # per-frame fade of a peak flash
         bri_attack=0.5, bri_decay=0.4,            # glow smoothing (flash stays sharp)
         bri_rise_rate=26.0, bri_fall_rate=6.0,
+        colour_tilt=0.30,
         colour_speed=0.05, colour_flow=0.05,      # smooth colour drift (no beat jumps)
         colour_spread=0.4, colour_lerp=0.4, colour_sat=0.97,
         pan_gain=0.6,                             # stereo → light the matching side
@@ -1428,30 +1437,25 @@ def render(engine, frame) -> dict[int, tuple[RGB, float]]:
     # the frame: this used to be reached only by Extreme's renderer, which is
     # why the ``loudness`` tunable did nothing on any other rung.
     mel_w = engine.melbank_loud_weights(frame, p)
-    out: dict[int, tuple[RGB, float]] = {}
+    # Pre-pass (P4, from CAMusic): the two continuous per-lamp drives — the
+    # melbank glow and the attack pop — are computed for every lamp first so
+    # they can be spatially coupled before anything reads them. These two are
+    # precisely the terms that made each lamp an independent visualiser: both
+    # are computed from that lamp's own narrow slice of the spectrum and from
+    # nothing else. The pop is coupled at half strength: fully diffusing the
+    # transient layer would blunt the per-instrument detail it exists for.
+    mel_raw: dict[int, float] = {}
+    pop_raw: dict[int, float] = {}
     for ch in engine.channels:
         info = engine.cmap[ch.channel_id]
-        role = roles.get(ch.channel_id, ROLE_BASS)
-        # EVERY lamp gets a strong continuous reaction: the low-end weight of its
-        # role drive PLUS its own slice of the melbank spectrum PLUS the room
-        # loudness. No lamp is ever starved - the whole room reacts to the music.
-        # Roles only add *flavour* on top (kick/guitar punch, vocal shimmer);
-        # they no longer decide whether a lamp reacts at all.
-        drive = mids if (has_roles and role == ROLE_MID) else bass
-        bri = base_term + p.bass_gain * drive * env_mul
-        if p.melbank_gain:
-            mel_drive = _melbank_drive(
-                frame, env, info, p.pan_gain, p.mel_peakiness, mel_w
-            )
-            bri += (p.melbank_floor + p.melbank_gain * mel_drive) * music * env_mul
-        if p.energy_gain:
-            # The whole room follows the song's loudness contour together (the
-            # "brighten on the build, dim in the breakdown" motion).
-            bri += p.energy_gain * engine.energy_env
+        cid = ch.channel_id
+        mel_raw[cid] = (
+            _melbank_drive(frame, env, info, p.pan_gain, p.mel_peakiness, mel_w)
+            if p.melbank_gain
+            else 0.0
+        )
+        pop = 0.0
         if p.spectral_pop and tr:
-            # Pop on a fresh attack anywhere in this lamp's slice of the spectrum
-            # (kick -> low lamps, snare -> low-mids, guitar -> mids, cymbal -> highs),
-            # pan-weighted so a panned hit pops the matching side of the room.
             lo, hi = info["mel_lo"], info["mel_hi"]
             if hi > lo:
                 pan = getattr(frame, "pan", None)
@@ -1461,9 +1465,6 @@ def render(engine, frame) -> dict[int, tuple[RGB, float]]:
                         tr, pan, lo, hi, side, p.pan_gain, p.mel_peakiness, mel_w
                     )
                 elif p.mel_peakiness > 0.0 or mel_w is not None:
-                    # Same mean-and-peak blend as the glow drive, for the same
-                    # reason: a single-bin transient averaged over a lamp's
-                    # whole slice arrives at a fraction of its size.
                     vals = [
                         v
                         * (mel_w[lo + i] if mel_w and lo + i < len(mel_w) else 1.0)
@@ -1478,7 +1479,36 @@ def render(engine, frame) -> dict[int, tuple[RGB, float]]:
                     )
                 else:
                     pop = sum(tr[lo:hi]) / (hi - lo)
-                bri += p.spectral_pop * pop * music
+        pop_raw[cid] = pop
+    k = p.spatial_coupling
+    if k > 0.0:
+        mel_drv = engine.couple_drives(mel_raw, k)
+        pop_drv = engine.couple_drives(pop_raw, k * 0.5)
+    else:
+        mel_drv, pop_drv = mel_raw, pop_raw
+    out: dict[int, tuple[RGB, float]] = {}
+    for ch in engine.channels:
+        info = engine.cmap[ch.channel_id]
+        role = roles.get(ch.channel_id, ROLE_BASS)
+        # EVERY lamp gets a strong continuous reaction: the low-end weight of its
+        # role drive PLUS its own slice of the melbank spectrum PLUS the room
+        # loudness. No lamp is ever starved - the whole room reacts to the music.
+        # Roles only add *flavour* on top (kick/guitar punch, vocal shimmer);
+        # they no longer decide whether a lamp reacts at all.
+        drive = mids if (has_roles and role == ROLE_MID) else bass
+        bri = base_term + p.bass_gain * drive * env_mul
+        if p.melbank_gain:
+            mel_drive = mel_drv[ch.channel_id]
+            bri += (p.melbank_floor + p.melbank_gain * mel_drive) * music * env_mul
+        if p.energy_gain:
+            # The whole room follows the song's loudness contour together (the
+            # "brighten on the build, dim in the breakdown" motion).
+            bri += p.energy_gain * engine.energy_env
+        if p.spectral_pop and tr:
+            # Pop on a fresh attack anywhere in this lamp's slice of the
+            # spectrum (kick -> low lamps, snare -> low-mids, guitar -> mids,
+            # cymbal -> highs), spatially coupled at half strength (P4).
+            bri += p.spectral_pop * pop_drv[ch.channel_id] * music
         if has_roles and role == ROLE_VOCAL:
             # The human flavour: a vocal lamp still reacts to the music (above),
             # then shimmers with the singing on top - softened a touch, but never
@@ -1523,7 +1553,12 @@ def render(engine, frame) -> dict[int, tuple[RGB, float]]:
         # morphs the spatial gradient toward golden-ratio spacing by rank —
         # every lamp its own distinct hue (the apartment-sync look) instead of
         # near-neighbours on a smooth gradient.
-        cpos = info["xrank"] * span * p.colour_spread
+        # Colour on the tilted room axis (P4): colour_tilt = 0 is byte-identical
+        # to the x-only behaviour, and a flat room is identical either way.
+        cbase = info["xrank"] + (
+            info["spatial_pos"] - info["xrank"]
+        ) * p.colour_tilt
+        cpos = cbase * span * p.colour_spread
         colour = engine.palette.sample(cpos + rot + engine.colour_phase)
         # Theme-faithful value: a dark palette swatch (dark silver, deep purple)
         # renders as dimmer light, so moody album art gives a moody show. The

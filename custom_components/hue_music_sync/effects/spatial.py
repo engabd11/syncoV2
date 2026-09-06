@@ -144,6 +144,194 @@ def melbank_window(spectral_pos: float, n_bins: int, span: float = 0.20) -> tupl
     return lo, max(lo + 1, hi)
 
 
+# --- Colour tilt + spatial coupling (P4, ported from CAMusic) ---------------
+
+# Dominantly left-right tilted room axis for the colour field (see
+# :func:`colour_axis_projection`).
+COLOUR_AXIS_X = 0.845
+COLOUR_AXIS_Y = 0.296
+COLOUR_AXIS_Z = 0.465
+
+# ``exp(-x^2) = 0.6`` at ``x ~= 0.715``, so dividing the mean
+# nearest-neighbour distance by this puts a lamp's neighbour at weight ~0.6 —
+# close enough to bind them, far from making the room a single average.
+SIGMA_NEIGHBOUR_SCALE = 0.715
+# Bounds on sigma as a fraction of the unit room cube.
+SIGMA_MIN = 0.15
+SIGMA_MAX = 0.60
+
+
+def colour_axis_projection(pos: tuple[float, float, float]) -> float:
+    """Project a position onto a tilted room axis, for colour.
+
+    Colour has always been a function of the x axis alone — ``xrank`` — so a
+    room's hue could only ever sweep left to right, and two lamps at the
+    same x but different heights or depths were always the same colour
+    however far apart they were. This gives the field second and third
+    dimensions to drift in.
+
+    Dominantly left-right, so the result still reads as the same effect
+    rather than a new one. An axis with no spread collapses to 0.5 in
+    :func:`normalize_positions` and contributes a constant, which the
+    caller's min-max normalisation then removes entirely — so a flat room
+    renders exactly as it did before.
+    """
+    return (
+        COLOUR_AXIS_X * pos[0]
+        + COLOUR_AXIS_Y * pos[1]
+        + COLOUR_AXIS_Z * pos[2]
+    )
+
+
+def coupling_kernel(
+    positions: list[tuple[float, float, float]],
+) -> list[list[float]]:
+    """Row-stochastic Gaussian kernel over lamp positions.
+
+    The thing that makes a room read as one field rather than as N
+    independent visualisers: row ``i`` says how much lamp ``i`` should hear
+    of each other lamp.
+
+    **Rows sum to 1** — the property that matters. A row-stochastic matrix
+    applied to a set of values is a weighted average, so the room's total
+    energy is preserved and the coupling can neither brighten nor dim it,
+    only redistribute. It also means a *constant* field comes back
+    unchanged, so coupling has no effect at all on a moment when every lamp
+    already agrees.
+
+    sigma is derived from the area's own geometry — the mean
+    nearest-neighbour distance — so a tight cluster of four bulbs and a
+    room spanning fifteen metres both get a neighbourhood that means the
+    same thing relative to their own spacing.
+
+    Computed once, at construction: the shape never changes, only how much
+    of it is mixed in. Ported from CAMusic's
+    ``SpatialWaves.couplingKernel``.
+    """
+    n = len(positions)
+    if n <= 1:
+        return [[1.0]]
+    near_sum = 0.0
+    near_count = 0
+    for i in range(n):
+        best = float("inf")
+        for j in range(n):
+            if i == j:
+                continue
+            d = distance(positions[i], positions[j])
+            if d < best:
+                best = d
+        if best < float("inf"):
+            near_sum += best
+            near_count += 1
+    mean_near = near_sum / near_count if near_count else 0.3
+    sigma = min(SIGMA_MAX, max(SIGMA_MIN, mean_near / SIGMA_NEIGHBOUR_SCALE))
+
+    rows: list[list[float]] = []
+    for i in range(n):
+        row = []
+        for j in range(n):
+            d = distance(positions[i], positions[j]) / sigma
+            row.append(math.exp(-d * d))
+        total = sum(row)  # includes the self term (always 1): never zero
+        rows.append([w / total for w in row])
+    return rows
+
+
+# --- Colour tilt + spatial coupling (P4, ported from CAMusic) ---------------
+
+# Dominantly left-right tilted room axis for the colour field (see
+# :func:`colour_axis_projection`).
+COLOUR_AXIS_X = 0.845
+COLOUR_AXIS_Y = 0.296
+COLOUR_AXIS_Z = 0.465
+
+# ``exp(-x^2) = 0.6`` at ``x ~= 0.715``, so dividing the mean
+# nearest-neighbour distance by this puts a lamp's neighbour at weight ~0.6 —
+# close enough to bind them, far from making the room a single average.
+SIGMA_NEIGHBOUR_SCALE = 0.715
+# Bounds on sigma as a fraction of the unit room cube.
+SIGMA_MIN = 0.15
+SIGMA_MAX = 0.60
+
+
+def colour_axis_projection(pos: tuple[float, float, float]) -> float:
+    """Project a position onto a tilted room axis, for colour.
+
+    Colour has always been a function of the x axis alone — ``xrank`` — so a
+    room's hue could only ever sweep left to right, and two lamps at the
+    same x but different heights or depths were always the same colour
+    however far apart they were. This gives the field second and third
+    dimensions to drift in.
+
+    Dominantly left-right, so the result still reads as the same effect
+    rather than a new one. An axis with no spread collapses to 0.5 in
+    :func:`normalize_positions` and contributes a constant, which the
+    caller's min-max normalisation then removes entirely — so a flat room
+    renders exactly as it did before.
+    """
+    return (
+        COLOUR_AXIS_X * pos[0]
+        + COLOUR_AXIS_Y * pos[1]
+        + COLOUR_AXIS_Z * pos[2]
+    )
+
+
+def coupling_kernel(
+    positions: list[tuple[float, float, float]],
+) -> list[list[float]]:
+    """Row-stochastic Gaussian kernel over lamp positions.
+
+    The thing that makes a room read as one field rather than as N
+    independent visualisers: row ``i`` says how much lamp ``i`` should hear
+    of each other lamp.
+
+    **Rows sum to 1** — the property that matters. A row-stochastic matrix
+    applied to a set of values is a weighted average, so the room's total
+    energy is preserved and the coupling can neither brighten nor dim it,
+    only redistribute. It also means a *constant* field comes back
+    unchanged, so coupling has no effect at all on a moment when every lamp
+    already agrees.
+
+    sigma is derived from the area's own geometry — the mean
+    nearest-neighbour distance — so a tight cluster of four bulbs and a
+    room spanning fifteen metres both get a neighbourhood that means the
+    same thing relative to their own spacing.
+
+    Computed once, at construction: the shape never changes, only how much
+    of it is mixed in. Ported from CAMusic's
+    ``SpatialWaves.couplingKernel``.
+    """
+    n = len(positions)
+    if n <= 1:
+        return [[1.0]]
+    near_sum = 0.0
+    near_count = 0
+    for i in range(n):
+        best = float("inf")
+        for j in range(n):
+            if i == j:
+                continue
+            d = distance(positions[i], positions[j])
+            if d < best:
+                best = d
+        if best < float("inf"):
+            near_sum += best
+            near_count += 1
+    mean_near = near_sum / near_count if near_count else 0.3
+    sigma = min(SIGMA_MAX, max(SIGMA_MIN, mean_near / SIGMA_NEIGHBOUR_SCALE))
+
+    rows: list[list[float]] = []
+    for i in range(n):
+        row = []
+        for j in range(n):
+            d = distance(positions[i], positions[j]) / sigma
+            row.append(math.exp(-d * d))
+        total = sum(row)  # includes the self term (always 1): never zero
+        rows.append([w / total for w in row])
+    return rows
+
+
 def height_band(nz: float) -> str:
     """Map a lamp's height to the frequency band it should favour.
 

@@ -45,6 +45,8 @@ from .modes import (
     render,
 )
 from .spatial import (
+    colour_axis_projection,
+    coupling_kernel,
     Wave,
     distance,
     floor_origin,
@@ -305,6 +307,41 @@ class EffectEngine:
                 "mel_hi": mel_hi,
                 "side": 2.0 * nx - 1.0,  # stereo side (-1 left .. +1 right)
             }
+        # The tilted colour axis (P4, from CAMusic): min-max normalised across
+        # the area so the palette always spans the room whatever shape it is.
+        # A collapsed projection — every lamp at the same point on the axis —
+        # falls back to rank, which is what a single-lamp or perfectly-stacked
+        # area needs. colour_tilt = 0 keeps the pure x-rank behaviour.
+        projections = {
+            cid: colour_axis_projection(pos) for cid, pos in positions.items()
+        }
+        rank_of = {ch.channel_id: rank for rank, ch in enumerate(order)}
+        proj_lo = min(projections.values())
+        proj_span = max(projections.values()) - proj_lo
+        for ch in channels:
+            cid = ch.channel_id
+            if proj_span < 1e-6:
+                # every lamp at the same point on the axis: fall back to rank
+                self.cmap[cid]["spatial_pos"] = rank_of[cid] / max(1, n - 1)
+            else:
+                self.cmap[cid]["spatial_pos"] = (
+                    (projections[cid] - proj_lo) / proj_span
+                )
+        # Spatial-coupling kernel (P4, from CAMusic): how much each lamp hears
+        # of each other lamp, built once — the geometry does not change while a
+        # session is running, and only the AMOUNT mixed in is tunable. Rows are
+        # aligned with _rank_ids.
+        self._coupling = coupling_kernel(
+            [
+                (
+                    self.cmap[cid]["nx"],
+                    self.cmap[cid]["ny"],
+                    self.cmap[cid]["nz"],
+                )
+                for cid in self._rank_ids
+            ]
+        )
+        self._rank_row = {cid: i for i, cid in enumerate(self._rank_ids)}
         # Extreme rotating spectral map (see _render_extreme): n contiguous bands
         # spanning low→high, assigned to lamps by rank + a rotation that advances
         # over time, so the spectrum rotates around the room (every lamp takes
@@ -536,6 +573,39 @@ class EffectEngine:
                 min(_LOUD_WEIGHT_MAX, max(_LOUD_WEIGHT_MIN, x / mean)) for x in w
             ]
         return w
+
+    def couple_drives(
+        self, values: dict[int, float], k: float
+    ) -> dict[int, float]:
+        """Blend each lamp's continuous drive with its neighbours' (P4).
+
+        **Pre-smoothing, on the drive — never post-smoothing, on the output.**
+        The distinction is the whole design: smoothing the *output* would
+        smear the beat flash across lamps (what the bass/mid/vocal role split
+        exists to keep apart) and widen the travelling wavefront until the
+        near-versus-far peak that makes a kick read as sweeping the room
+        flattened out. Smoothing the *drive* touches only the terms that made
+        each lamp an independent visualiser and leaves every transient layer
+        exactly as it was. A spatial kernel has no temporal memory — it is
+        zero-phase and cannot delay anything by construction.
+
+        ``k`` is the mix amount (ModeParams.spatial_coupling); 0 returns the
+        input unchanged. Ported from CAMusic's ``SyncoEngine.diffuseDrives``.
+        """
+        if k <= 0.0 or not self._coupling:
+            return values
+        out: dict[int, float] = {}
+        for cid, v in values.items():
+            row_i = self._rank_row.get(cid)
+            if row_i is None:
+                out[cid] = v
+                continue
+            mix = 0.0
+            row = self._coupling[row_i]
+            for j, w in enumerate(row):
+                mix += w * values.get(self._rank_ids[j], 0.0)
+            out[cid] = (1.0 - k) * v + k * mix
+        return out
 
     def _update_rhythm_conf(self, frame: AnalysisFrame, beatgrid) -> None:
         """Track evidence that the song currently has an actual beat.
@@ -863,6 +933,9 @@ class EffectEngine:
         if cs != 1.0:
             changes["colour_speed"] = base.colour_speed * cs
             changes["colour_flow"] = base.colour_flow * cs
+        koh = fac("cohesion")
+        if koh != 1.0:
+            changes["spatial_coupling"] = min(1.0, base.spatial_coupling * koh)
         loud = fac("loudness")
         if loud != 1.0:
             changes["band_loud_strength"] = min(1.0, base.band_loud_strength * loud)
@@ -1198,7 +1271,10 @@ class EffectEngine:
             # Colour stays keyed to the lamp's fixed position (a stable spatial
             # gradient) + the drift phase: only the brightness/instrument activity
             # rotates, so the room keeps a coherent colour field.
-            cpos = info["xrank"] * p.colour_spread + self.colour_phase
+            cbase = info["xrank"] + (
+                info["spatial_pos"] - info["xrank"]
+            ) * p.colour_tilt
+            cpos = cbase * p.colour_spread + self.colour_phase
             tgt_c = self.palette.sample(cpos)
             m = max(tgt_c)
             tgt_c = (tgt_c[0] / m, tgt_c[1] / m, tgt_c[2] / m) if m > 1e-6 else (0.0, 0.0, 0.0)
