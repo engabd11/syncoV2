@@ -57,6 +57,10 @@ class BeatGrid:
     # pulses modestly instead of confidently; the track map (authoritative,
     # offline) always leaves it at full.
     schedule_strength: float = 1.0
+    # Beats per bar of the locked grid (4 = common time, 3 = waltz). Keys
+    # the pulse hierarchy's per-metre bar weights; until metre detection
+    # is ported every producer emits 4 and behaviour is unchanged.
+    beats_per_bar: int = 4
 
 
 _MIN_BPM = 70.0

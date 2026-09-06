@@ -31,6 +31,7 @@ from __future__ import annotations
 from collections import deque
 
 from ..color.palette import RGB
+from .engine import frame_alpha, frame_decay, TUNING_FPS
 
 # A "flash" half-transition must move the field luminance by at least this much
 # (fraction of full scale) to count, per the WCAG 10%-of-max threshold.
@@ -58,6 +59,10 @@ MAX_RED_FLASHES_PER_S = 1
 RED_SATURATION = 0.55  # field is "red" when red dominance exceeds this
 
 _WINDOW_S = 1.0
+# The per-frame coefficients below are tuned at TUNING_FPS and re-expressed
+# for the frame time actually observed (see engine.frame_alpha) — without
+# that, engage/release and the activity peak-hold ran at loop timing rather
+# than wall time, exactly the drift the rest of the engine was cured of.
 _EMA_ALPHA = 0.04  # slow anchor (~0.5 s) the field is pinned toward when limiting
 _ENGAGE_RATE = 1.0  # compression engages instantly once the budget is exceeded
 _RELEASE_RATE = 0.02  # …and releases slowly, so it can't oscillate back to strobing
@@ -152,7 +157,10 @@ class FieldSafety:
         # release once the content genuinely calms — not merely on a timer.
         if self._prev_raw is None:
             self._prev_raw = field
-        self._activity = max(self._activity * _ACTIVITY_DECAY, abs(field - self._prev_raw))
+        self._activity = max(
+            self._activity * frame_decay(_ACTIVITY_DECAY, dt),
+            abs(field - self._prev_raw),
+        )
         self._prev_raw = field
 
         # Decide compression from the flash budget *measured on what we emitted*
@@ -173,7 +181,7 @@ class FieldSafety:
         else:
             comp_target = 0.0 if over else 1.0
         rate = _ENGAGE_RATE if comp_target < self._comp else _RELEASE_RATE
-        self._comp += (comp_target - self._comp) * rate
+        self._comp += (comp_target - self._comp) * frame_alpha(rate, dt)
         limiting = self._comp < 0.999
 
         # The anchor tracks the field while we are *not* limiting. While limiting
@@ -185,7 +193,7 @@ class FieldSafety:
         # so it is safe; freezing it against falling still stops it drifting
         # *down* into the swing (which would leak dark flashes back through).
         if not limiting or field > self._ema:
-            self._ema += (field - self._ema) * _EMA_ALPHA
+            self._ema += (field - self._ema) * frame_alpha(_EMA_ALPHA, dt)
 
         # While limiting, pull the field's *temporal swing* toward that anchor two
         # ways at once: a gain compresses the bright peaks, and a white floor
@@ -266,3 +274,105 @@ class FieldSafety:
                 min(m, b * (1.0 - mix) + white),
             )
         return out
+
+
+class EffectRateLimiter:
+    """Cap how often any single channel completes a *transition*.
+
+    The ceiling is :data:`PHYSICAL_MAX_EFFECT_HZ` -- Philips' guidance is that
+    the bridge relays at 25 Hz over Zigbee, so the fastest effect rate should
+    stay under 12.5 Hz. Separate from :class:`FieldSafety` and deliberately not
+    bypassable: the flash budget is a comfort limit that Extreme may escape at
+    the user's request, this is a statement about the hardware, so it binds on
+    every path including the one that skips FieldSafety.
+
+    A *transition* is a direction reversal of at least ``FLASH_DELTA``, the
+    same definition the WCAG flash budget is written in. That distinction is
+    the whole point: continuous motion in one direction is a single transition
+    however many frames it spans, so a ramp passes at full frame rate.
+
+    This previously gated on *samples* instead -- it held a channel's last
+    value until the interval had elapsed, then released the whole accumulated
+    delta at once. On anything faster than about 6 full scale per second,
+    which includes every beat attack and most of the decay after it, that
+    turned a smooth envelope into a 12.5 Hz staircase with >=0.10 risers. It
+    was most visible on single-channel bulbs; a gradient strip presents
+    several channels whose hold timers land out of phase, so the eye averaged
+    their staircases into something that read smooth.
+
+    A reversal that arrives too soon holds at the extreme until the interval
+    is spent, then releases. That release is a step, but a bounded one:
+    everything upstream is already rate-capped (see
+    ``ModeParams.bri_rise_rate``), so the hold can only ever accumulate
+    ``rate * min_interval`` of travel -- and it engages at all only when the
+    content reverses faster than 12.5 Hz, which real music does not. Colour is
+    never held: chromaticity is slewed in the encoder, and Philips' guidance
+    is that colour may transition faster than brightness.
+
+    Pure and dt-driven (no Home Assistant or hardware dependency) so the
+    invariants are unit-tested directly. Ported from CAMusic's
+    ``hue/FieldSafety.kt`` ``EffectRateLimiter``.
+    """
+
+    _DIR_EPS = 1e-4
+
+    def __init__(self, max_hz: float = PHYSICAL_MAX_EFFECT_HZ) -> None:
+        self._min_interval = 1.0 / max_hz
+        # channel_id -> [level, dir, last_extreme, last_reversal_t]
+        self._channels: dict[int, list[float]] = {}
+        self._t = 0.0
+
+    def reset(self) -> None:
+        self._channels.clear()
+        self._t = 0.0
+
+    def process(
+        self, colors: dict[int, RGB], dt: float
+    ) -> dict[int, RGB]:
+        if not colors:
+            return colors
+        self._t += dt
+        out: dict[int, RGB] = {}
+        for cid, c in colors.items():
+            level = max(c)
+            ch = self._channels.get(cid)
+            if ch is None:
+                self._channels[cid] = [level, 0, level, self._t]
+                out[cid] = c
+                continue
+
+            delta = level - ch[0]
+            moving = 1 if delta > self._DIR_EPS else -1 if delta < -self._DIR_EPS else 0
+
+            if moving != 0 and ch[1] != 0 and moving != ch[1]:
+                # ``ch[0]`` is a local extreme, so the swing that just finished
+                # is what counts as a transition -- below the flash threshold
+                # it is dither, not a flash, and must not latch the channel.
+                swing = abs(ch[0] - ch[2])
+                if swing >= FLASH_DELTA and self._t - ch[3] < self._min_interval:
+                    # Blocked: hold at the extreme. ``dir`` and ``last_extreme``
+                    # are deliberately left alone so the channel stays in this
+                    # reversal until the interval is spent -- updating them
+                    # would let the held output register as a fresh
+                    # sub-threshold swing and unlatch the gate on the very next
+                    # frame.
+                    out[cid] = self._scale_to(c, ch[0])
+                    continue
+                if swing >= FLASH_DELTA:
+                    ch[3] = self._t
+                ch[2] = ch[0]
+
+            if moving != 0:
+                ch[1] = moving
+            ch[0] = level
+            out[cid] = c
+        return out
+
+    @staticmethod
+    def _scale_to(c: RGB, level: float) -> RGB:
+        # ``c`` at a held ``level``, preserving hue so only brightness is limited.
+        m = max(c)
+        if m <= 1e-6:
+            return (level, level, level)
+        k = level / m
+        return (min(1.0, c[0] * k), min(1.0, c[1] * k), min(1.0, c[2] * k))

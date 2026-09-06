@@ -17,7 +17,12 @@ from hue_music_sync.const import (
     SyncEffect,
     SyncMode,
 )
-from hue_music_sync.effects.engine import EffectEngine
+from hue_music_sync.effects.engine import (
+    EffectEngine,
+    frame_alpha,
+    frame_decay,
+    TUNING_FPS,
+)
 from hue_music_sync.hue.bridge import (
     EntertainmentChannel,
     capture_light_state,
@@ -86,9 +91,12 @@ def test_xy_frame_carries_dedicated_brightness():
     y = int.from_bytes(frame[55:57], "big") / 65535
     bri = int.from_bytes(frame[57:59], "big") / 65535
     assert bri == 1.0  # dedicated brightness, not derived from shrinking RGB
-    # Pure sRGB blue maps just outside Gamut C and is clamped to the blue vertex
-    # (0.1532, 0.0475) — deterministic colour instead of the bridge guessing.
-    assert abs(x - 0.1532) < 0.001 and abs(y - 0.0475) < 0.001
+    # Pure sRGB blue (0.15, 0.06 under the current sRGB→XYZ D65 matrix) sits just
+    # outside Gamut C and clamps onto the green-blue edge — deterministic colour
+    # instead of the bridge guessing. Under the deprecated 2013 matrix it landed
+    # far below the blue vertex; the two matrices disagree most on saturated
+    # blues and greens, which is why the matrix was updated.
+    assert abs(x - 0.1535) < 0.001 and abs(y - 0.0599) < 0.001
 
 
 def test_xy_dimming_keeps_chromaticity_constant():
@@ -477,3 +485,44 @@ def test_analyzer_silence_no_beats():
     silence = np.zeros(ANALYSIS_HOP, dtype=np.float32)
     beats = sum(a.push(silence).beat for _ in range(200))
     assert beats == 0
+
+
+# --- frame-time normalisation (ported from CAMusic) -----------------------
+
+def test_frame_alpha_is_identity_at_the_nominal_rate():
+    # The conversion is exact: at the tuning frame time every coefficient is
+    # itself, so the tuned constants keep their existing feel.
+    for a in (0.04, 0.10, 0.16, 0.55, 0.85, 0.999):
+        assert frame_alpha(a, 1.0 / TUNING_FPS) == pytest.approx(a, abs=1e-9)
+        assert frame_decay(a, 1.0 / TUNING_FPS) == pytest.approx(a, abs=1e-9)
+
+
+def test_frame_alpha_tracks_wall_time_not_frame_count():
+    # Four 12.5 ms frames (50 ms total) must smooth exactly like one 50 ms
+    # frame — the whole point of expressing easing against the clock.
+    a = 0.16
+    one_big = 1.0 - (1.0 - frame_alpha(a, 0.05))
+    acc = 1.0
+    for _ in range(4):
+        acc *= 1.0 - frame_alpha(a, 0.0125)
+    assert 1.0 - acc == pytest.approx(one_big, rel=1e-6)
+    # A stalled loop (one 200 ms frame) eases further in that frame than the
+    # nominal one would have, instead of holding the envelope to loop timing.
+    assert frame_alpha(a, 0.2) > frame_alpha(a, 0.02)
+
+
+def test_engine_envelope_follows_wall_time():
+    # The band envelope's rise over one long frame must match the same total
+    # time spanned by several short frames (up to float error).
+    def render_span(dts):
+        eng = EffectEngine(_channels(5))
+        frame = AnalysisFrame(
+            bands={"bass": 1.0}, energy=0.5, melbank=[0.4] * 16,
+        )
+        for d in dts:
+            eng.render(frame, d)
+        return eng.band_env["bass"]
+
+    steady = render_span([0.02] * 10)
+    stalled = render_span([0.2])
+    assert stalled == pytest.approx(steady, rel=2e-2)

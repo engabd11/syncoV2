@@ -146,6 +146,20 @@ MID_FLUX_SHARE = 0.30
 # non-rising frame (one hop after the peak), trading ~20 ms of latency for
 # never confusing a swell with a hit.
 MID_MAX_ATTACK_FRAMES = 3
+
+# --- Live absolute melbank reference (P5, from CAMusic) ---------------------
+# How long the live band-loudness reference settles for before it is
+# published: ~8 s at the ~50 Hz analysis rate. Long enough to have heard
+# more than an intro, short enough to be useful well inside the first
+# chorus. A reference taken from the first second of a track is a
+# reference to its intro, and applying it would mis-weight the rest of
+# the song — so it publishes nothing until settled (the offline scan's
+# reference stays authoritative wherever one exists).
+MEL_REF_WARMUP_FRAMES = 400
+# Floor on a bin's live reference, as a fraction of the loudest bin's.
+# Matches the offline scan's own relative floor: without it a band
+# carrying only room tone gets normalised up to look like real content.
+MEL_REF_FLOOR_FRAC = 0.02
 MID_RISE_RATIO = 1.05  # energy growth per frame that still counts as "rising"
 # Minimum frames between successive onsets on one stream. At 50 fps, 3 frames
 # (~60 ms) lets fast double-bass / blast-beat metal through (~16 hits/s ceiling);
@@ -386,6 +400,19 @@ class Analyzer:
         self._beat_times: deque[float] = deque(maxlen=8)
         self._frame_index = 0
 
+        # Live absolute melbank reference (P5, from CAMusic): a slow envelope
+        # of the RAW pre-AGC per-bin melbank means. The published melbank is
+        # per-bin AGC'd (dividing the published value, not the means a line
+        # earlier), so this slow pre-AGC envelope IS computable live — the
+        # offline scan's percentile, approximated in real time. Empty until
+        # the warm-up settles; reset between tracks.
+        self._mel_ref = ExpFilter(
+            np.zeros(self._n_mel, dtype=np.float32),
+            alpha_rise=0.002,
+            alpha_decay=0.0002,
+        )
+        self._mel_ref_frames = 0
+
         # Absolute-loudness salience state (see SALIENCE_* above).
         self._rms_smooth = 0.0
         self._loud_ref = SALIENCE_MIN_REF
@@ -507,7 +534,7 @@ class Analyzer:
         bass_flux = self._bass_flux_agc.normalise(onsets["bass_flux"])
         centroid = self._spectral_centroid(mag)
         tempo = self._estimate_tempo()
-        melbank = self._melbank(mag)
+        melbank, melbank_ref = self._melbank(mag)
         t_audio = self._frame_index * self.frame_period
         self._frame_index += 1
 
@@ -530,17 +557,44 @@ class Analyzer:
             salience=salience,
             onset_width=onsets["width"],
             chroma=[float(x) for x in mag @ self._chroma_proj],
+            melbank_ref=melbank_ref,
         )
+
+    def _mel_ref_live(self, means: list[float]) -> list[float]:
+        """Publish the live band-loudness reference once it has settled.
+
+        Normalised by the loudest bin, so the result is "how loud is this
+        band relative to the loudest one" — the same quantity a track
+        scan's percentile produces, and the same shape the engine's weights
+        expect. Bins below ``MEL_REF_FLOOR_FRAC`` of the peak are clamped
+        to it, so a band carrying only noise cannot have that noise
+        normalised up into a meaningful-looking level. Empty until the
+        envelope has settled (``MEL_REF_WARMUP_FRAMES`` of music).
+        """
+        smoothed = self._mel_ref.update(np.asarray(means, dtype=np.float32))
+        self._mel_ref_frames += 1
+        if self._mel_ref_frames < MEL_REF_WARMUP_FRAMES:
+            return []
+        peak = float(np.max(smoothed))
+        if peak <= 1e-9:
+            return []
+        return [
+            min(1.0, max(MEL_REF_FLOOR_FRAC, float(v) / peak)) for v in smoothed
+        ]
 
     def _melbank(self, mag: np.ndarray) -> list[float]:
         """Per-bin gain-normalised, exp-smoothed melbank for this frame."""
         means = band_means(mag, self._mel_starts, self._mel_counts)
+        # Fold the RAW means into the live reference BEFORE the AGC chain
+        # touches anything (that is the whole point — see the field comment).
+        melbank_ref = self._mel_ref_live([float(m) for m in means])
         normed = np.fromiter(
             (self._mel_agc[i].normalise(float(means[i])) for i in range(self._n_mel)),
             dtype=np.float32,
             count=self._n_mel,
         )
-        return [float(x) for x in self._mel_filter.update(normed)]
+        mel = [float(x) for x in self._mel_filter.update(normed)]
+        return mel, melbank_ref
 
     def _spectral_centroid(self, mag: np.ndarray) -> float:
         """Centre-of-mass frequency, normalised 0..1 (soft-capped at ~5 kHz).
@@ -723,6 +777,9 @@ class Analyzer:
         for agc in self._mel_agc:
             agc.reset()
         self._mel_filter.reset(np.zeros(self._n_mel, dtype=np.float32))
+        # A new track's balance must not be seeded from the last one's.
+        self._mel_ref.reset(np.zeros(self._n_mel, dtype=np.float32))
+        self._mel_ref_frames = 0
         self._prev_log = None
         self._prev_lin = None
         self._mid_e_prev = 0.0

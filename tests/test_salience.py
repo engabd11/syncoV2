@@ -255,7 +255,12 @@ def test_scheduled_beats_scale_with_salience_too():
             p = max(p, max(max(c) for c in out.values()))
         return p - bedp
 
-    assert lift(0.2) < 0.65 * lift(1.0)
+    # 0.75, not 0.65: the per-second fall caps (P2) keep the bed from dipping
+    # between its beats, which compresses peak-vs-bed lift at both saliences
+    # (measured ratio 0.69 under the tuned caps; it was <0.65 only while the
+    # brightness fall was unlimited). The ordering itself is unchanged.
+    assert lift(0.2) < lift(1.0)
+    assert lift(0.2) < 0.75 * lift(1.0)
 
 
 def test_ten_light_room_stays_alive_with_strict_picks():

@@ -99,11 +99,26 @@ class ModeParams:
     bri_decay: float = 0.24  # per-frame brightness fall rate (lower = gentler)
     flash_decay: float = 0.80  # per-frame fade of the beat-flash burst (lower =
     #                            snappier, more strobe-like firework fall)
-    bri_slew: float = 1.0      # max emitted brightness RISE per frame: 1.0 =
-    #                            instant snap (a strobe); lower turns each beat
-    #                            into a fast dim<->bright SWING (≈full in
-    #                            1/bri_slew frames, e.g. 0.22 ≈ 90 ms at 50 fps).
-    #                            Falls are unlimited, so the room still dims fast.
+    bri_rise_rate: float = 16.0  # ceiling on emitted-brightness RISE, full scale
+    #                            per second. Replaced the per-frame ``bri_slew``
+    #                            cap (rise-only, disabled on three of five rungs),
+    #                            under which a beat attack was a single-frame
+    #                            discontinuity — what bulbs render as a hard edge
+    #                            and what the rate limiter quantised into a
+    #                            staircase. Philips' guidance is that people are
+    #                            far more sensitive to rapid brightness changes
+    #                            than to rapid colour changes, so the brightness
+    #                            transition should be the *slower* of the two;
+    #                            these stay under the encoder's xy slew
+    #                            (~4.8 full scale/s at the 12-bit xy slew cap)
+    #                            and the fall rate below stays well under the
+    #                            rise.
+    bri_fall_rate: float = 4.0  # ceiling on emitted-brightness FALL, full scale
+    #                            per second. See ``bri_rise_rate``. The fall is
+    #                            deliberately the looser of the two only in
+    #                            ratio to the music: it buys the smooth dimming
+    #                            between beats that an unlimited fall (the old
+    #                            behaviour) flattened into a hard cut.
     # --- 3D spatial choreography (0 = off, keeps the flat/legacy look) -------
     wave_gain: float = 0.0     # brightness from beat wavefronts sweeping the room
     wave_speed: float = 1.8    # wavefront speed (normalised room-units / second)
@@ -282,6 +297,29 @@ class ModeParams:
     # without pan (mono taps, pre-v4 maps) always render exactly as before.
     pan_gain: float = 0.0
 
+    # --- Sustain bloom (P3, from CAMusic): a slow room-wide glow that rises
+    # on sustained, pitched, mid-heavy material — held vocals/pads bloom
+    # instead of reading dark. Zero gain disables the layer entirely.
+    tonal_gain: float = 0.0       # brightness a fully-committed sustain adds
+    tonal_width_max: float = 0.22 # onset_width at/above which nothing is tonal
+    tonal_width_soft: float = 0.10  # soft knee below tonal_width_max
+    tonal_attack_s: float = 0.55  # rise time constant (s): blooms, not pulses
+    tonal_release_s: float = 1.30  # fall time constant (s): lingers
+    tonal_damp: float = 1.0       # how hard live transients suppress the bloom
+
+    # --- melbank shape (P3, from CAMusic): the melbank drive blends the
+    # slice's mean with its hottest bin (a held vocal occupies 2-3 of a
+    # lamp's ~7 bins, so a pure mean delivered it at a third of its real
+    # height), and per-bin absolute-loudness weights (mean-normalised) put
+    # how LOUD each band is back into the per-bin AGC'd melbank on every
+    # rung ( Extreme keeps its raw attenuating form — see
+    # EffectEngine.melbank_loud_weights).
+    mel_peakiness: float = 0.0    # 0 = pure mean, 1 = pure hottest bin
+
+    # --- Colour tilt + spatial coupling (P4, from CAMusic)
+    colour_tilt: float = 0.0      # 0 = pure x-rank colour (legacy), 1 = full tilt
+    spatial_coupling: float = 0.0  # how much each lamp hears of its neighbours
+
 
 MODE_PARAMS: dict[SyncMode, ModeParams] = {
     # Seamless: NO dimming whatsoever (base == floor) — the lights hold a steady
@@ -299,6 +337,9 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         # broadband, High cuts right above the vowel cluster, Extreme keeps
         # all but the purest tones.
         salience_gamma=1.6, width_min=0.20,
+        bri_rise_rate=4.0, bri_fall_rate=1.5,
+        mel_peakiness=0.20, band_loud_strength=0.15,
+        colour_tilt=0.50,
     ),
     # Gentle club: visible dimming, soft flashes on the stronger beats, album
     # colours stepping each beat across a wide spatial spread. The calmest of
@@ -307,6 +348,7 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         base=0.12, floor=0.05, bass_gain=0.14, beat_gain=0.9, beat_threshold=1.4,
         spread=0.0, colour_speed=0.05, shimmer=0.10, colour_sat=0.7,
         colour_beat_step=0.0, colour_lerp=0.40, bri_attack=1.0, bri_decay=0.30,
+        bri_rise_rate=16.0, bri_fall_rate=3.0,
         wave_gain=0.75, wave_speed=2.2, wave_width=0.30, height_freq=0.30,
         depth_wash=0.08, anticipation_ms=80, drop_boost=0.50, build_desat=0.50,
         role_mix=(1.0, 0.0, 0.0),
@@ -317,6 +359,9 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         salience_gamma=1.3, width_min=0.15, kick_bass_floor=0.30,
         predrop_depth=0.30, phrase_bars=4, phrase_colour_shift=0.03,
         pan_gain=0.5,
+        mel_peakiness=0.35, band_loud_strength=0.35,
+        tonal_gain=0.22, tonal_attack_s=0.65, tonal_release_s=1.5,
+        colour_tilt=0.45, spatial_coupling=0.45,
     ),
     # The band on your lights: bass lights snap on kicks, guitar lights pop on
     # mid onsets, and vocal lights shimmer dimly with the singing — assignments
@@ -329,16 +374,20 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         base=0.06, floor=0.035, bass_gain=0.30, beat_gain=1.6, beat_threshold=1.1,
         spread=0.0, colour_speed=0.06, shimmer=0.50, colour_sat=0.8,
         colour_beat_step=0.0, colour_lerp=0.38, bri_attack=1.0, bri_decay=0.38,
+        bri_rise_rate=20.0, bri_fall_rate=4.0,
         wave_gain=0.55, wave_speed=2.2, wave_width=0.32,
         anticipation_ms=80, drop_boost=0.60, build_desat=0.45,
         role_mix=(0.4, 0.3, 0.3), mid_gain=1.0, mid_threshold=1.25,
         vocal_dim=0.05, role_rotate_beats=16, dynamic_roles=True, hard_snap=True,
-        flash_decay=0.80, bri_slew=0.30,
+        flash_decay=0.80,
         highlight_quantile=0.40, weak_pulse=0.16, downbeat_pulse=0.45,
         colour_jump=0.09, colour_spread=0.55, full_room_accent=0.94,
         energy_gain=0.15,
         melbank_gain=0.44, melbank_floor=0.035, colour_flow=0.05, spectral_pop=0.45,
         salience_gamma=1.0, width_min=0.12, kick_bass_floor=0.35,
+        mel_peakiness=0.40, band_loud_strength=0.45,
+        tonal_gain=0.26,
+        colour_tilt=0.35, spatial_coupling=0.35,
         predrop_depth=0.45, phrase_bars=4, phrase_colour_shift=0.05,
         pan_gain=0.6,
     ),
@@ -355,7 +404,7 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         spread=0.0, colour_speed=0.05, shimmer=0.0, colour_sat=0.97,
         colour_beat_step=0.0, colour_lerp=0.55, energy_gain=0.16,
         bri_attack=1.0, bri_decay=0.40,
-        bri_slew=0.22, flash_decay=0.82,
+        bri_rise_rate=24.0, bri_fall_rate=5.0, flash_decay=0.82,
         wave_gain=0.55, wave_speed=2.4, wave_width=0.30,
         anticipation_ms=90, drop_boost=0.80, build_desat=0.50,
         role_mix=(1.0, 0.0, 0.0), hard_snap=True,
@@ -363,6 +412,9 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         colour_jump=0.16, colour_spread=0.22, full_room_accent=0.0,
         melbank_gain=0.42, melbank_floor=0.06, colour_flow=0.05, spectral_pop=0.45,
         salience_gamma=0.8, width_min=0.08, nobeat_flash=0.30,
+        mel_peakiness=0.40, band_loud_strength=0.40,
+        tonal_gain=0.20, tonal_damp=1.4,
+        colour_tilt=0.25, spatial_coupling=0.40,
         # Phantom-beat guard: the offline track map force-fits a tempo grid across
         # the WHOLE song, so its scheduled beats keep ticking through tails and
         # breakdowns where the drums have stopped. Gate each scheduled beat by the
@@ -410,6 +462,8 @@ MODE_PARAMS: dict[SyncMode, ModeParams] = {
         energy_gain=0.06,                         # a touch of whole-room loudness lift (kept low)
         flash_decay=0.70,                         # per-frame fade of a peak flash
         bri_attack=0.5, bri_decay=0.4,            # glow smoothing (flash stays sharp)
+        bri_rise_rate=26.0, bri_fall_rate=6.0,
+        colour_tilt=0.30,
         colour_speed=0.05, colour_flow=0.05,      # smooth colour drift (no beat jumps)
         colour_spread=0.4, colour_lerp=0.4, colour_sat=0.97,
         pan_gain=0.6,                             # stereo → light the matching side
@@ -566,6 +620,11 @@ _CHAR_NEUTRAL = 0.50
 _CHAR_TAU_S = 12.0
 _CHAR_WARMUP_S = 20.0
 _CHAR_MIN_ENERGY = 0.15
+# Per-onset weight for the live attack term (P5, from CAMusic). Onsets
+# arrive a couple of times a second rather than fifty, so a dt-based
+# time constant would barely move it; this settles over roughly thirty
+# hits, a few seconds of music.
+_CHAR_ATTACK_ONSET_ALPHA = 0.035
 
 # --- Layer B: character -> the ladder band it earns --------------------------
 # Anchors on the 0..1 ladder axis (see ``_RUNG_SHARE`` for where each rung sits
@@ -873,9 +932,25 @@ class AutoIntensityPicker:
         # silent intro or a gap between tracks can't drag the estimate down.
         if character is None and energy >= _CHAR_MIN_ENERGY:
             ema = min(1.0, dt / _CHAR_TAU_S)
-            self._char_attack += (onset_width - self._char_attack) * ema
-            self._char_busy += (flux - self._char_busy) * ema
-            self._char_bass += ((1.0 - centroid) - self._char_bass) * ema
+            # Attack is sampled on frames that actually carry an onset (P5,
+            # from CAMusic). This is the fix for the picker sitting on the
+            # lowest enabled rung: averaging onset_width over EVERY frame
+            # pulls the heaviest character weight toward ~0, because the
+            # width is near zero between transients — most frames of any
+            # track. The offline profile energy-weights its mean, so only the
+            # live path was flat; sampling where the measurement means
+            # something is the same idea for a stream that cannot see the
+            # track in advance.
+            if beat:
+                self._char_attack += (
+                    onset_width - self._char_attack
+                ) * _CHAR_ATTACK_ONSET_ALPHA
+            # Busy and bass are energy-weighted to match the offline
+            # profile: a quiet passage should not vote as loudly as the
+            # body of the track.
+            w = ema * _unit(energy)
+            self._char_busy += (flux - self._char_busy) * w
+            self._char_bass += ((1.0 - centroid) - self._char_bass) * w
             self._char_age += dt
         char = self._character(tempo) if character is None else _unit(character)
 
@@ -1127,27 +1202,55 @@ _MUSIC_GATE = 0.12
 
 
 def _pan_weighted_mean(
-    values, pan, lo: int, hi: int, side: float, gain: float
+    values,
+    pan,
+    lo: int,
+    hi: int,
+    side: float,
+    gain: float,
+    peakiness: float = 0.0,
+    mel_w: list[float] | None = None,
 ) -> float:
     """Mean of ``values[lo:hi]`` with each bin weighted toward this lamp's
     side of the stereo field: a bin panned to the lamp's side counts up to
     double, one panned away fades toward zero. Dividing by the bin count
     (not the weight sum) keeps a centred mix EXACTLY the unweighted mean —
     hard pans redistribute brightness across the room, never add to it.
+
+    ``mel_w`` (P3) optionally applies the per-bin absolute-loudness weights;
+    ``peakiness`` (P3, from CAMusic) blends the weighted mean toward the
+    weighted hottest bin — a held vocal occupies two or three of a lamp's
+    ~seven bins, so a pure mean delivered it at roughly a third of its real
+    height — audible as a mid that is present in the music and absent from
+    the room. Defaults keep the plain weighted mean.
     """
     total = 0.0
+    peak = 0.0
     for k in range(lo, hi):
         w = 1.0 + gain * pan[k] * side
         if w < 0.0:
             w = 0.0
         elif w > 2.0:
             w = 2.0
-        total += values[k] * w
-    return total / (hi - lo)
+        v = values[k] * w
+        if mel_w is not None and k < len(mel_w):
+            v *= mel_w[k]
+        total += v
+        if v > peak:
+            peak = v
+    mean = total / (hi - lo)
+    if peakiness <= 0.0:
+        return mean
+    return (1.0 - peakiness) * mean + peakiness * peak
 
 
 def _melbank_drive(
-    frame, env: dict[str, float], info: dict, pan_gain: float = 0.0
+    frame,
+    env: dict[str, float],
+    info: dict,
+    pan_gain: float = 0.0,
+    peakiness: float = 0.0,
+    mel_w: list[float] | None = None,
 ) -> float:
     """This lamp's continuous reactive level (0..~1) from its melbank slice.
 
@@ -1156,6 +1259,8 @@ def _melbank_drive(
     always defined and the room never goes dark purely for lack of a melbank.
     With stereo pan available, the slice is weighted toward the lamp's side
     of the stereo field so panned instruments light the matching side.
+    ``peakiness`` (P3, from CAMusic) blends the slice's mean toward its
+    hottest bin; ``mel_w`` (P3) applies per-bin absolute-loudness weights.
     """
     mel = getattr(frame, "melbank", None)
     if mel:
@@ -1164,9 +1269,21 @@ def _melbank_drive(
             pan = getattr(frame, "pan", None)
             if pan_gain > 0.0 and pan and len(pan) >= hi:
                 side = 2.0 * info["nx"] - 1.0
-                return _pan_weighted_mean(mel, pan, lo, hi, side, pan_gain)
-            seg = mel[lo:hi]
-            return sum(seg) / len(seg)
+                return _pan_weighted_mean(
+                    mel, pan, lo, hi, side, pan_gain, peakiness, mel_w
+                )
+            if peakiness <= 0.0 and mel_w is None:
+                seg = mel[lo:hi]
+                return sum(seg) / len(seg)
+            vals = [
+                v
+                * (mel_w[lo + i] if mel_w and lo + i < len(mel_w) else 1.0)
+                for i, v in enumerate(mel[lo:hi])
+            ]
+            mean = sum(vals) / len(vals)
+            if peakiness <= 0.0:
+                return mean
+            return (1.0 - peakiness) * mean + peakiness * max(vals)
     return env.get(
         info["band"], max(env.get("bass", 0.0), env.get("sub_bass", 0.0))
     )
@@ -1190,7 +1307,15 @@ def beat_colour_advance(params: ModeParams, strength: float, bass: float) -> flo
 
 # Musical pulse hierarchy across the bar: the downbeat hits hardest, beat 3
 # carries, beats 2/4 land softer — the 1:1-but-musical pulse of the references.
-_BAR_W = (1.0, 0.72, 0.86, 0.72)
+_BAR_W_4 = (1.0, 0.72, 0.86, 0.72)
+# Three-beat metre (waltz): the "one" lands, the two after it carry
+# evenly. Selected by BeatGrid.beats_per_bar; everything still emits 4
+# until metre detection is ported, but the machinery is per-metre now.
+_BAR_W_3 = (1.0, 0.72, 0.72)
+
+
+def _bar_weights(beats_per_bar: int) -> tuple[float, ...]:
+    return _BAR_W_3 if beats_per_bar == 3 else _BAR_W_4
 
 
 # A ranked highlight never lands limp: selective modes pulse it at least this
@@ -1199,7 +1324,11 @@ _HL_MIN = 0.55
 
 
 def pulse_weight(
-    p: ModeParams, accent: float, beat_in_bar: int, highlight: bool = True
+    p: ModeParams,
+    accent: float,
+    beat_in_bar: int,
+    highlight: bool = True,
+    beats_per_bar: int = 4,
 ) -> float:
     """0..1 size of a scheduled beat pulse from its accent and bar position.
 
@@ -1221,18 +1350,24 @@ def pulse_weight(
         w = p.weak_pulse
     if beat_in_bar == 0:
         w = max(w, p.downbeat_pulse)
-    return w * _BAR_W[beat_in_bar % 4]
+    weights = _bar_weights(beats_per_bar)
+    return w * weights[beat_in_bar % len(weights)]
 
 
 def beat_pulse(
-    p: ModeParams, accent: float, beat_in_bar: int, bass: float, highlight: bool = True
+    p: ModeParams,
+    accent: float,
+    beat_in_bar: int,
+    bass: float,
+    highlight: bool = True,
+    beats_per_bar: int = 4,
 ) -> float:
     """Snap a bass-role light gets from a *scheduled* (grid-locked) beat."""
     if p.beat_gain <= 0.0:
         return 0.0
     return (
         p.beat_gain
-        * pulse_weight(p, accent, beat_in_bar, highlight)
+        * pulse_weight(p, accent, beat_in_bar, highlight, beats_per_bar)
         * (0.6 + 0.4 * bass)
     )
 
@@ -1337,6 +1472,59 @@ def render(engine, frame) -> dict[int, tuple[RGB, float]]:
 
     waves = engine.active_waves
     tr = engine.mel_transient  # per-bin spectral transients (all-instrument pops)
+    # Per-bin absolute-loudness weights (P3, from CAMusic), computed once for
+    # the frame: this used to be reached only by Extreme's renderer, which is
+    # why the ``loudness`` tunable did nothing on any other rung.
+    mel_w = engine.melbank_loud_weights(frame, p)
+    # Pre-pass (P4, from CAMusic): the two continuous per-lamp drives — the
+    # melbank glow and the attack pop — are computed for every lamp first so
+    # they can be spatially coupled before anything reads them. These two are
+    # precisely the terms that made each lamp an independent visualiser: both
+    # are computed from that lamp's own narrow slice of the spectrum and from
+    # nothing else. The pop is coupled at half strength: fully diffusing the
+    # transient layer would blunt the per-instrument detail it exists for.
+    mel_raw: dict[int, float] = {}
+    pop_raw: dict[int, float] = {}
+    for ch in engine.channels:
+        info = engine.cmap[ch.channel_id]
+        cid = ch.channel_id
+        mel_raw[cid] = (
+            _melbank_drive(frame, env, info, p.pan_gain, p.mel_peakiness, mel_w)
+            if p.melbank_gain
+            else 0.0
+        )
+        pop = 0.0
+        if p.spectral_pop and tr:
+            lo, hi = info["mel_lo"], info["mel_hi"]
+            if hi > lo:
+                pan = getattr(frame, "pan", None)
+                if p.pan_gain > 0.0 and pan and len(pan) >= hi:
+                    side = 2.0 * info["nx"] - 1.0
+                    pop = _pan_weighted_mean(
+                        tr, pan, lo, hi, side, p.pan_gain, p.mel_peakiness, mel_w
+                    )
+                elif p.mel_peakiness > 0.0 or mel_w is not None:
+                    vals = [
+                        v
+                        * (mel_w[lo + i] if mel_w and lo + i < len(mel_w) else 1.0)
+                        for i, v in enumerate(tr[lo:hi])
+                    ]
+                    mean = sum(vals) / len(vals)
+                    pop = (
+                        (1.0 - p.mel_peakiness) * mean
+                        + p.mel_peakiness * max(vals)
+                        if vals
+                        else 0.0
+                    )
+                else:
+                    pop = sum(tr[lo:hi]) / (hi - lo)
+        pop_raw[cid] = pop
+    k = p.spatial_coupling
+    if k > 0.0:
+        mel_drv = engine.couple_drives(mel_raw, k)
+        pop_drv = engine.couple_drives(pop_raw, k * 0.5)
+    else:
+        mel_drv, pop_drv = mel_raw, pop_raw
     out: dict[int, tuple[RGB, float]] = {}
     for ch in engine.channels:
         info = engine.cmap[ch.channel_id]
@@ -1349,30 +1537,32 @@ def render(engine, frame) -> dict[int, tuple[RGB, float]]:
         drive = mids if (has_roles and role == ROLE_MID) else bass
         bri = base_term + p.bass_gain * drive * env_mul
         if p.melbank_gain:
-            mel_drive = _melbank_drive(frame, env, info, p.pan_gain)
+            mel_drive = mel_drv[ch.channel_id]
             bri += (p.melbank_floor + p.melbank_gain * mel_drive) * music * env_mul
         if p.energy_gain:
             # The whole room follows the song's loudness contour together (the
             # "brighten on the build, dim in the breakdown" motion).
             bri += p.energy_gain * engine.energy_env
         if p.spectral_pop and tr:
-            # Pop on a fresh attack anywhere in this lamp's slice of the spectrum
-            # (kick -> low lamps, snare -> low-mids, guitar -> mids, cymbal -> highs),
-            # pan-weighted so a panned hit pops the matching side of the room.
-            lo, hi = info["mel_lo"], info["mel_hi"]
-            if hi > lo:
-                pan = getattr(frame, "pan", None)
-                if p.pan_gain > 0.0 and pan and len(pan) >= hi:
-                    side = 2.0 * info["nx"] - 1.0
-                    pop = _pan_weighted_mean(tr, pan, lo, hi, side, p.pan_gain)
-                else:
-                    pop = sum(tr[lo:hi]) / (hi - lo)
-                bri += p.spectral_pop * pop * music
+            # Pop on a fresh attack anywhere in this lamp's slice of the
+            # spectrum (kick -> low lamps, snare -> low-mids, guitar -> mids,
+            # cymbal -> highs), spatially coupled at half strength (P4).
+            bri += p.spectral_pop * pop_drv[ch.channel_id] * music
         if has_roles and role == ROLE_VOCAL:
             # The human flavour: a vocal lamp still reacts to the music (above),
             # then shimmers with the singing on top - softened a touch, but never
             # the dim, starved layer it used to be.
             bri = 0.75 * bri + p.shimmer * vocal_drive * _shimmer(t, ch.channel_id)
+        if p.tonal_gain > 0.0:
+            # Sustain bloom (P3): ONE room-wide value, so a long vocal lifts
+            # every lamp together into a single glow rather than nudging
+            # whichever lamp happens to own that slice of the spectrum. A
+            # ``bri`` addend, deliberately not part of the per-beat flash: it
+            # goes through bri_attack/bri_decay and the per-second rate caps,
+            # so its per-frame change stays far under FLASH_DELTA — a smooth
+            # gradation invisible to both the WCAG limiter and the 12.5 Hz
+            # rate limiter (from CAMusic's render loop).
+            bri += p.tonal_gain * engine.tonal_env()
         if p.spread:
             bri += p.spread * env.get(info["band"], 0.0)
         if p.height_freq:
@@ -1402,7 +1592,12 @@ def render(engine, frame) -> dict[int, tuple[RGB, float]]:
         # morphs the spatial gradient toward golden-ratio spacing by rank —
         # every lamp its own distinct hue (the apartment-sync look) instead of
         # near-neighbours on a smooth gradient.
-        cpos = info["xrank"] * span * p.colour_spread
+        # Colour on the tilted room axis (P4): colour_tilt = 0 is byte-identical
+        # to the x-only behaviour, and a flat room is identical either way.
+        cbase = info["xrank"] + (
+            info["spatial_pos"] - info["xrank"]
+        ) * p.colour_tilt
+        cpos = cbase * span * p.colour_spread
         colour = engine.palette.sample(cpos + rot + engine.colour_phase)
         # Theme-faithful value: a dark palette swatch (dark silver, deep purple)
         # renders as dimmer light, so moody album art gives a moody show. The

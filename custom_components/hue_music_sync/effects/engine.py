@@ -45,6 +45,8 @@ from .modes import (
     render,
 )
 from .spatial import (
+    colour_axis_projection,
+    coupling_kernel,
     Wave,
     distance,
     floor_origin,
@@ -55,6 +57,37 @@ from .spatial import (
 )
 
 _FLASH_DECAY = 0.80  # default per-frame fade of the beat flash (modes override)
+
+# The nominal render rate the per-frame easing coefficients below were tuned
+# against (the coordinator paces the loop at DEFAULT_STREAM_FPS = 60 but feeds
+# the engine the honest wall dt; analysis frames arrive at ~50 Hz, which is what
+# the envelope constants were measured at).
+TUNING_FPS = 50.0
+
+
+def frame_alpha(alpha50: float, dt: float) -> float:
+    """Re-express a per-frame easing coefficient for the frame time observed.
+
+    Every smoother here used to apply its coefficient once per rendered frame
+    regardless of how long that frame took, so the effective envelope tracked
+    loop timing rather than wall time — audible as brightness shimmer between
+    beats whenever scheduling moved the loop. The Hue EDK defines every
+    animation in milliseconds for exactly this reason; nothing in it is
+    frame-indexed.
+
+    The conversion is exact, so ``frame_alpha(a, 1/TUNING_FPS) == a`` and the
+    tuned constants keep their existing feel at the nominal rate.
+    """
+    if alpha50 >= 1.0:
+        return 1.0
+    return 1.0 - (1.0 - alpha50) ** (dt * TUNING_FPS)
+
+
+def frame_decay(decay50: float, dt: float) -> float:
+    """``frame_alpha`` for a coefficient applied multiplicatively as a decay."""
+    if decay50 <= 0.0:
+        return 0.0
+    return decay50 ** (dt * TUNING_FPS)
 
 # Below this loudness the track is treated as silent: all beat reactions (flash,
 # colour jump, waves) fade out and stop, so only real audio ever moves the
@@ -147,11 +180,38 @@ _EXT_GLOW_PEAKINESS = 0.3  # 0 = pure mean, 1 = pure hottest-bin
 # ModeParams.band_loud_strength): <1 softens the ratio so a much-quieter band is
 # dimmer but still clearly visible, not driven to near-black.
 _BAND_LOUD_COMPRESS = 0.5
+# Mean-normalised weight clamp (see EffectEngine.melbank_loud_weights): a
+# quiet band dims to at most 4x below a loud one rather than disappearing.
+_LOUD_WEIGHT_MIN = 0.25
+_LOUD_WEIGHT_MAX = 2.5
+# Warm-up floor on the highlight ranking (P6, from CAMusic): a beat
+# ranked before the accent window has context must still EARN its
+# highlight — accent_floor alone lets an ordinary opening beat land a
+# full highlight and over-flash the first hit of a passage.
+_HL_WARMUP_FLOOR = 0.3
 # Exponent on the whole-room slam's broadband measure (ModeParams.room_punch):
 # >1 makes only genuinely big broadband hits (drops) slam the whole room, while
 # moderate hits lift it only slightly — so the unison punch stays reserved for
 # the big moments and the per-band detail carries everything else.
 _EXT_ROOM_GAMMA = 2.0
+
+# --- Sustain bloom (P3, ported from CAMusic's SyncoEngine) -----------------
+# EMA smoothing of the chroma total-variation (per frame at TUNING_FPS).
+_CHROMA_FLUX_SMOOTH = 0.10
+# Chroma total-variation at which chroma stability reaches zero. 0 = a
+# perfectly steady chord, 1 = a complete redistribution. A sustained note sits
+# well under this; a busy melodic line crosses it, which is the intent — the
+# bloom is for held material.
+_CHROMA_FLUX_REF = 0.22
+# Asymmetric envelope on room-wide transient activity: fast up, slow down.
+_TONAL_DAMP_RISE = 0.5
+_TONAL_DAMP_FALL = 0.05
+# Transient level at which the bloom is fully suppressed at tonal_damp = 1.
+_TONAL_DAMP_REF = 0.35
+# How much a locked beat grid suppresses the bloom. Mild on purpose: a vocal
+# over a steady groove is most popular music, and damping hard on rhythm
+# would switch this layer off for exactly the material the user asked it for.
+_TONAL_RHYTHM_DAMP = 0.35
 
 
 def _spectral_bands(n: int, bins: int) -> list[tuple[int, int]]:
@@ -252,6 +312,41 @@ class EffectEngine:
                 "mel_hi": mel_hi,
                 "side": 2.0 * nx - 1.0,  # stereo side (-1 left .. +1 right)
             }
+        # The tilted colour axis (P4, from CAMusic): min-max normalised across
+        # the area so the palette always spans the room whatever shape it is.
+        # A collapsed projection — every lamp at the same point on the axis —
+        # falls back to rank, which is what a single-lamp or perfectly-stacked
+        # area needs. colour_tilt = 0 keeps the pure x-rank behaviour.
+        projections = {
+            cid: colour_axis_projection(pos) for cid, pos in positions.items()
+        }
+        rank_of = {ch.channel_id: rank for rank, ch in enumerate(order)}
+        proj_lo = min(projections.values())
+        proj_span = max(projections.values()) - proj_lo
+        for ch in channels:
+            cid = ch.channel_id
+            if proj_span < 1e-6:
+                # every lamp at the same point on the axis: fall back to rank
+                self.cmap[cid]["spatial_pos"] = rank_of[cid] / max(1, n - 1)
+            else:
+                self.cmap[cid]["spatial_pos"] = (
+                    (projections[cid] - proj_lo) / proj_span
+                )
+        # Spatial-coupling kernel (P4, from CAMusic): how much each lamp hears
+        # of each other lamp, built once — the geometry does not change while a
+        # session is running, and only the AMOUNT mixed in is tunable. Rows are
+        # aligned with _rank_ids.
+        self._coupling = coupling_kernel(
+            [
+                (
+                    self.cmap[cid]["nx"],
+                    self.cmap[cid]["ny"],
+                    self.cmap[cid]["nz"],
+                )
+                for cid in self._rank_ids
+            ]
+        )
+        self._rank_row = {cid: i for i, cid in enumerate(self._rank_ids)}
         # Extreme rotating spectral map (see _render_extreme): n contiguous bands
         # spanning low→high, assigned to lamps by rank + a rotation that advances
         # over time, so the spectrum rotates around the room (every lamp takes
@@ -300,9 +395,16 @@ class EffectEngine:
         # yet is ~0 on a held tone (no rise) so sustained content never strobes.
         self._mel_prev: list[float] = []
         self._mel_flux: list[float] = []
+        # Sustain bloom (P3): the slow room-wide glow for held tonal material,
+        # plus its chroma-stability and transient-damp working state.
+        self._tonal_env: float = 0.0
+        self._chroma_prev: list[float] = []
+        self._chroma_flux: float = 0.0
+        self._room_transient: float = 0.0
         self._light_flash: dict[int, float] = {}
-        # Last emitted per-light brightness, for the rise slew-rate limiter that
-        # turns a beat into a fast SWING instead of a 1-frame strobe (bri_slew).
+        # Last emitted per-light brightness, for the per-second rise/fall rate
+        # caps (bri_rise_rate / bri_fall_rate) that turn a beat into a fast
+        # SWING instead of a 1-frame hard edge on the bulbs.
         self._emit_b: dict[int, float] = {}
         self.roles = {}
         self._role_offset = 0
@@ -318,22 +420,197 @@ class EffectEngine:
         """Asymmetric-follower band envelopes (read by :func:`.modes.render`)."""
         return self._env
 
-    def _update_env(self, frame: AnalysisFrame) -> None:
+    def _update_env(self, frame: AnalysisFrame, dt: float) -> None:
+        rise = frame_alpha(_ENV_RISE, dt)
+        fall = frame_alpha(_ENV_FALL, dt)
+        p_rise = frame_alpha(_PRESENCE_RISE, dt)
+        p_fall = frame_alpha(_PRESENCE_FALL, dt)
         for name, value in frame.bands.items():
             prev = self._env.get(name, 0.0)
-            alpha = _ENV_RISE if value > prev else _ENV_FALL
+            alpha = rise if value > prev else fall
             self._env[name] = prev + (value - prev) * alpha
             # Slow presence envelope: fast up, slow down (a band stays "present"
             # through brief gaps so roles don't flicker on every rest).
             pp = self._presence.get(name, 0.0)
-            pa = _PRESENCE_RISE if value > pp else _PRESENCE_FALL
+            pa = p_rise if value > pp else p_fall
             self._presence[name] = pp + (value - pp) * pa
         # Room loudness contour: snap up on a swell, ease down through quieter
         # passages, so the whole room follows the rhythm of the song.
-        a = _ENV_RISE if frame.energy > self._energy_env else _ENV_FALL
+        a = rise if frame.energy > self._energy_env else fall
         self._energy_env += (frame.energy - self._energy_env) * a
         # Fast peak-hold for the silence gate.
-        self._loud = max(frame.energy, self._loud * _GATE_DECAY)
+        self._loud = max(frame.energy, self._loud * frame_decay(_GATE_DECAY, dt))
+
+    def _update_tonal_env(
+        self, frame: AnalysisFrame, dt: float, music_gate: float
+    ) -> None:
+        """Slow room-wide glow for sustained, pitched, mid-heavy material.
+
+        Deliberately the mirror image of :func:`.modes.event_gates`: that
+        returns zero for a narrowband onset, this is near one there. Between
+        them the two cover the whole of ``onset_width`` rather than leaving
+        the tonal half of it dark. Four things must agree before it commits,
+        because "narrowband" alone is not enough — a cymbal wash and a held
+        note are both narrowband by inverse participation ratio, and only one
+        of them should bloom:
+
+        - **tonality**: ``onset_width`` low, on the same soft knee event_gates
+          uses;
+        - **mid presence**: the 250–2500 Hz bands, where voices and strings
+          live;
+        - **chroma stability**: a held *pitch*, not a wash — what separates a
+          vocal from room tone;
+        - **transient quiet**: mutually damped against the layers that already
+          handle percussion, so a beat and a bloom cannot both claim the same
+          moment.
+
+        Scaled by ``salience`` (AGC-immune) so a quiet passage blooms less
+        rather than being normalised up to a chorus, and by the silence gate
+        so silence rests. Ported from CAMusic's
+        ``SyncoEngine.updateTonalEnv``.
+        """
+        p = self.active_params
+        if p.tonal_gain <= 0.0:
+            self._tonal_env = 0.0
+            return
+
+        tonality = max(
+            0.0,
+            min(
+                1.0,
+                (p.tonal_width_max - frame.onset_width)
+                / max(1e-3, p.tonal_width_soft),
+            ),
+        )
+        mid_presence = max(
+            self._env.get("low_mid", 0.0), self._env.get("mid", 0.0)
+        )
+
+        # Total variation between successive chroma vectors, each normalised
+        # to sum 1 so loudness cannot masquerade as harmonic movement.
+        chroma = frame.chroma
+        if chroma and len(chroma) == len(self._chroma_prev):
+            total = sum(chroma)
+            if total > 1e-9:
+                diff = 0.0
+                for i, v in enumerate(chroma):
+                    n = v / total
+                    diff += abs(n - self._chroma_prev[i])
+                    self._chroma_prev[i] = n
+                self._chroma_flux += (
+                    (0.5 * diff - self._chroma_flux) * _CHROMA_FLUX_SMOOTH
+                )
+            chroma_stable = 1.0 - min(1.0, self._chroma_flux / _CHROMA_FLUX_REF)
+        else:
+            chroma_stable = 1.0  # no chroma this frame: neutral, not blocking
+            if chroma:
+                # Seed for the next frame (CAMusic pre-sizes its array): the
+                # first real comparison happens on frame two.
+                self._chroma_prev = [0.0] * len(chroma)
+
+        if self._mel_transient:
+            transient_now = (
+                sum(self._mel_transient) + sum(self._mel_flux)
+            ) / len(self._mel_transient)
+        else:
+            transient_now = 0.0
+        # Fast up, slow down: a hit suppresses the bloom immediately and lets
+        # it back only once the hits have actually stopped.
+        t_alpha = (
+            _TONAL_DAMP_RISE
+            if transient_now > self._room_transient
+            else _TONAL_DAMP_FALL
+        )
+        self._room_transient += (transient_now - self._room_transient) * t_alpha
+        transient_quiet = 1.0 - min(
+            1.0, p.tonal_damp * self._room_transient / _TONAL_DAMP_REF
+        )
+
+        drive = (
+            tonality
+            * mid_presence
+            * chroma_stable
+            * transient_quiet
+            * (1.0 - _TONAL_RHYTHM_DAMP * self._rhythm_conf)
+            * frame.salience
+            * music_gate
+        )
+        # dt-correct (seconds-domain tau), so a stalled or jittery frame
+        # interval cannot make the bloom jump. dt = 0 gives alpha = 0, a no-op
+        # rather than a NaN.
+        tau = p.tonal_attack_s if drive > self._tonal_env else p.tonal_release_s
+        alpha = 1.0 - math.exp(-dt / tau) if tau > 1e-4 else 1.0
+        self._tonal_env += (drive - self._tonal_env) * alpha
+
+    def tonal_env(self) -> float:
+        """Sustain-bloom envelope 0..1 (read by :func:`.modes.render`)."""
+        return self._tonal_env
+
+    def melbank_loud_weights(self, frame: AnalysisFrame, p) -> list[float] | None:
+        """Per-bin absolute-loudness weights, mean-normalised (P3).
+
+        The melbank is per-bin AGC'd, so a hi-hat tick and a kick arrive the
+        same height and every lamp reads equally bright; these weights restore
+        the difference, perceptually compressed and strength-blended. The
+        mean-normalised form REDISTRIBUTES rather than attenuates: the raw
+        weight is always <= 1 (a pure attenuator, kept for Extreme's tuned
+        gains), and since ``melbank_ref`` peaks in the bass on most material
+        an attenuator would dim the mids specifically — the opposite of what
+        the layer is for. Empty ``melbank_ref`` (live/metadata/pre-v5 maps)
+        returns None: uniform, exactly as before this existed.
+        """
+        if p.band_loud_strength <= 0.0:
+            return None
+        mel = frame.melbank
+        if not mel:
+            return None
+        ref = getattr(frame, "melbank_ref", None)
+        if not ref or len(ref) != len(mel):
+            return None
+        s = p.band_loud_strength
+        w = [
+            (1.0 - s) + s * min(1.0, max(0.0, r)) ** _BAND_LOUD_COMPRESS
+            for r in ref
+        ]
+        mean = sum(w) / len(w)
+        if mean > 1e-6:
+            w = [
+                min(_LOUD_WEIGHT_MAX, max(_LOUD_WEIGHT_MIN, x / mean)) for x in w
+            ]
+        return w
+
+    def couple_drives(
+        self, values: dict[int, float], k: float
+    ) -> dict[int, float]:
+        """Blend each lamp's continuous drive with its neighbours' (P4).
+
+        **Pre-smoothing, on the drive — never post-smoothing, on the output.**
+        The distinction is the whole design: smoothing the *output* would
+        smear the beat flash across lamps (what the bass/mid/vocal role split
+        exists to keep apart) and widen the travelling wavefront until the
+        near-versus-far peak that makes a kick read as sweeping the room
+        flattened out. Smoothing the *drive* touches only the terms that made
+        each lamp an independent visualiser and leaves every transient layer
+        exactly as it was. A spatial kernel has no temporal memory — it is
+        zero-phase and cannot delay anything by construction.
+
+        ``k`` is the mix amount (ModeParams.spatial_coupling); 0 returns the
+        input unchanged. Ported from CAMusic's ``SyncoEngine.diffuseDrives``.
+        """
+        if k <= 0.0 or not self._coupling:
+            return values
+        out: dict[int, float] = {}
+        for cid, v in values.items():
+            row_i = self._rank_row.get(cid)
+            if row_i is None:
+                out[cid] = v
+                continue
+            mix = 0.0
+            row = self._coupling[row_i]
+            for j, w in enumerate(row):
+                mix += w * values.get(self._rank_ids[j], 0.0)
+            out[cid] = (1.0 - k) * v + k * mix
+        return out
 
     def _update_rhythm_conf(self, frame: AnalysisFrame, beatgrid) -> None:
         """Track evidence that the song currently has an actual beat.
@@ -354,7 +631,7 @@ class EffectEngine:
                 c += (ev - c) * _RHYTHM_EVENT_RISE
         self._rhythm_conf = c * (1.0 - _RHYTHM_FALL)
 
-    def _update_predrop(self, p, structure) -> float:
+    def _update_predrop(self, p, structure, dt: float) -> float:
         """Advance the pre-drop pull-down envelope; return its 0..1 value.
 
         See the _PREDROP_* constants for the full contract. On ``drop_now``
@@ -423,7 +700,7 @@ class EffectEngine:
         """Per-bin melbank transient (rise above the slow baseline, 0..1)."""
         return self._mel_transient
 
-    def _update_mel_transient(self, frame: AnalysisFrame) -> None:
+    def _update_mel_transient(self, frame: AnalysisFrame, dt: float) -> None:
         """Track each melbank bin's slow baseline and its transient over it.
 
         The transient is what makes the room react to *every* instrument: a kick
@@ -432,6 +709,8 @@ class EffectEngine:
         slice. It rides above the slow baseline so a sustained tone fades from
         the pop (only the attack reads), keeping the club bright<->dark snap.
         """
+        slow_rise = frame_alpha(_MEL_SLOW_RISE, dt)
+        slow_fall = frame_alpha(_MEL_SLOW_FALL, dt)
         mel = frame.melbank
         if not mel:
             self._mel_transient = []
@@ -447,7 +726,7 @@ class EffectEngine:
         prev = self._mel_prev
         for i, v in enumerate(mel):
             s = slow[i]
-            s += (v - s) * (_MEL_SLOW_RISE if v > s else _MEL_SLOW_FALL)
+            s += (v - s) * (slow_rise if v > s else slow_fall)
             slow[i] = s
             tr.append(v - s if v > s else 0.0)
             # Per-bin positive flux: rise vs the previous frame. Fires on EVERY
@@ -558,8 +837,9 @@ class EffectEngine:
         win = self._accents
         if p.highlight_quantile <= 0.0:
             ok = True
-        elif len(win) < 8:  # not enough context yet: fall back to the floor
-            ok = accent >= p.accent_floor
+        elif len(win) < 8:
+            # Not enough context yet (P6, from CAMusic): the warm-up floor.
+            ok = accent >= max(p.accent_floor, _HL_WARMUP_FLOOR)
         else:
             ranked = sorted(win)
             thr = ranked[min(len(ranked) - 1, int(p.highlight_quantile * len(ranked)))]
@@ -651,10 +931,17 @@ class EffectEngine:
         c = fac("contrast")
         if c != 1.0:
             changes["flash_gamma"] = max(0.2, base.flash_gamma * c)
+            # Contrast also shapes the melbank's mean+peak blend: higher
+            # contrast favours the hottest bin in a lamp's slice (from
+            # CAMusic).
+            changes["mel_peakiness"] = min(1.0, base.mel_peakiness * c)
         cs = fac("colour_speed")
         if cs != 1.0:
             changes["colour_speed"] = base.colour_speed * cs
             changes["colour_flow"] = base.colour_flow * cs
+        koh = fac("cohesion")
+        if koh != 1.0:
+            changes["spatial_coupling"] = min(1.0, base.spatial_coupling * koh)
         loud = fac("loudness")
         if loud != 1.0:
             changes["band_loud_strength"] = min(1.0, base.band_loud_strength * loud)
@@ -734,7 +1021,9 @@ class EffectEngine:
             out[ch.channel_id] = (nc[0] * d, nc[1] * d, nc[2] * d)
         return out
 
-    def render_idle_show(self, t: float, intensity: float = 1.0) -> dict[int, RGB]:
+    def render_idle_show(
+        self, t: float, intensity: float = 1.0, dt: float = 0.1
+    ) -> dict[int, RGB]:
         """A slow, dreamy ambient "show" for a genuinely idle/paused room.
 
         Colours flow across the room and drift through the palette while two slow,
@@ -746,6 +1035,13 @@ class EffectEngine:
         rather than distracts, and it never flashes. Mode-independent, and it uses
         whatever palette the last song left, so the room keeps that song's colours.
         """
+        # Idle-show resets (P6, from CAMusic): the pre-drop state machine
+        # must not survive a pause into the next track.
+        self._predrop = 0.0
+        self._predrop_commit = False
+        self._predrop_streak = 0
+        self.predrop_released = 0.0
+        p = self.active_params
         inten = max(0.0, min(1.0, intensity))
         base = 0.22          # soft floor glow, always present (lifted so a paused
                              # or empty room reads as a present glow, not near-off)
@@ -763,7 +1059,25 @@ class EffectEngine:
             w1 = 0.5 + 0.5 * math.sin(2.0 * math.pi * (info["nx"] * 0.9 - t * 0.10))
             w2 = 0.5 + 0.5 * math.sin(2.0 * math.pi * (info["nz"] * 0.7 + t * 0.06) + 1.7)
             wave = 0.6 * w1 + 0.4 * w2
-            d = self.brightness * (base + amp * wave) * breath * (0.5 + 0.5 * m)
+            # Rate-limited and recorded exactly as the music path does (P6,
+            # from CAMusic): ``_emit_b`` means "what this engine last put
+            # on the wire" and the per-second caps clamp the next music
+            # frame against it. Rendering straight to the output left that
+            # memory holding a value from before the pause, so the first
+            # frame back on the music path clamped against *that* and the
+            # room flashed to roughly its pre-pause brightness before
+            # sliding down. It also makes dropping into the idle show a
+            # fade rather than a step.
+            prev_emit = self._emit_b.get(ch.channel_id, 0.0)
+            level = min(1.0, max(
+                prev_emit - p.bri_fall_rate * dt,
+                min(
+                    prev_emit + p.bri_rise_rate * dt,
+                    (base + amp * wave) * breath * (0.5 + 0.5 * m),
+                ),
+            ))
+            self._emit_b[ch.channel_id] = level
+            d = self.brightness * level
             out[ch.channel_id] = (nc[0] * d, nc[1] * d, nc[2] * d)
         return out
 
@@ -792,7 +1106,7 @@ class EffectEngine:
             # Keep the loudness/band envelopes live (they're otherwise only updated
             # on the music/extreme paths) so Fireworks' energy-driven afterglow and
             # its quiet-passage auto-launch gate see a real, smoothed energy_env.
-            self._update_env(frame)
+            self._update_env(frame, dt)
             self.colour_phase += self.active_params.colour_speed * dt
             return self._fireworks.render(self, frame, dt)
         if self.active_params.graph_reactive:
@@ -828,8 +1142,8 @@ class EffectEngine:
         it actually is.
         """
         p = self.active_params
-        self._update_env(frame)
-        self._update_mel_transient(frame)  # fills _mel_transient AND _mel_flux
+        self._update_env(frame, dt)
+        self._update_mel_transient(frame, dt)  # fills _mel_transient AND _mel_flux
         music_gate = min(1.0, self._loud / _SILENCE_GATE) if _SILENCE_GATE > 0 else 1.0
         # Colour: a smooth spatial gradient that only DRIFTS (loudness-scaled),
         # never jumps on a beat — colour never strobes, brightness carries the song.
@@ -912,10 +1226,11 @@ class EffectEngine:
             return mx
 
         lf = self._light_flash
+        flash_fade = frame_decay(p.flash_decay, dt)
         for cid in lf:  # per-lamp peak flash fades each frame
-            lf[cid] *= p.flash_decay
+            lf[cid] *= flash_fade
 
-        colour_lerp = p.colour_lerp
+        colour_lerp = frame_alpha(p.colour_lerp, dt)
         have_bands = bool(mel) and bool(bands)
         # Absolute-loudness scale for the flash: a hit in a quiet passage can't
         # flash as bright as one in a drop (the melbank is AGC-relative). 1.0 when
@@ -982,12 +1297,17 @@ class EffectEngine:
                 + p.energy_gain * self._energy_env
             )
             prev_c, prev_b = self._state[cid]
-            alpha = p.bri_attack if target >= prev_b else p.bri_decay
+            alpha = frame_alpha(
+                p.bri_attack if target >= prev_b else p.bri_decay, dt
+            )
             new_b = prev_b + (target - prev_b) * alpha
             # Colour stays keyed to the lamp's fixed position (a stable spatial
             # gradient) + the drift phase: only the brightness/instrument activity
             # rotates, so the room keeps a coherent colour field.
-            cpos = info["xrank"] * p.colour_spread + self.colour_phase
+            cbase = info["xrank"] + (
+                info["spatial_pos"] - info["xrank"]
+            ) * p.colour_tilt
+            cpos = cbase * p.colour_spread + self.colour_phase
             tgt_c = self.palette.sample(cpos)
             m = max(tgt_c)
             tgt_c = (tgt_c[0] / m, tgt_c[1] / m, tgt_c[2] / m) if m > 1e-6 else (0.0, 0.0, 0.0)
@@ -1002,7 +1322,17 @@ class EffectEngine:
                 nc = (nc[0] * s + (1 - s), nc[1] * s + (1 - s), nc[2] * s + (1 - s))
             cval = max(nc)
             # Glow (smoothed) + peak flash (sharp), theme-faithful value, master.
-            b = min(1.0, new_b + lf.get(cid, 0.0)) * (0.35 + 0.65 * cval) * self.brightness
+            # The per-second rise/fall ceiling still shapes Extreme's edges (the
+            # non-bypassable effect-rate limiter binds downstream regardless);
+            # clamped before the colour-value term and the user's ceiling,
+            # matching the music path.
+            prev_emit = self._emit_b.get(cid, 0.0)
+            lo = prev_emit - p.bri_fall_rate * dt
+            hi = prev_emit + p.bri_rise_rate * dt
+            swung = new_b + lf.get(cid, 0.0)
+            swung = lo if swung < lo else hi if swung > hi else swung
+            self._emit_b[cid] = swung
+            b = min(1.0, swung) * (0.35 + 0.65 * cval) * self.brightness
             out[cid] = (nc[0] * b, nc[1] * b, nc[2] * b)
         return out
 
@@ -1037,9 +1367,9 @@ class EffectEngine:
                 # the window) — selective modes only roll waves for the beats
                 # that matter; weak ticks barely ripple.
                 acc = max(0.0, min(1.0, beatgrid.accent))
-                nb = (beatgrid.beat_in_bar + 1) % 4
+                nb = (beatgrid.beat_in_bar + 1) % max(1, beatgrid.beats_per_bar)
                 hl = self._beat_highlight(p, acc, append=False)
-                w = pulse_weight(p, acc, nb, hl)
+                w = pulse_weight(p, acc, nb, hl, beatgrid.beats_per_bar)
                 if w > 0.0:
                     strength = (
                         (0.45 + 1.05 * acc)
@@ -1086,8 +1416,8 @@ class EffectEngine:
         brightness as the max channel) even mid colour-transition.
         """
         p = self.active_params
-        self._update_env(frame)
-        self._update_mel_transient(frame)
+        self._update_env(frame, dt)
+        self._update_mel_transient(frame, dt)
         # Silence gate (item 2 — only audio moves lights): the smoothed room
         # loudness fades out on a paused / finished / silent track, so every
         # beat reaction (flash, colour jump, wavefront) fades with it and stops
@@ -1134,6 +1464,9 @@ class EffectEngine:
         # with the continuous layers instead of strobing on false onsets. A
         # locked grid — or a couple of real kicks — restores full punch.
         self._update_rhythm_conf(frame, beatgrid)
+        # Sustain bloom (P3): advance the slow room-wide glow BEFORE the
+        # targets are rendered so this frame's targets see the current value.
+        self._update_tonal_env(frame, dt, music_gate)
         rhythm_gate = (
             p.nobeat_flash + (1.0 - p.nobeat_flash) * self._rhythm_conf
         )
@@ -1141,7 +1474,7 @@ class EffectEngine:
         # pulls in (dimmer, tighter, desaturated) so the detonation lands out
         # of held-back tension. ``pd`` scales every application below; the
         # music gate keeps a fade-to-silence from freezing a stuck dim.
-        pd = p.predrop_depth * self._update_predrop(p, structure) * music_gate
+        pd = p.predrop_depth * self._update_predrop(p, structure, dt) * music_gate
         # Scale the flash by the beat's actual HEIGHT (item 3 / fade-outs): the
         # scheduled accent is normalised to the passage, so without this a track
         # fading out keeps flashing full on tiny beats. The smoothed loudness
@@ -1286,7 +1619,10 @@ class EffectEngine:
             kick = 0.0
             if vis_strength > 0.0:
                 kick = (
-                    beat_pulse(p, acc_now, beatgrid.beat_in_bar, vis_bass, highlight)
+                    beat_pulse(
+                        p, acc_now, beatgrid.beat_in_bar, vis_bass, highlight,
+                        beatgrid.beats_per_bar,
+                    )
                     * flash_scale
                     * beatgrid.schedule_strength
                 )
@@ -1310,7 +1646,7 @@ class EffectEngine:
         # shows punctuate a chorus. Ordinary highlights stay role-separated.
         full_room = kick > 0.0 and highlight and acc_now >= p.full_room_accent
         lf = self._light_flash
-        decay = p.flash_decay  # per-mode: lower = snappier firework fall
+        decay = frame_decay(p.flash_decay, dt)  # per-mode: lower = snappier fall
         for cid in lf:
             lf[cid] *= decay
         if not self.manual_only and (kick > 0.0 or midf > 0.0):
@@ -1340,17 +1676,16 @@ class EffectEngine:
                 # A drop that detonates out of a held pre-drop swells bigger:
                 # the released depth is the tension it earned.
                 drop = p.drop_boost * (1.0 + 0.35 * self.predrop_released)
-            self._swell = max(self._swell * 0.85, drop)
+            self._swell = max(self._swell * frame_decay(0.85, dt), drop)
             alpha = 1.0 - math.exp(-dt / 2.0)
             self.section_level += (structure.section_level - self.section_level) * alpha
         else:
-            self._swell *= 0.85
+            self._swell *= frame_decay(0.85, dt)
 
         targets = render(self, frame)
 
-        colour_lerp = p.colour_lerp
-        attack, decay = p.bri_attack, p.bri_decay
-        slew = p.bri_slew  # max emitted brightness RISE per frame (anti-strobe)
+        colour_lerp = frame_alpha(p.colour_lerp, dt)
+        attack, decay = frame_alpha(p.bri_attack, dt), frame_alpha(p.bri_decay, dt)
         out: dict[int, RGB] = {}
         for cid, (target_color, target_b) in targets.items():
             # Pre-drop pull-down: compress the brightness HEADROOM above the
@@ -1387,15 +1722,17 @@ class EffectEngine:
                     )
                     mx = max(nc) or 1.0
                     nc = (nc[0] / mx, nc[1] / mx, nc[2] / mx)
-            # Continuous brightness + flash/swell, slew-limited so a beat reads
-            # as a fast dim<->bright SWING rather than a 1-frame strobe. The rise
-            # is capped at ``bri_slew`` per frame (≈full in 1/bri_slew frames);
-            # falls pass through freely so the room still dims quickly between
-            # hits. bri_slew == 1.0 keeps the old instant snap (calm modes).
+            # Continuous brightness + flash/swell, rate-limited so a beat reads
+            # as a fast dim<->bright SWING rather than a 1-frame hard edge.
+            # Brightness moves no faster than the rung's rise/fall ceiling, in
+            # full scale per second. A single-frame jump is what bulbs render as
+            # a hard edge, and what the downstream rate limiter used to quantise
+            # into a staircase; capping the *rate* removes both. The fall is
+            # always the slower of the two, per Philips' guidance that brightness
+            # should transition more slowly than colour.
             b = min(1.0, new_b + overlay)
             prev_emit = self._emit_b.get(cid, 0.0)
-            if slew < 1.0 and b > prev_emit + slew:
-                b = prev_emit + slew
+            b = max(prev_emit - p.bri_fall_rate * dt, min(prev_emit + p.bri_rise_rate * dt, b))
             self._emit_b[cid] = b
             b *= self.brightness
             out[cid] = (nc[0] * b, nc[1] * b, nc[2] * b)

@@ -56,7 +56,8 @@ _PATTERN = (1.0, 0.3, 0.55, 0.3)
 def _play_beat(eng: EffectEngine, accent: float, beat_in_bar: int):
     """One beat: a pre frame, then the beat's PEAK over its swell, then decay.
 
-    The beat is now a fast smoothed swing (bri_slew), so its brightness peaks a
+    The beat is now a fast rate-capped swing (bri_rise_rate / bri_fall_rate),
+    so its brightness peaks a
     few frames AFTER the tick rather than on it. ``peak[cid]`` is the RGB at each
     light's brightest moment across the beat + swell window — what "the beat did
     to that light" — so the brightness assertions read the swing, not one frame.
@@ -170,12 +171,12 @@ def test_metadata_source_emits_no_beats():
 
 @pytest.mark.parametrize("mode", [SyncMode.HIGH, SyncMode.INTENSE])
 def test_beats_swing_smoothly_instead_of_strobing(mode):
-    # High/Intense keep the comfort slew limiter: each light's per-frame
-    # brightness RISE is capped at bri_slew, so a beat reads as a fast dim<->bright
+    # High/Intense keep the comfort rate caps: each light's brightness RISE is
+    # capped at bri_rise_rate per second, so a beat reads as a fast dim<->bright
     # swing rather than a 1-frame strobe, while peaks still reach bright.
     eng = EffectEngine(_channels(5))
     eng.set_mode(mode)
-    slew = MODE_PARAMS[mode].bri_slew
+    rise_cap = MODE_PARAMS[mode].bri_rise_rate * _DT
     prev = {}
     worst_rise = 0.0
     peak = 0.0
@@ -188,7 +189,7 @@ def test_beats_swing_smoothly_instead_of_strobing(mode):
                 worst_rise = max(worst_rise, m - prev.get(cid, m))
                 prev[cid] = m
                 peak = max(peak, m)
-    assert worst_rise <= slew + 1e-6  # no harsh single-frame jump
+    assert worst_rise <= rise_cap + 1e-6  # no harsh single-frame jump
     assert peak > 0.7  # but beats still swing up to bright
 
 
