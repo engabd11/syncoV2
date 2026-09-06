@@ -178,11 +178,33 @@ _EXT_GLOW_PEAKINESS = 0.3  # 0 = pure mean, 1 = pure hottest-bin
 # ModeParams.band_loud_strength): <1 softens the ratio so a much-quieter band is
 # dimmer but still clearly visible, not driven to near-black.
 _BAND_LOUD_COMPRESS = 0.5
+# Mean-normalised weight clamp (see EffectEngine.melbank_loud_weights): a
+# quiet band dims to at most 4x below a loud one rather than disappearing.
+_LOUD_WEIGHT_MIN = 0.25
+_LOUD_WEIGHT_MAX = 2.5
 # Exponent on the whole-room slam's broadband measure (ModeParams.room_punch):
 # >1 makes only genuinely big broadband hits (drops) slam the whole room, while
 # moderate hits lift it only slightly — so the unison punch stays reserved for
 # the big moments and the per-band detail carries everything else.
 _EXT_ROOM_GAMMA = 2.0
+
+# --- Sustain bloom (P3, ported from CAMusic's SyncoEngine) -----------------
+# EMA smoothing of the chroma total-variation (per frame at TUNING_FPS).
+_CHROMA_FLUX_SMOOTH = 0.10
+# Chroma total-variation at which chroma stability reaches zero. 0 = a
+# perfectly steady chord, 1 = a complete redistribution. A sustained note sits
+# well under this; a busy melodic line crosses it, which is the intent — the
+# bloom is for held material.
+_CHROMA_FLUX_REF = 0.22
+# Asymmetric envelope on room-wide transient activity: fast up, slow down.
+_TONAL_DAMP_RISE = 0.5
+_TONAL_DAMP_FALL = 0.05
+# Transient level at which the bloom is fully suppressed at tonal_damp = 1.
+_TONAL_DAMP_REF = 0.35
+# How much a locked beat grid suppresses the bloom. Mild on purpose: a vocal
+# over a steady groove is most popular music, and damping hard on rhythm
+# would switch this layer off for exactly the material the user asked it for.
+_TONAL_RHYTHM_DAMP = 0.35
 
 
 def _spectral_bands(n: int, bins: int) -> list[tuple[int, int]]:
@@ -331,6 +353,12 @@ class EffectEngine:
         # yet is ~0 on a held tone (no rise) so sustained content never strobes.
         self._mel_prev: list[float] = []
         self._mel_flux: list[float] = []
+        # Sustain bloom (P3): the slow room-wide glow for held tonal material,
+        # plus its chroma-stability and transient-damp working state.
+        self._tonal_env: float = 0.0
+        self._chroma_prev: list[float] = []
+        self._chroma_flux: float = 0.0
+        self._room_transient: float = 0.0
         self._light_flash: dict[int, float] = {}
         # Last emitted per-light brightness, for the per-second rise/fall rate
         # caps (bri_rise_rate / bri_fall_rate) that turn a beat into a fast
@@ -370,6 +398,144 @@ class EffectEngine:
         self._energy_env += (frame.energy - self._energy_env) * a
         # Fast peak-hold for the silence gate.
         self._loud = max(frame.energy, self._loud * frame_decay(_GATE_DECAY, dt))
+
+    def _update_tonal_env(
+        self, frame: AnalysisFrame, dt: float, music_gate: float
+    ) -> None:
+        """Slow room-wide glow for sustained, pitched, mid-heavy material.
+
+        Deliberately the mirror image of :func:`.modes.event_gates`: that
+        returns zero for a narrowband onset, this is near one there. Between
+        them the two cover the whole of ``onset_width`` rather than leaving
+        the tonal half of it dark. Four things must agree before it commits,
+        because "narrowband" alone is not enough — a cymbal wash and a held
+        note are both narrowband by inverse participation ratio, and only one
+        of them should bloom:
+
+        - **tonality**: ``onset_width`` low, on the same soft knee event_gates
+          uses;
+        - **mid presence**: the 250–2500 Hz bands, where voices and strings
+          live;
+        - **chroma stability**: a held *pitch*, not a wash — what separates a
+          vocal from room tone;
+        - **transient quiet**: mutually damped against the layers that already
+          handle percussion, so a beat and a bloom cannot both claim the same
+          moment.
+
+        Scaled by ``salience`` (AGC-immune) so a quiet passage blooms less
+        rather than being normalised up to a chorus, and by the silence gate
+        so silence rests. Ported from CAMusic's
+        ``SyncoEngine.updateTonalEnv``.
+        """
+        p = self.active_params
+        if p.tonal_gain <= 0.0:
+            self._tonal_env = 0.0
+            return
+
+        tonality = max(
+            0.0,
+            min(
+                1.0,
+                (p.tonal_width_max - frame.onset_width)
+                / max(1e-3, p.tonal_width_soft),
+            ),
+        )
+        mid_presence = max(
+            self._env.get("low_mid", 0.0), self._env.get("mid", 0.0)
+        )
+
+        # Total variation between successive chroma vectors, each normalised
+        # to sum 1 so loudness cannot masquerade as harmonic movement.
+        chroma = frame.chroma
+        if chroma and len(chroma) == len(self._chroma_prev):
+            total = sum(chroma)
+            if total > 1e-9:
+                diff = 0.0
+                for i, v in enumerate(chroma):
+                    n = v / total
+                    diff += abs(n - self._chroma_prev[i])
+                    self._chroma_prev[i] = n
+                self._chroma_flux += (
+                    (0.5 * diff - self._chroma_flux) * _CHROMA_FLUX_SMOOTH
+                )
+            chroma_stable = 1.0 - min(1.0, self._chroma_flux / _CHROMA_FLUX_REF)
+        else:
+            chroma_stable = 1.0  # no chroma this frame: neutral, not blocking
+            if chroma:
+                # Seed for the next frame (CAMusic pre-sizes its array): the
+                # first real comparison happens on frame two.
+                self._chroma_prev = [0.0] * len(chroma)
+
+        if self._mel_transient:
+            transient_now = (
+                sum(self._mel_transient) + sum(self._mel_flux)
+            ) / len(self._mel_transient)
+        else:
+            transient_now = 0.0
+        # Fast up, slow down: a hit suppresses the bloom immediately and lets
+        # it back only once the hits have actually stopped.
+        t_alpha = (
+            _TONAL_DAMP_RISE
+            if transient_now > self._room_transient
+            else _TONAL_DAMP_FALL
+        )
+        self._room_transient += (transient_now - self._room_transient) * t_alpha
+        transient_quiet = 1.0 - min(
+            1.0, p.tonal_damp * self._room_transient / _TONAL_DAMP_REF
+        )
+
+        drive = (
+            tonality
+            * mid_presence
+            * chroma_stable
+            * transient_quiet
+            * (1.0 - _TONAL_RHYTHM_DAMP * self._rhythm_conf)
+            * frame.salience
+            * music_gate
+        )
+        # dt-correct (seconds-domain tau), so a stalled or jittery frame
+        # interval cannot make the bloom jump. dt = 0 gives alpha = 0, a no-op
+        # rather than a NaN.
+        tau = p.tonal_attack_s if drive > self._tonal_env else p.tonal_release_s
+        alpha = 1.0 - math.exp(-dt / tau) if tau > 1e-4 else 1.0
+        self._tonal_env += (drive - self._tonal_env) * alpha
+
+    def tonal_env(self) -> float:
+        """Sustain-bloom envelope 0..1 (read by :func:`.modes.render`)."""
+        return self._tonal_env
+
+    def melbank_loud_weights(self, frame: AnalysisFrame, p) -> list[float] | None:
+        """Per-bin absolute-loudness weights, mean-normalised (P3).
+
+        The melbank is per-bin AGC'd, so a hi-hat tick and a kick arrive the
+        same height and every lamp reads equally bright; these weights restore
+        the difference, perceptually compressed and strength-blended. The
+        mean-normalised form REDISTRIBUTES rather than attenuates: the raw
+        weight is always <= 1 (a pure attenuator, kept for Extreme's tuned
+        gains), and since ``melbank_ref`` peaks in the bass on most material
+        an attenuator would dim the mids specifically — the opposite of what
+        the layer is for. Empty ``melbank_ref`` (live/metadata/pre-v5 maps)
+        returns None: uniform, exactly as before this existed.
+        """
+        if p.band_loud_strength <= 0.0:
+            return None
+        mel = frame.melbank
+        if not mel:
+            return None
+        ref = getattr(frame, "melbank_ref", None)
+        if not ref or len(ref) != len(mel):
+            return None
+        s = p.band_loud_strength
+        w = [
+            (1.0 - s) + s * min(1.0, max(0.0, r)) ** _BAND_LOUD_COMPRESS
+            for r in ref
+        ]
+        mean = sum(w) / len(w)
+        if mean > 1e-6:
+            w = [
+                min(_LOUD_WEIGHT_MAX, max(_LOUD_WEIGHT_MIN, x / mean)) for x in w
+            ]
+        return w
 
     def _update_rhythm_conf(self, frame: AnalysisFrame, beatgrid) -> None:
         """Track evidence that the song currently has an actual beat.
@@ -689,6 +855,10 @@ class EffectEngine:
         c = fac("contrast")
         if c != 1.0:
             changes["flash_gamma"] = max(0.2, base.flash_gamma * c)
+            # Contrast also shapes the melbank's mean+peak blend: higher
+            # contrast favours the hottest bin in a lamp's slice (from
+            # CAMusic).
+            changes["mel_peakiness"] = min(1.0, base.mel_peakiness * c)
         cs = fac("colour_speed")
         if cs != 1.0:
             changes["colour_speed"] = base.colour_speed * cs
@@ -1185,6 +1355,9 @@ class EffectEngine:
         # with the continuous layers instead of strobing on false onsets. A
         # locked grid — or a couple of real kicks — restores full punch.
         self._update_rhythm_conf(frame, beatgrid)
+        # Sustain bloom (P3): advance the slow room-wide glow BEFORE the
+        # targets are rendered so this frame's targets see the current value.
+        self._update_tonal_env(frame, dt, music_gate)
         rhythm_gate = (
             p.nobeat_flash + (1.0 - p.nobeat_flash) * self._rhythm_conf
         )
