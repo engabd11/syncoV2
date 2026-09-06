@@ -184,6 +184,11 @@ _BAND_LOUD_COMPRESS = 0.5
 # quiet band dims to at most 4x below a loud one rather than disappearing.
 _LOUD_WEIGHT_MIN = 0.25
 _LOUD_WEIGHT_MAX = 2.5
+# Warm-up floor on the highlight ranking (P6, from CAMusic): a beat
+# ranked before the accent window has context must still EARN its
+# highlight — accent_floor alone lets an ordinary opening beat land a
+# full highlight and over-flash the first hit of a passage.
+_HL_WARMUP_FLOOR = 0.3
 # Exponent on the whole-room slam's broadband measure (ModeParams.room_punch):
 # >1 makes only genuinely big broadband hits (drops) slam the whole room, while
 # moderate hits lift it only slightly — so the unison punch stays reserved for
@@ -832,8 +837,9 @@ class EffectEngine:
         win = self._accents
         if p.highlight_quantile <= 0.0:
             ok = True
-        elif len(win) < 8:  # not enough context yet: fall back to the floor
-            ok = accent >= p.accent_floor
+        elif len(win) < 8:
+            # Not enough context yet (P6, from CAMusic): the warm-up floor.
+            ok = accent >= max(p.accent_floor, _HL_WARMUP_FLOOR)
         else:
             ranked = sorted(win)
             thr = ranked[min(len(ranked) - 1, int(p.highlight_quantile * len(ranked)))]
@@ -1015,7 +1021,9 @@ class EffectEngine:
             out[ch.channel_id] = (nc[0] * d, nc[1] * d, nc[2] * d)
         return out
 
-    def render_idle_show(self, t: float, intensity: float = 1.0) -> dict[int, RGB]:
+    def render_idle_show(
+        self, t: float, intensity: float = 1.0, dt: float = 0.1
+    ) -> dict[int, RGB]:
         """A slow, dreamy ambient "show" for a genuinely idle/paused room.
 
         Colours flow across the room and drift through the palette while two slow,
@@ -1027,6 +1035,13 @@ class EffectEngine:
         rather than distracts, and it never flashes. Mode-independent, and it uses
         whatever palette the last song left, so the room keeps that song's colours.
         """
+        # Idle-show resets (P6, from CAMusic): the pre-drop state machine
+        # must not survive a pause into the next track.
+        self._predrop = 0.0
+        self._predrop_commit = False
+        self._predrop_streak = 0
+        self.predrop_released = 0.0
+        p = self.active_params
         inten = max(0.0, min(1.0, intensity))
         base = 0.22          # soft floor glow, always present (lifted so a paused
                              # or empty room reads as a present glow, not near-off)
@@ -1044,7 +1059,25 @@ class EffectEngine:
             w1 = 0.5 + 0.5 * math.sin(2.0 * math.pi * (info["nx"] * 0.9 - t * 0.10))
             w2 = 0.5 + 0.5 * math.sin(2.0 * math.pi * (info["nz"] * 0.7 + t * 0.06) + 1.7)
             wave = 0.6 * w1 + 0.4 * w2
-            d = self.brightness * (base + amp * wave) * breath * (0.5 + 0.5 * m)
+            # Rate-limited and recorded exactly as the music path does (P6,
+            # from CAMusic): ``_emit_b`` means "what this engine last put
+            # on the wire" and the per-second caps clamp the next music
+            # frame against it. Rendering straight to the output left that
+            # memory holding a value from before the pause, so the first
+            # frame back on the music path clamped against *that* and the
+            # room flashed to roughly its pre-pause brightness before
+            # sliding down. It also makes dropping into the idle show a
+            # fade rather than a step.
+            prev_emit = self._emit_b.get(ch.channel_id, 0.0)
+            level = min(1.0, max(
+                prev_emit - p.bri_fall_rate * dt,
+                min(
+                    prev_emit + p.bri_rise_rate * dt,
+                    (base + amp * wave) * breath * (0.5 + 0.5 * m),
+                ),
+            ))
+            self._emit_b[ch.channel_id] = level
+            d = self.brightness * level
             out[ch.channel_id] = (nc[0] * d, nc[1] * d, nc[2] * d)
         return out
 
@@ -1336,7 +1369,7 @@ class EffectEngine:
                 acc = max(0.0, min(1.0, beatgrid.accent))
                 nb = (beatgrid.beat_in_bar + 1) % 4
                 hl = self._beat_highlight(p, acc, append=False)
-                w = pulse_weight(p, acc, nb, hl)
+                w = pulse_weight(p, acc, nb, hl, beatgrid.beats_per_bar)
                 if w > 0.0:
                     strength = (
                         (0.45 + 1.05 * acc)
@@ -1586,7 +1619,10 @@ class EffectEngine:
             kick = 0.0
             if vis_strength > 0.0:
                 kick = (
-                    beat_pulse(p, acc_now, beatgrid.beat_in_bar, vis_bass, highlight)
+                    beat_pulse(
+                        p, acc_now, beatgrid.beat_in_bar, vis_bass, highlight,
+                        beatgrid.beats_per_bar,
+                    )
                     * flash_scale
                     * beatgrid.schedule_strength
                 )

@@ -1307,7 +1307,15 @@ def beat_colour_advance(params: ModeParams, strength: float, bass: float) -> flo
 
 # Musical pulse hierarchy across the bar: the downbeat hits hardest, beat 3
 # carries, beats 2/4 land softer — the 1:1-but-musical pulse of the references.
-_BAR_W = (1.0, 0.72, 0.86, 0.72)
+_BAR_W_4 = (1.0, 0.72, 0.86, 0.72)
+# Three-beat metre (waltz): the "one" lands, the two after it carry
+# evenly. Selected by BeatGrid.beats_per_bar; everything still emits 4
+# until metre detection is ported, but the machinery is per-metre now.
+_BAR_W_3 = (1.0, 0.72, 0.72)
+
+
+def _bar_weights(beats_per_bar: int) -> tuple[float, ...]:
+    return _BAR_W_3 if beats_per_bar == 3 else _BAR_W_4
 
 
 # A ranked highlight never lands limp: selective modes pulse it at least this
@@ -1316,7 +1324,11 @@ _HL_MIN = 0.55
 
 
 def pulse_weight(
-    p: ModeParams, accent: float, beat_in_bar: int, highlight: bool = True
+    p: ModeParams,
+    accent: float,
+    beat_in_bar: int,
+    highlight: bool = True,
+    beats_per_bar: int = 4,
 ) -> float:
     """0..1 size of a scheduled beat pulse from its accent and bar position.
 
@@ -1338,18 +1350,24 @@ def pulse_weight(
         w = p.weak_pulse
     if beat_in_bar == 0:
         w = max(w, p.downbeat_pulse)
-    return w * _BAR_W[beat_in_bar % 4]
+    weights = _bar_weights(beats_per_bar)
+    return w * weights[beat_in_bar % len(weights)]
 
 
 def beat_pulse(
-    p: ModeParams, accent: float, beat_in_bar: int, bass: float, highlight: bool = True
+    p: ModeParams,
+    accent: float,
+    beat_in_bar: int,
+    bass: float,
+    highlight: bool = True,
+    beats_per_bar: int = 4,
 ) -> float:
     """Snap a bass-role light gets from a *scheduled* (grid-locked) beat."""
     if p.beat_gain <= 0.0:
         return 0.0
     return (
         p.beat_gain
-        * pulse_weight(p, accent, beat_in_bar, highlight)
+        * pulse_weight(p, accent, beat_in_bar, highlight, beats_per_bar)
         * (0.6 + 0.4 * bass)
     )
 

@@ -1314,7 +1314,9 @@ class SyncSession:
         show = max(
             0.0, min(1.0, (idle_elapsed - _IDLE_SHOW_GRACE_S) / _IDLE_SHOW_FADE_S)
         )
-        await self._safe_send(self._engine.render_idle_show(phase, show))
+        await self._safe_send(
+            self._engine.render_idle_show(phase, show, dt=1.0 / _IDLE_FPS)
+        )
 
     def _base_delay_ms(self) -> float:
         """The baseline hold that aligns the lights with the *audible* sound.
