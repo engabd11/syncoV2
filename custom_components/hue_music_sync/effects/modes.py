@@ -620,6 +620,11 @@ _CHAR_NEUTRAL = 0.50
 _CHAR_TAU_S = 12.0
 _CHAR_WARMUP_S = 20.0
 _CHAR_MIN_ENERGY = 0.15
+# Per-onset weight for the live attack term (P5, from CAMusic). Onsets
+# arrive a couple of times a second rather than fifty, so a dt-based
+# time constant would barely move it; this settles over roughly thirty
+# hits, a few seconds of music.
+_CHAR_ATTACK_ONSET_ALPHA = 0.035
 
 # --- Layer B: character -> the ladder band it earns --------------------------
 # Anchors on the 0..1 ladder axis (see ``_RUNG_SHARE`` for where each rung sits
@@ -927,9 +932,25 @@ class AutoIntensityPicker:
         # silent intro or a gap between tracks can't drag the estimate down.
         if character is None and energy >= _CHAR_MIN_ENERGY:
             ema = min(1.0, dt / _CHAR_TAU_S)
-            self._char_attack += (onset_width - self._char_attack) * ema
-            self._char_busy += (flux - self._char_busy) * ema
-            self._char_bass += ((1.0 - centroid) - self._char_bass) * ema
+            # Attack is sampled on frames that actually carry an onset (P5,
+            # from CAMusic). This is the fix for the picker sitting on the
+            # lowest enabled rung: averaging onset_width over EVERY frame
+            # pulls the heaviest character weight toward ~0, because the
+            # width is near zero between transients — most frames of any
+            # track. The offline profile energy-weights its mean, so only the
+            # live path was flat; sampling where the measurement means
+            # something is the same idea for a stream that cannot see the
+            # track in advance.
+            if beat:
+                self._char_attack += (
+                    onset_width - self._char_attack
+                ) * _CHAR_ATTACK_ONSET_ALPHA
+            # Busy and bass are energy-weighted to match the offline
+            # profile: a quiet passage should not vote as loudly as the
+            # body of the track.
+            w = ema * _unit(energy)
+            self._char_busy += (flux - self._char_busy) * w
+            self._char_bass += ((1.0 - centroid) - self._char_bass) * w
             self._char_age += dt
         char = self._character(tempo) if character is None else _unit(character)
 
