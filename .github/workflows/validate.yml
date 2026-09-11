@@ -22,9 +22,6 @@ jobs:
       - uses: hacs/action@main
         with:
           category: integration
-          # The brands submission (home-assistant/brands) is pending; drop
-          # this ignore once it is merged.
-          ignore: brands
 
   tests:
     name: Unit tests (DSP / colour / encoder)
