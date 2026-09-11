@@ -3,7 +3,7 @@
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.12%2B-blue)
-![Version](https://img.shields.io/badge/version-1.48.0-informational)
+![Version](https://img.shields.io/badge/version-1.56.1-informational)
 
 Real-time music-reactive lighting for **Philips Hue Entertainment areas**, driven by **any Home Assistant media player — Music Assistant players first and foremost** (Sendspin and other MA players), with first-class support for **Navidrome / OpenSubsonic** libraries. Beat detection, frequency analysis and spatial choreography stream straight to the bridge over the Hue Entertainment API (DTLS-encrypted, at the 60 Hz the spec recommends), and a bundled dashboard card mirrors the whole show live — no separate frontend install.
 
