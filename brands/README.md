@@ -14,6 +14,11 @@ brands/custom_integrations/hue_music_sync/
 > keyed by the `domain` in `manifest.json` (`hue_music_sync`). Until the brands
 > repo has that domain, HACS shows the default puzzle-piece icon. These files are
 > kept here as the source of truth, ready to submit.
+>
+> Since September 2025 the HACS validation action also accepts in-repo brand
+> assets at `custom_components/hue_music_sync/brand/` and fails the `brands`
+> check otherwise (the `ignore: brands` workflow option no longer covers it), so
+> the same two files are duplicated there. Keep both copies identical.
 
 ## Make it show up in HACS
 
