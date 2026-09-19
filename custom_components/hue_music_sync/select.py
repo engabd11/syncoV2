@@ -8,9 +8,10 @@ from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN, ColorScheme, SyncEffect, SyncMode
+from .const import DOMAIN, GHOST_INTENSITIES, ColorScheme, SyncEffect, SyncMode
 from .coordinator import SyncManager
 from .entity import HueMusicSyncAreaEntity
+from .ghost_entity import HueGhostEntity
 
 
 async def async_setup_entry(
@@ -24,6 +25,8 @@ async def async_setup_entry(
         entities.append(ModeSelect(manager, area_id))
         entities.append(EffectSelect(manager, area_id))
         entities.append(ColourSelect(manager, area_id))
+    if manager.ghost is not None:
+        entities.append(HueGhostIntensitySelect(manager.ghost))
     async_add_entities(entities)
 
 
@@ -85,3 +88,24 @@ class ColourSelect(HueMusicSyncAreaEntity, SelectEntity):
     async def async_select_option(self, option: str) -> None:
         await self._manager.update_settings(self._area_id, colour=ColorScheme(option))
         self.async_write_ha_state()
+
+
+class HueGhostIntensitySelect(HueGhostEntity, SelectEntity):
+    """Hue Sync's video intensity preset that hue-ghost applies when sync starts."""
+
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_translation_key = "ghost_intensity"
+    _attr_icon = "mdi:sine-wave"
+    _attr_options = list(GHOST_INTENSITIES)
+
+    def __init__(self, coordinator) -> None:
+        super().__init__(coordinator, "intensity")
+
+    @property
+    def current_option(self) -> str | None:
+        raw = self.coordinator.raw or {}
+        level = raw.get("intensity")
+        return level if level in GHOST_INTENSITIES else None
+
+    async def async_select_option(self, option: str) -> None:
+        await self.coordinator.async_set_intensity(option)

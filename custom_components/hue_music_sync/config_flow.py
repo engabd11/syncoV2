@@ -29,6 +29,9 @@ from .const import (
     CONF_BRIDGE_CERT,
     CONF_BRIDGE_ID,
     CONF_CLIENT_KEY,
+    CONF_GHOST_HOST,
+    CONF_GHOST_PORT,
+    CONF_GHOST_TOKEN,
     CONF_HOST,
     CONF_RESTORE_LIGHTS,
     CONF_SENDSPIN_HOST,
@@ -38,6 +41,7 @@ from .const import (
     CONF_SUBSONIC_USER,
     DATA_DISCOVERY_CACHE,
     DEFAULT_BACKEND,
+    DEFAULT_GHOST_PORT,
     DEFAULT_NAME,
     DEFAULT_RESTORE_LIGHTS,
     DISCOVERY_CACHE_TTL,
@@ -379,6 +383,12 @@ class HueMusicSyncOptionsFlow(OptionsFlow):
             new_options[CONF_ACTIVE_BACKEND] = user_input.get(
                 CONF_ACTIVE_BACKEND, DEFAULT_BACKEND
             )
+            # Movie mode (hue-ghost): blank host = feature off.
+            new_options[CONF_GHOST_HOST] = user_input.get(CONF_GHOST_HOST, "").strip()
+            new_options[CONF_GHOST_PORT] = int(
+                user_input.get(CONF_GHOST_PORT, DEFAULT_GHOST_PORT) or DEFAULT_GHOST_PORT
+            )
+            new_options[CONF_GHOST_TOKEN] = user_input.get(CONF_GHOST_TOKEN, "").strip()
             self.hass.config_entries.async_update_entry(entry, options=new_options)
             self.hass.async_create_task(
                 self.hass.config_entries.async_reload(entry.entry_id)
@@ -436,6 +446,20 @@ class HueMusicSyncOptionsFlow(OptionsFlow):
                             BACKEND_SUBSONIC: "Navidrome / OpenSubsonic (direct)",
                         }
                     ),
+                    # Movie mode: a hue-ghost PC client (software Hue Sync Box
+                    # for Jellyfin). Host blank = feature off.
+                    vol.Optional(
+                        CONF_GHOST_HOST,
+                        default=entry.options.get(CONF_GHOST_HOST, ""),
+                    ): str,
+                    vol.Optional(
+                        CONF_GHOST_PORT,
+                        default=entry.options.get(CONF_GHOST_PORT, DEFAULT_GHOST_PORT),
+                    ): vol.All(vol.Coerce(int), vol.Range(min=1, max=65535)),
+                    vol.Optional(
+                        CONF_GHOST_TOKEN,
+                        default=entry.options.get(CONF_GHOST_TOKEN, ""),
+                    ): str,
                 }
             ),
         )

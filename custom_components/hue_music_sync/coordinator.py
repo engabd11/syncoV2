@@ -15,6 +15,7 @@ import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
@@ -2374,6 +2375,10 @@ class SyncManager:
         self._settings: dict[str, AreaSettings] = self._load_settings()
         # Live-feed subscribers per area (dashboard cards over the WS API).
         self._ws_subs: dict[str, set[Callable[[dict], None]]] = {}
+        # Movie mode (hue-ghost) coordinator, attached by async_setup_entry when
+        # a ghost host is configured. Typed loosely to keep this module free of
+        # the HA update-coordinator import for the pure-Python tests.
+        self.ghost: Any | None = None
 
     # -- bridge events -------------------------------------------------------
 
@@ -2582,7 +2587,24 @@ class SyncManager:
 
     async def start_area(self, area_id: str) -> None:
         async with self._start_stop_lock():
+            await self._yield_movie_mode()
             await self._start_area_locked(area_id)
+
+    async def _yield_movie_mode(self) -> None:
+        """Movie mode (hue-ghost + the Hue Sync app) holds the entertainment
+        area while it is on; ask it to let go before we stream. Best effort."""
+        for manager in self._all_managers():
+            ghost = getattr(manager, "ghost", None)
+            if ghost is not None:
+                await ghost.async_yield_to_music()
+
+    async def stop_all_areas(self) -> None:
+        """Stop every active area on every bridge (movie mode hand-over)."""
+        async with self._start_stop_lock():
+            for manager in self._all_managers():
+                for area_id in list(manager._sessions):
+                    _LOGGER.info("Stopping area %s for movie mode", area_id)
+                    await manager._stop_area_locked(area_id)
 
     async def _start_area_locked(self, area_id: str) -> None:
         if area_id in self._sessions:

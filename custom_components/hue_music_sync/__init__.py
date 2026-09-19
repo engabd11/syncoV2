@@ -39,6 +39,9 @@ from .const import (
     CONF_CLIENT_KEY,
     CONF_COLOUR,
     CONF_EFFECT,
+    CONF_GHOST_HOST,
+    CONF_GHOST_PORT,
+    CONF_GHOST_TOKEN,
     CONF_HOST,
     CONF_MEDIA_PLAYER,
     CONF_MODE,
@@ -46,6 +49,7 @@ from .const import (
     CONF_SUBSONIC_URL,
     CONF_SUBSONIC_USER,
     CONF_TUNABLES,
+    DEFAULT_GHOST_PORT,
     DOMAIN,
     INTENSITY_LADDER,
     PLATFORMS,
@@ -493,6 +497,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data[DOMAIN][entry.entry_id] = manager
     entry.runtime_data = manager
 
+    # Movie mode: a hue-ghost PC client on the LAN (optional, from Options).
+    ghost_host = (entry.options.get(CONF_GHOST_HOST, "") or "").strip()
+    if ghost_host:
+        from .ghost.client import HueGhostClient
+        from .ghost.coordinator import HueGhostCoordinator
+
+        client = HueGhostClient(
+            session, ghost_host,
+            int(entry.options.get(CONF_GHOST_PORT, DEFAULT_GHOST_PORT) or DEFAULT_GHOST_PORT),
+            entry.options.get(CONF_GHOST_TOKEN, "") or "",
+        )
+        manager.ghost = HueGhostCoordinator(hass, manager, client)
+        # First poll may fail (PC asleep): entities still load and show offline.
+        await manager.ghost.async_refresh()
+
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     _register_services(hass)
     return True
@@ -503,6 +522,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unloaded:
         manager: SyncManager = hass.data[DOMAIN].pop(entry.entry_id)
+        if manager.ghost is not None:
+            await manager.ghost.async_shutdown()
+            manager.ghost = None
         manager.release_events()
         if manager.events is not None:
             await manager.events.stop()

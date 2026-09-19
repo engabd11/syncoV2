@@ -16,6 +16,7 @@ from . import DATA_AREA_INDEX
 from .const import DOMAIN, signal_area_update
 from .coordinator import SyncManager
 from .entity import HueMusicSyncAreaEntity
+from .ghost_entity import HueGhostEntity
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -30,6 +31,8 @@ async def async_setup_entry(
     for area_id in manager.enabled_areas:
         entities.append(HueMusicSyncSwitch(manager, area_id))
         entities.append(HueMusicSyncAdvancedSwitch(manager, area_id))
+    if manager.ghost is not None:
+        entities.append(HueGhostMovieModeSwitch(manager.ghost))
     async_add_entities(entities)
 
 
@@ -136,3 +139,32 @@ class HueMusicSyncAdvancedSwitch(HueMusicSyncAreaEntity, SwitchEntity):
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         await self._set(False)
+
+
+class HueGhostMovieModeSwitch(HueGhostEntity, SwitchEntity):
+    """Movie mode: the hue-ghost master switch.
+
+    Turning it on stops every active music-sync area first (a bridge allows
+    one streamer per entertainment area) and then enables hue-ghost, which
+    starts the Hue Sync app the moment the TV plays.
+    """
+
+    _attr_name = None  # use the device name
+    _attr_icon = "mdi:movie-open-play"
+
+    def __init__(self, coordinator) -> None:
+        super().__init__(coordinator, "movie_mode")
+
+    @property
+    def is_on(self) -> bool:
+        return self.coordinator.enabled
+
+    @property
+    def extra_state_attributes(self) -> dict | None:
+        return self.coordinator.data or None
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        await self.coordinator.async_turn_on()
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        await self.coordinator.async_turn_off()

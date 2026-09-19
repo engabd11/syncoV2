@@ -46,7 +46,10 @@
           "subsonic_url": "Navidrome/OpenSubsonic URL — optional (e.g. http://192.168.0.x:4533)",
           "subsonic_user": "Navidrome/OpenSubsonic username",
           "subsonic_password": "Navidrome/OpenSubsonic password",
-          "active_backend": "Music library backend — Music Assistant, or Navidrome/OpenSubsonic direct (needs the URL + login above; keeps browsing when Music Assistant is unavailable)"
+          "active_backend": "Music library backend — Music Assistant, or Navidrome/OpenSubsonic direct (needs the URL + login above; keeps browsing when Music Assistant is unavailable)",
+          "ghost_host": "Hue Ghost PC host/IP (Movie mode; blank = off)",
+          "ghost_port": "Hue Ghost port",
+          "ghost_token": "Hue Ghost token"
         }
       }
     }
@@ -95,6 +98,15 @@
           "citrus": "Citrus",
           "rosegold": "Rose gold"
         }
+      },
+      "ghost_intensity": {
+        "name": "Movie intensity",
+        "state": {
+          "subtle": "Subtle",
+          "moderate": "Moderate",
+          "high": "High",
+          "extreme": "Extreme"
+        }
       }
     },
     "number": {
@@ -103,6 +115,20 @@
       },
       "timing": {
         "name": "Timing offset"
+      },
+      "ghost_offset": {
+        "name": "Movie sync offset"
+      }
+    },
+    "sensor": {
+      "ghost_state": {
+        "name": "Movie mode state",
+        "state": {
+          "offline": "Offline",
+          "idle": "Idle",
+          "ghosting": "Ghosting",
+          "syncing": "Syncing"
+        }
       }
     }
   },

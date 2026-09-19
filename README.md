@@ -26,6 +26,7 @@ Real-time music-reactive lighting for **Philips Hue Entertainment areas**, drive
 - [Installation](#installation)
 - [Setup](#setup)
 - [Controls](#controls)
+- [Movie mode (Hue Ghost)](#movie-mode-hue-ghost)
 - [Services](#services)
 - [Options](#options)
 - [Experimental / legacy audio sources](#experimental--legacy-audio-sources)
@@ -248,6 +249,31 @@ While an area is syncing, its switch also exposes now-playing, album-colour, tem
 
 See the [photosensitivity warning](#️-photosensitivity-warning) for what *Strict* and *Relaxed* mean.
 
+## Movie mode (Hue Ghost)
+
+Music sync covers music. For **movies and TV** the same entertainment area can
+follow the screen instead, without a Hue Sync Box: [hue-ghost](https://github.com/engabd11/HueGhost)
+is a small PC client that keeps a muted "ghost" copy of whatever your TV's
+Jellyfin client is playing in lockstep, and the official Hue Sync desktop app
+captures that ghost and streams it to the area. Hue Synco only switches it on
+and off from Home Assistant — and hands the area over cleanly, because a bridge
+allows one streamer per entertainment area.
+
+Set it up on the PC first (`hue-ghost setup` exposes its control API to the LAN
+with a token), then **Configure → Hue Ghost PC host / port / token**. A
+**Hue Ghost — Movie mode** device appears:
+
+| Entity | Type | Description |
+|---|---|---|
+| Movie mode | Switch | Enables hue-ghost. Turning it **on** stops every active music-sync area first; starting a music-sync area turns it **off** |
+| Movie mode state | Sensor | `offline` / `idle` / `ghosting` / `syncing`, with what the TV is playing, the measured ghost-vs-TV drift and the Hue Sync app state as attributes |
+| Movie intensity | Select | Hue Sync's video intensity (subtle / moderate / high / extreme), applied when a movie starts |
+| Movie sync offset | Number | How far the ghost runs ahead of the TV to cancel capture → bridge → lamp latency. Tune it from the couch: +0.25 s = lights later |
+
+With movie mode on, nothing else is needed: press play on the TV and the lights
+follow; stop, and they stop. The PC's Hue Sync app must have *Allow public
+control* enabled and the living-room area selected — see the hue-ghost README.
+
 ## Services
 
 | Service | Description |
@@ -287,6 +313,7 @@ The tempo analysis follows **drifting and changing tempo** (a live drummer, a 10
 | Restore lights on stop | Snapshot and restore light state when sync stops |
 | Snapcast server host | *(experimental/legacy)* real-time audio tap for Snapcast-backed players |
 | OpenSubsonic URL / credentials | *(optional)* direct library-track streaming and analysis via Navidrome or any OpenSubsonic server |
+| Hue Ghost PC host / port / token | *(optional)* enables [Movie mode](#movie-mode-hue-ghost) via a hue-ghost client on the LAN |
 
 ## Experimental / legacy audio sources
 
