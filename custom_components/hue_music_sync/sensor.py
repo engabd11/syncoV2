@@ -14,8 +14,10 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import _read_prewarm_state, prewarm_status
-from .const import SIGNAL_PREWARM
-from .coordinator import trackmap_cache_stats
+from .const import DOMAIN, SIGNAL_PREWARM
+from .coordinator import SyncManager, trackmap_cache_stats
+from .ghost.client import GHOST_STATES
+from .ghost_entity import HueGhostEntity
 from .library_entity import HueSyncoLibraryEntity
 
 
@@ -24,13 +26,15 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    async_add_entities(
-        [
-            HueSyncoPrewarmProgress(entry),
-            HueSyncoCacheSizeSensor(entry),
-            HueSyncoCachedSongsSensor(entry),
-        ]
-    )
+    entities: list[SensorEntity] = [
+        HueSyncoPrewarmProgress(entry),
+        HueSyncoCacheSizeSensor(entry),
+        HueSyncoCachedSongsSensor(entry),
+    ]
+    manager: SyncManager | None = hass.data[DOMAIN].get(entry.entry_id)
+    if manager is not None and manager.ghost is not None:
+        entities.append(HueGhostStateSensor(manager.ghost))
+    async_add_entities(entities)
 
 
 class _HueSyncoCacheStatSensor(HueSyncoLibraryEntity, SensorEntity):
@@ -169,3 +173,30 @@ class HueSyncoPrewarmProgress(HueSyncoLibraryEntity, SensorEntity):
             # cache as analysis_report.json after each sweep.
             "failed_tracks": status.get("failed_tracks", []),
         }
+
+
+class HueGhostStateSensor(HueGhostEntity, SensorEntity):
+    """What hue-ghost is doing: offline / idle / ghosting / syncing.
+
+    Attributes carry what the TV is playing, its position, the measured drift
+    between the ghost and the TV, and the Hue Sync app's state.
+    """
+
+    _attr_translation_key = "ghost_state"
+    _attr_icon = "mdi:ghost"
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = list(GHOST_STATES)
+
+    def __init__(self, coordinator) -> None:
+        super().__init__(coordinator, "state")
+
+    @property
+    def native_value(self) -> str:
+        state = self.coordinator.state
+        return state if state in GHOST_STATES else "idle"
+
+    @property
+    def extra_state_attributes(self) -> dict | None:
+        data = dict(self.coordinator.data or {})
+        data.pop("state", None)
+        return data or None

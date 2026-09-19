@@ -50,6 +50,13 @@ CONF_SUBSONIC_URL: Final = "subsonic_url"
 CONF_SUBSONIC_USER: Final = "subsonic_user"
 CONF_SUBSONIC_PASSWORD: Final = "subsonic_password"
 CONF_RESTORE_LIGHTS: Final = "restore_lights"  # snapshot + restore light state on stop
+# Movie mode: a hue-ghost PC client (software Hue Sync Box for Jellyfin) that
+# this integration switches on/off over its LAN control API.
+CONF_GHOST_HOST: Final = "ghost_host"
+CONF_GHOST_PORT: Final = "ghost_port"
+CONF_GHOST_TOKEN: Final = "ghost_token"
+DEFAULT_GHOST_PORT: Final = 8787
+GHOST_INTENSITIES: Final = ("subtle", "moderate", "high", "extreme")
 
 # Active library/playback backend for the Synco media player. Exactly one is
 # active at a time, and it can be switched at runtime — e.g. fall back to a

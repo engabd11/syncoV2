@@ -11,6 +11,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .const import DOMAIN
 from .coordinator import SyncManager
 from .entity import HueMusicSyncAreaEntity
+from .ghost_entity import HueGhostEntity
 
 
 async def async_setup_entry(
@@ -23,6 +24,8 @@ async def async_setup_entry(
     for area_id in manager.enabled_areas:
         entities.append(BrightnessNumber(manager, area_id))
         entities.append(TimingNumber(manager, area_id))
+    if manager.ghost is not None:
+        entities.append(HueGhostOffsetNumber(manager.ghost))
     async_add_entities(entities)
 
 
@@ -72,3 +75,30 @@ class TimingNumber(HueMusicSyncAreaEntity, NumberEntity):
     async def async_set_native_value(self, value: float) -> None:
         await self._manager.update_settings(self._area_id, timing_ms=int(value))
         self.async_write_ha_state()
+
+
+class HueGhostOffsetNumber(HueGhostEntity, NumberEntity):
+    """hue-ghost's sync offset: how far the ghost runs ahead of the TV to cancel
+    the capture -> bridge -> lamp latency. Tune it from the couch: +0.25 s makes
+    the lights react later, -0.25 s earlier."""
+
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_translation_key = "ghost_offset"
+    _attr_icon = "mdi:timer-sand"
+    _attr_native_min_value = -2.0
+    _attr_native_max_value = 5.0
+    _attr_native_step = 0.05
+    _attr_native_unit_of_measurement = UnitOfTime.SECONDS
+    _attr_mode = NumberMode.BOX
+
+    def __init__(self, coordinator) -> None:
+        super().__init__(coordinator, "offset")
+
+    @property
+    def native_value(self) -> float | None:
+        raw = self.coordinator.raw or {}
+        value = raw.get("offset_s")
+        return round(float(value), 2) if value is not None else None
+
+    async def async_set_native_value(self, value: float) -> None:
+        await self.coordinator.async_set_offset(value)
