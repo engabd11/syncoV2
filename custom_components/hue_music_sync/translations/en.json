@@ -99,6 +99,14 @@
           "rosegold": "Rose gold"
         }
       },
+      "ghost_mode": {
+        "name": "Movie mode effect",
+        "state": {
+          "video": "Video (picture)",
+          "music": "Music (sound)",
+          "games": "Games"
+        }
+      },
       "ghost_intensity": {
         "name": "Movie intensity",
         "state": {
@@ -129,6 +137,11 @@
           "ghosting": "Ghosting",
           "syncing": "Syncing"
         }
+      }
+    },
+    "switch": {
+      "ghost_audio_effects": {
+        "name": "Movie audio effects"
       }
     }
   },

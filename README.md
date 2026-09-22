@@ -267,12 +267,19 @@ with a token), then **Configure → Hue Ghost PC host / port / token**. A
 |---|---|---|
 | Movie mode | Switch | Enables hue-ghost. Turning it **on** stops every active music-sync area first; starting a music-sync area turns it **off** |
 | Movie mode state | Sensor | `offline` / `idle` / `ghosting` / `syncing`, with what the TV is playing, the measured ghost-vs-TV drift and the Hue Sync app state as attributes |
-| Movie intensity | Select | Hue Sync's video intensity (subtle / moderate / high / extreme), applied when a movie starts |
+| Movie mode effect | Select | What Hue Sync reacts to: video (the picture), music (the sound) or games. Applies live, mid-movie |
+| Movie intensity | Select | Hue Sync's intensity (subtle / moderate / high / extreme), applied when a movie starts and live while syncing |
+| Movie audio effects | Switch | Hue Sync's *use audio for light effects* for video and games mode. Until you touch it, it mirrors what the Hue Sync app itself is set to; flipping it hands the setting to hue-ghost, which applies it at the start of the next sync |
 | Movie sync offset | Number | How far the ghost runs ahead of the TV to cancel capture → bridge → lamp latency. Tune it from the couch: +0.25 s = lights later |
 
 With movie mode on, nothing else is needed: press play on the TV and the lights
 follow; stop, and they stop. The PC's Hue Sync app must have *Allow public
 control* enabled and the living-room area selected — see the hue-ghost README.
+
+Mode, intensity and the audio switch need **hue-ghost 2.3.0** or newer; on
+older versions those entities simply have nothing to report. The entertainment
+area stays yours to pick in the Hue Sync app — hue-ghost only sets it when a
+movie starts.
 
 ## Services
 

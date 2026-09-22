@@ -33,6 +33,7 @@ async def async_setup_entry(
         entities.append(HueMusicSyncAdvancedSwitch(manager, area_id))
     if manager.ghost is not None:
         entities.append(HueGhostMovieModeSwitch(manager.ghost))
+        entities.append(HueGhostAudioEffectsSwitch(manager.ghost))
     async_add_entities(entities)
 
 
@@ -168,3 +169,41 @@ class HueGhostMovieModeSwitch(HueGhostEntity, SwitchEntity):
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         await self.coordinator.async_turn_off()
+class HueGhostAudioEffectsSwitch(HueGhostEntity, SwitchEntity):
+    """Hue Sync's "use audio for light effects" for video and games mode: the
+    lights react to the soundtrack as well as the picture.
+
+    hue-ghost leaves this to the Hue Sync app until you touch it - so until
+    then the switch reports what the app itself is set to. Flipping it takes
+    ownership, and hue-ghost applies it at the start of the next sync (the app
+    only reads this setting when it launches, so it is restarted for it).
+    """
+
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_translation_key = "ghost_audio_effects"
+    _attr_icon = "mdi:music-circle-outline"
+
+    def __init__(self, coordinator) -> None:
+        super().__init__(coordinator, "audio_effects")
+
+    @property
+    def is_on(self) -> bool:
+        raw = self.coordinator.raw or {}
+        wanted = raw.get("use_audio")
+        if wanted is None:                                  # not ours: mirror the app
+            return bool((raw.get("engine") or {}).get("use_audio"))
+        return bool(wanted)
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        raw = self.coordinator.raw or {}
+        return {
+            "set_by": "hue_ghost" if raw.get("use_audio") is not None else "hue_sync_app",
+            "mode": raw.get("mode"),
+        }
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        await self.coordinator.async_set_use_audio(True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        await self.coordinator.async_set_use_audio(False)

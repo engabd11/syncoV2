@@ -14,12 +14,14 @@ from aiohttp import web
 from hue_music_sync.ghost.client import HueGhostClient, HueGhostError, summarize_status
 
 STATUS = {
-    "version": "2.0.0", "enabled": True, "state": "syncing", "offset_s": 1.5, "intensity": "high",
+    "version": "2.3.0", "enabled": True, "state": "syncing", "offset_s": 1.5, "intensity": "high",
+    "mode": "video", "use_audio": None,
     "follow": {"device": "Living Room / Swiftfin", "seen": True, "playing": True,
                "item": "Show - S01E02 - Ep", "position_s": 812.4, "paused": False},
     "ghost": {"alive": True, "position_s": 813.9},
     "drift_s": 0.03,
-    "engine": {"name": "huesync", "connected": True, "state": "syncing", "error": None},
+    "engine": {"name": "huesync", "connected": True, "state": "syncing", "error": None,
+               "use_audio": True, "area_name": "Living room"},
 }
 
 
@@ -82,6 +84,9 @@ def test_status_on_off_set_with_token():
                 assert fake.enabled is False
                 await c.set_enabled(True)
                 await c.set_intensity("moderate")
+                await c.set_mode("music")
+                await c.set_use_audio(True)
+                await c.set_use_audio(None)
                 await c.set_offset(1.75)
                 await c.adjust_brightness(-5)
                 assert (await c.health())["ok"] is True
@@ -91,6 +96,9 @@ def test_status_on_off_set_with_token():
         assert ("GET", "/status", {}) in paths
         assert ("POST", "/off", {}) in paths and ("POST", "/on", {}) in paths
         assert ("POST", "/set", {"intensity": "moderate"}) in paths
+        assert ("POST", "/set", {"mode": "music"}) in paths
+        assert ("POST", "/set", {"use_audio": True}) in paths
+        assert ("POST", "/set", {"use_audio": None}) in paths      # null = leave it to the app
         assert ("POST", "/set", {"offset_s": 1.75}) in paths
         assert ("POST", "/set", {"brightness_step": -5}) in paths
     run(main())
@@ -128,4 +136,7 @@ def test_summarize_status_flattens_and_handles_offline():
     s = summarize_status(STATUS)
     assert s["state"] == "syncing" and s["now_playing"] == "Show - S01E02 - Ep"
     assert s["drift_s"] == 0.03 and s["engine_state"] == "syncing" and s["offset_s"] == 1.5
+    # what hue-ghost wants vs what the Hue Sync app is actually set to
+    assert s["mode"] == "video" and s["use_audio"] is None
+    assert s["app_use_audio"] is True and s["area"] == "Living room"
     assert summarize_status(None) == {"state": "offline"}

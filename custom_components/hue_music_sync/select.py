@@ -8,7 +8,7 @@ from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN, GHOST_INTENSITIES, ColorScheme, SyncEffect, SyncMode
+from .const import DOMAIN, GHOST_INTENSITIES, GHOST_MODES, ColorScheme, SyncEffect, SyncMode
 from .coordinator import SyncManager
 from .entity import HueMusicSyncAreaEntity
 from .ghost_entity import HueGhostEntity
@@ -26,6 +26,7 @@ async def async_setup_entry(
         entities.append(EffectSelect(manager, area_id))
         entities.append(ColourSelect(manager, area_id))
     if manager.ghost is not None:
+        entities.append(HueGhostModeSelect(manager.ghost))
         entities.append(HueGhostIntensitySelect(manager.ghost))
     async_add_entities(entities)
 
@@ -88,6 +89,28 @@ class ColourSelect(HueMusicSyncAreaEntity, SelectEntity):
     async def async_select_option(self, option: str) -> None:
         await self._manager.update_settings(self._area_id, colour=ColorScheme(option))
         self.async_write_ha_state()
+
+
+class HueGhostModeSelect(HueGhostEntity, SelectEntity):
+    """What Hue Sync reacts to: the picture (video), the sound (music) or fast
+    movement (games). hue-ghost applies it to every sync it starts, and live
+    while syncing."""
+
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_translation_key = "ghost_mode"
+    _attr_icon = "mdi:movie-filter"
+    _attr_options = list(GHOST_MODES)
+
+    def __init__(self, coordinator) -> None:
+        super().__init__(coordinator, "mode")
+
+    @property
+    def current_option(self) -> str | None:
+        mode = (self.coordinator.raw or {}).get("mode")
+        return mode if mode in GHOST_MODES else None
+
+    async def async_select_option(self, option: str) -> None:
+        await self.coordinator.async_set_mode(option)
 
 
 class HueGhostIntensitySelect(HueGhostEntity, SelectEntity):
