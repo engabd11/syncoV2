@@ -5,7 +5,8 @@ tested in ``tests/`` without the HA harness).
   GET  /health                        -> {"ok": true, "version": ...}
   POST /on | /off
   POST /set  {"mode": ..., "intensity": ..., "use_audio": ..., "offset_s": ...,
-              "offset_delta": ..., "brightness_step": ...}
+              "offset_delta": ..., "brightness_step": ..., "brightness": 0-100,
+              "binding": {"key": ..., "enabled": ...}}
 
 Auth: ``Authorization: Bearer <token>`` when the PC has a token configured.
 """
@@ -86,6 +87,15 @@ class HueGhostClient:
     async def adjust_brightness(self, step: int) -> dict[str, Any]:
         return await self._request("POST", "/set", {"brightness_step": int(step)})
 
+    async def set_brightness(self, level: int) -> dict[str, Any]:
+        """Absolute 0-100. Hue Sync's protocol only has a signed step, so
+        hue-ghost synthesises this from the level the app reports."""
+        return await self._request("POST", "/set", {"brightness": max(0, min(100, int(level)))})
+
+    async def set_binding(self, key: str, on: bool) -> dict[str, Any]:
+        """Follow one source, or stop following it."""
+        return await self._request("POST", "/set", {"binding": {"key": key, "enabled": bool(on)}})
+
 
 def summarize_status(status: dict[str, Any] | None) -> dict[str, Any]:
     """Flatten hue-ghost's /status into sensor attributes (stable key names)."""
@@ -114,5 +124,15 @@ def summarize_status(status: dict[str, Any] | None) -> dict[str, Any]:
         "app_use_audio": engine.get("use_audio"),
         "area": engine.get("area_name"),
         "offset_s": status.get("offset_s"),
+        "brightness": engine.get("bri"),
+        "source_kind": (status.get("source") or {}).get("kind"),
         "version": status.get("version"),
     }
+
+
+def bindings_of(status: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Every source hue-ghost can follow. Older versions do not report them."""
+    if not status:
+        return []
+    out = status.get("bindings")
+    return [b for b in out if isinstance(b, dict) and b.get("id")] if isinstance(out, list) else []

@@ -11,7 +11,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .client import HueGhostClient, HueGhostError, summarize_status
+from .client import HueGhostClient, HueGhostError, bindings_of, summarize_status
 
 if TYPE_CHECKING:
     from ..coordinator import SyncManager
@@ -40,6 +40,14 @@ class HueGhostCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.raw = None
             raise UpdateFailed(str(err)) from err
         return summarize_status(self.raw)
+
+    @property
+    def bindings(self) -> list[dict[str, Any]]:
+        """Every source the PC can follow, in its own priority order."""
+        return bindings_of(self.raw)
+
+    def binding(self, key: str) -> dict[str, Any] | None:
+        return next((b for b in self.bindings if b.get("id") == key), None)
 
     # -- derived state -----------------------------------------------------------
     @property
@@ -102,6 +110,20 @@ class HueGhostCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def async_set_use_audio(self, on: bool | None) -> None:
         try:
             await self.client.set_use_audio(on)
+        except HueGhostError as err:
+            raise HomeAssistantError(str(err)) from err
+        await self.async_request_refresh()
+
+    async def async_set_brightness(self, level: int) -> None:
+        try:
+            await self.client.set_brightness(level)
+        except HueGhostError as err:
+            raise HomeAssistantError(str(err)) from err
+        await self.async_request_refresh()
+
+    async def async_set_binding(self, key: str, on: bool) -> None:
+        try:
+            await self.client.set_binding(key, on)
         except HueGhostError as err:
             raise HomeAssistantError(str(err)) from err
         await self.async_request_refresh()

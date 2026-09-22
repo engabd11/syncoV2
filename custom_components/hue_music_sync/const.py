@@ -315,7 +315,7 @@ def sanitize_tunables(data) -> dict[str, float]:
     return out
 
 
-PLATFORMS: Final = ["switch", "select", "number", "button", "sensor"]
+PLATFORMS: Final = ["switch", "select", "number", "button", "sensor", "light"]
 
 # Dispatcher signal fired whenever the library pre-warm status changes.
 SIGNAL_PREWARM: Final = f"{DOMAIN}_prewarm_update"

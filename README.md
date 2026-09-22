@@ -255,7 +255,9 @@ Music sync covers music. For **movies and TV** the same entertainment area can
 follow the screen instead, without a Hue Sync Box: [hue-ghost](https://github.com/engabd11/HueGhost)
 is a small PC client that keeps a muted "ghost" copy of whatever your TV's
 Jellyfin client is playing in lockstep, and the official Hue Sync desktop app
-captures that ghost and streams it to the area. Hue Synco only switches it on
+captures that ghost and streams it to the area. From 2.4.0 it also lights up
+for whatever is playing on the PC's own screen — a browser, a player, a game —
+and for Jellyfin music. Hue Synco only switches it on
 and off from Home Assistant — and hands the area over cleanly, because a bridge
 allows one streamer per entertainment area.
 
@@ -271,13 +273,17 @@ with a token), then **Configure → Hue Ghost PC host / port / token**. A
 | Movie intensity | Select | Hue Sync's intensity (subtle / moderate / high / extreme), applied when a movie starts and live while syncing |
 | Movie audio effects | Switch | Hue Sync's *use audio for light effects* for video and games mode. Until you touch it, it mirrors what the Hue Sync app itself is set to; flipping it hands the setting to hue-ghost, which applies it at the start of the next sync |
 | Movie sync offset | Number | How far the ghost runs ahead of the TV to cancel capture → bridge → lamp latency. Tune it from the couch: +0.25 s = lights later |
+| Movie mode lights | Light | The entertainment area itself: on/off is movie mode, and the brightness slider is the level Hue Sync runs the area at — so it works in scenes and by voice |
+| Follow *&lt;source&gt;* | Switch | One per thing Hue Ghost can follow — a Jellyfin client, or an app on the PC. Off = ignore it without deleting it. The `active` attribute says which one is driving the lights *right now*, which is a different question from whether it is followed |
 
 With movie mode on, nothing else is needed: press play on the TV and the lights
 follow; stop, and they stop. The PC's Hue Sync app must have *Allow public
 control* enabled and the living-room area selected — see the hue-ghost README.
 
-Mode, intensity and the audio switch need **hue-ghost 2.3.0** or newer; on
-older versions those entities simply have nothing to report. The entertainment
+Mode, intensity and the audio switch need **hue-ghost 2.3.0** or newer; the
+brightness light and the per-source switches need **2.4.0**. On older versions
+the light still switches movie mode but reports no level, no source switches
+appear, and the rest simply has nothing to report. The entertainment
 area stays yours to pick in the Hue Sync app — hue-ghost only sets it when a
 movie starts.
 
