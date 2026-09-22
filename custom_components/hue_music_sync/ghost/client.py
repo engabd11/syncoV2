@@ -4,7 +4,8 @@ tested in ``tests/`` without the HA harness).
   GET  /status                        -> full state
   GET  /health                        -> {"ok": true, "version": ...}
   POST /on | /off
-  POST /set  {"intensity": ..., "offset_s": ..., "offset_delta": ..., "brightness_step": ...}
+  POST /set  {"mode": ..., "intensity": ..., "use_audio": ..., "offset_s": ...,
+              "offset_delta": ..., "brightness_step": ...}
 
 Auth: ``Authorization: Bearer <token>`` when the PC has a token configured.
 """
@@ -71,6 +72,14 @@ class HueGhostClient:
     async def set_intensity(self, level: str) -> dict[str, Any]:
         return await self._request("POST", "/set", {"intensity": level})
 
+    async def set_mode(self, mode: str) -> dict[str, Any]:
+        return await self._request("POST", "/set", {"mode": mode})
+
+    async def set_use_audio(self, on: bool | None) -> dict[str, Any]:
+        """True/False to enforce Hue Sync's "use audio for light effects",
+        None to leave whatever the app itself is set to."""
+        return await self._request("POST", "/set", {"use_audio": on})
+
     async def set_offset(self, seconds: float) -> dict[str, Any]:
         return await self._request("POST", "/set", {"offset_s": round(float(seconds), 3)})
 
@@ -99,7 +108,11 @@ def summarize_status(status: dict[str, Any] | None) -> dict[str, Any]:
         "engine_connected": engine.get("connected"),
         "engine_state": engine.get("state"),
         "engine_error": engine.get("error"),
+        "mode": status.get("mode"),
         "intensity": status.get("intensity"),
+        "use_audio": status.get("use_audio"),
+        "app_use_audio": engine.get("use_audio"),
+        "area": engine.get("area_name"),
         "offset_s": status.get("offset_s"),
         "version": status.get("version"),
     }

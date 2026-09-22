@@ -57,6 +57,7 @@ CONF_GHOST_PORT: Final = "ghost_port"
 CONF_GHOST_TOKEN: Final = "ghost_token"
 DEFAULT_GHOST_PORT: Final = 8787
 GHOST_INTENSITIES: Final = ("subtle", "moderate", "high", "extreme")
+GHOST_MODES: Final = ("video", "music", "games")   # what Hue Sync reacts to
 
 # Active library/playback backend for the Synco media player. Exactly one is
 # active at a time, and it can be switched at runtime — e.g. fall back to a

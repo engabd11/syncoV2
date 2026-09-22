@@ -92,6 +92,20 @@ class HueGhostCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             raise HomeAssistantError(str(err)) from err
         await self.async_request_refresh()
 
+    async def async_set_mode(self, mode: str) -> None:
+        try:
+            await self.client.set_mode(mode)
+        except HueGhostError as err:
+            raise HomeAssistantError(str(err)) from err
+        await self.async_request_refresh()
+
+    async def async_set_use_audio(self, on: bool | None) -> None:
+        try:
+            await self.client.set_use_audio(on)
+        except HueGhostError as err:
+            raise HomeAssistantError(str(err)) from err
+        await self.async_request_refresh()
+
     async def async_set_offset(self, seconds: float) -> None:
         try:
             await self.client.set_offset(seconds)
