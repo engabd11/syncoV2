@@ -100,7 +100,7 @@
         }
       },
       "ghost_mode": {
-        "name": "Movie mode effect",
+        "name": "Mode",
         "state": {
           "video": "Video (picture)",
           "music": "Music (sound)",
@@ -108,7 +108,7 @@
         }
       },
       "ghost_intensity": {
-        "name": "Movie intensity",
+        "name": "Intensity",
         "state": {
           "subtle": "Subtle",
           "moderate": "Moderate",
@@ -125,31 +125,43 @@
         "name": "Timing offset"
       },
       "ghost_offset": {
-        "name": "Movie sync offset"
+        "name": "Sync offset"
       }
     },
     "sensor": {
       "ghost_state": {
-        "name": "Movie mode state",
+        "name": "Sync status",
         "state": {
           "offline": "Offline",
           "idle": "Idle",
           "ghosting": "Ghosting",
           "syncing": "Syncing"
         }
+      },
+      "ghost_area": {
+        "name": "Sync area"
+      },
+      "ghost_source": {
+        "name": "Active source"
+      },
+      "ghost_now_playing": {
+        "name": "Now playing"
+      },
+      "ghost_drift": {
+        "name": "Sync drift"
       }
     },
     "switch": {
       "ghost_audio_effects": {
-        "name": "Movie audio effects"
+        "name": "Audio effects"
       },
       "ghost_binding": {
-        "name": "Follow {name}"
+        "name": "{name}"
       }
     },
     "light": {
       "ghost_light": {
-        "name": "Movie mode lights"
+        "name": "Global sync"
       }
     }
   },

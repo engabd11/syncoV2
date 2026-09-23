@@ -172,3 +172,26 @@ def test_summarize_status_flattens_and_handles_offline():
     assert s["mode"] == "video" and s["use_audio"] is None
     assert s["app_use_audio"] is True and s["area"] == "Living room"
     assert summarize_status(None) == {"state": "offline"}
+
+
+def test_summary_names_the_source_driving_the_lights_and_the_area_it_plays_in():
+    """The area and "active source" sensors read straight off these."""
+    s = summarize_status(STATUS)
+    assert s["active_source"] == "Apple TV" and s["active_source_id"] == "apple-tv"
+    assert s["area"] == "Living room" and s["area_id"] == "a1"
+    # a PC source reports a window/game title instead of a Jellyfin item
+    assert s["source_title"] == "Show - S01E02 - Ep"
+
+
+def test_the_area_falls_back_to_the_playing_sources_own_area():
+    """Before the Hue Sync app has been read, the live binding still knows
+    which room it targets - the area sensor should not sit empty."""
+    status = {**STATUS, "engine": {"name": "huesync", "connected": True}}
+    s = summarize_status(status)
+    assert s["area"] == "Living room" and s["area_id"] == "a1"
+
+
+def test_nothing_playing_means_no_active_source():
+    binds = [{**b, "active": False} for b in STATUS["bindings"]]
+    s = summarize_status({**STATUS, "state": "idle", "bindings": binds})
+    assert s["active_source"] is None and s["active_source_id"] is None

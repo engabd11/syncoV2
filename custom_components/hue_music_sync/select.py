@@ -94,9 +94,12 @@ class ColourSelect(HueMusicSyncAreaEntity, SelectEntity):
 class HueGhostModeSelect(HueGhostEntity, SelectEntity):
     """What Hue Sync reacts to: the picture (video), the sound (music) or fast
     movement (games). hue-ghost applies it to every sync it starts, and live
-    while syncing."""
+    while syncing.
 
-    _attr_entity_category = EntityCategory.CONFIG
+    A control rather than configuration: it is changed mid-film, from the same
+    card as the light, so it belongs next to it and not in the device's
+    settings drawer."""
+
     _attr_translation_key = "ghost_mode"
     _attr_icon = "mdi:movie-filter"
     _attr_options = list(GHOST_MODES)
@@ -114,9 +117,11 @@ class HueGhostModeSelect(HueGhostEntity, SelectEntity):
 
 
 class HueGhostIntensitySelect(HueGhostEntity, SelectEntity):
-    """Hue Sync's video intensity preset that hue-ghost applies when sync starts."""
+    """Hue Sync's intensity preset - subtle to extreme - applied live.
 
-    _attr_entity_category = EntityCategory.CONFIG
+    Also a control: this is the knob that gets touched most, so it sits with
+    the light instead of under Configuration."""
+
     _attr_translation_key = "ghost_intensity"
     _attr_icon = "mdi:sine-wave"
     _attr_options = list(GHOST_INTENSITIES)
