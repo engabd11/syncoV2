@@ -142,6 +142,14 @@
     "switch": {
       "ghost_audio_effects": {
         "name": "Movie audio effects"
+      },
+      "ghost_binding": {
+        "name": "Follow {name}"
+      }
+    },
+    "light": {
+      "ghost_light": {
+        "name": "Movie mode lights"
       }
     }
   },

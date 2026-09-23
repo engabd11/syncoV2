@@ -34,7 +34,33 @@ async def async_setup_entry(
     if manager.ghost is not None:
         entities.append(HueGhostMovieModeSwitch(manager.ghost))
         entities.append(HueGhostAudioEffectsSwitch(manager.ghost))
+        entities.extend(_binding_switches(manager.ghost, set()))
     async_add_entities(entities)
+
+    if manager.ghost is not None:
+        _watch_for_new_bindings(manager.ghost, async_add_entities)
+
+
+def _binding_switches(coordinator, known: set[str]) -> list[SwitchEntity]:
+    return [HueGhostBindingSwitch(coordinator, b)
+            for b in coordinator.bindings if b["id"] not in known]
+
+
+def _watch_for_new_bindings(coordinator, async_add_entities: AddEntitiesCallback) -> None:
+    """Sources are edited in the Hue Ghost app, not here, so one added over
+    there should appear here without a reload. Ones that disappear go
+    unavailable rather than being deleted."""
+    known = {b["id"] for b in coordinator.bindings}
+
+    @callback
+    def _check() -> None:
+        fresh = [b["id"] for b in coordinator.bindings]
+        new = [b for b in coordinator.bindings if b["id"] not in known]
+        if new:
+            known.update(fresh)
+            async_add_entities([HueGhostBindingSwitch(coordinator, b) for b in new])
+
+    coordinator.async_add_listener(_check)
 
 
 class HueMusicSyncSwitch(HueMusicSyncAreaEntity, SwitchEntity):
@@ -207,3 +233,54 @@ class HueGhostAudioEffectsSwitch(HueGhostEntity, SwitchEntity):
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         await self.coordinator.async_set_use_audio(False)
+
+
+class HueGhostBindingSwitch(HueGhostEntity, SwitchEntity):
+    """One source the PC can follow: a Jellyfin client, or an app on that PC.
+
+    Off means "ignore it" - it stays configured. The `active` attribute is the
+    different question of whether this is the one driving the lights *now*."""
+
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_translation_key = "ghost_binding"
+
+    def __init__(self, coordinator, binding: dict) -> None:
+        super().__init__(coordinator, f"binding_{binding['id']}")
+        self._key = binding["id"]
+        self._attr_translation_placeholders = {"name": binding.get("name") or binding["id"]}
+        self._attr_icon = ("mdi:monitor-dashboard" if binding.get("source") == "pc"
+                           else "mdi:television-play")
+
+    @property
+    def _binding(self) -> dict:
+        return self.coordinator.binding(self._key) or {}
+
+    @property
+    def available(self) -> bool:
+        # the base class stays available while the PC is off; a source that was
+        # deleted over there is a different matter
+        return bool(self._binding) or not self.coordinator.online
+
+    @property
+    def is_on(self) -> bool:
+        return bool(self._binding.get("enabled"))
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        b = self._binding
+        data = self.coordinator.data or {}
+        return {
+            "active": bool(b.get("active")),
+            "source": b.get("source"),
+            "area": b.get("area_name"),
+            "device": b.get("device") or b.get("exe"),
+            "mode": b.get("mode"),
+            "problems": b.get("problems") or [],
+            "now_playing": data.get("now_playing") if b.get("active") else None,
+        }
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        await self.coordinator.async_set_binding(self._key, True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        await self.coordinator.async_set_binding(self._key, False)

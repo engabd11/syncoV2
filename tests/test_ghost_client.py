@@ -11,7 +11,8 @@ import asyncio
 import pytest
 from aiohttp import web
 
-from hue_music_sync.ghost.client import HueGhostClient, HueGhostError, summarize_status
+from hue_music_sync.ghost.client import (HueGhostClient, HueGhostError, bindings_of,
+                                         summarize_status)
 
 STATUS = {
     "version": "2.3.0", "enabled": True, "state": "syncing", "offset_s": 1.5, "intensity": "high",
@@ -21,7 +22,16 @@ STATUS = {
     "ghost": {"alive": True, "position_s": 813.9},
     "drift_s": 0.03,
     "engine": {"name": "huesync", "connected": True, "state": "syncing", "error": None,
-               "use_audio": True, "area_name": "Living room"},
+               "use_audio": True, "area_name": "Living room", "bri": 56},
+    "source": {"kind": "video", "name": "Show - S01E02 - Ep", "needs_ghost": True, "binding": "apple-tv"},
+    "bindings": [
+        {"id": "apple-tv", "name": "Apple TV", "source": "jellyfin", "enabled": True, "active": True,
+         "area_id": "a1", "area_name": "Living room", "mode": None, "exe": None, "device": "atv",
+         "problems": []},
+        {"id": "elden-ring", "name": "Elden Ring", "source": "pc", "enabled": False, "active": False,
+         "area_id": "a2", "area_name": "Gaming", "mode": "games", "exe": "eldenring.exe",
+         "device": None, "problems": []},
+    ],
 }
 
 
@@ -89,6 +99,9 @@ def test_status_on_off_set_with_token():
                 await c.set_use_audio(None)
                 await c.set_offset(1.75)
                 await c.adjust_brightness(-5)
+                await c.set_brightness(40)
+                await c.set_brightness(250)          # clamped, not sent as-is
+                await c.set_binding("elden-ring", True)
                 assert (await c.health())["ok"] is True
         finally:
             await runner.cleanup()
@@ -101,7 +114,26 @@ def test_status_on_off_set_with_token():
         assert ("POST", "/set", {"use_audio": None}) in paths      # null = leave it to the app
         assert ("POST", "/set", {"offset_s": 1.75}) in paths
         assert ("POST", "/set", {"brightness_step": -5}) in paths
+        assert ("POST", "/set", {"brightness": 40}) in paths
+        assert ("POST", "/set", {"brightness": 100}) in paths
+        assert ("POST", "/set", {"binding": {"key": "elden-ring", "enabled": True}}) in paths
     run(main())
+
+
+def test_status_summary_carries_the_brightness_and_what_is_playing():
+    s = summarize_status(STATUS)
+    assert s["brightness"] == 56 and s["source_kind"] == "video"
+    assert s["area"] == "Living room" and s["state"] == "syncing"
+
+
+def test_bindings_are_read_and_an_older_pc_simply_has_none():
+    binds = bindings_of(STATUS)
+    assert [b["id"] for b in binds] == ["apple-tv", "elden-ring"]
+    assert binds[0]["active"] is True and binds[1]["enabled"] is False
+    # hue-ghost before 2.4 does not report them; that must not raise
+    assert bindings_of({"state": "idle"}) == []
+    assert bindings_of(None) == []
+    assert bindings_of({"bindings": "not a list"}) == []
 
 
 def test_bad_token_and_rejected_value_raise():
