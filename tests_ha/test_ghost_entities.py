@@ -212,3 +212,76 @@ async def test_an_older_pc_without_bindings_just_has_no_source_switches(hass):
     coordinator = await _ready(hass, {"enabled": True, "state": "idle"})
     assert coordinator.bindings == []
     assert coordinator.binding("apple-tv") is None
+
+
+async def test_a_source_switch_is_named_after_the_source_itself(hass):
+    """"Apple TV", not "Follow Apple TV": the device name is already in front
+    of it and these are read as a row of tiles."""
+    from custom_components.hue_music_sync.switch import HueGhostBindingSwitch
+
+    sw = HueGhostBindingSwitch(await _ready(hass), BINDINGS[0])
+    assert sw.translation_key == "ghost_binding"
+    assert sw.translation_placeholders == {"name": "Apple TV"}
+    # a live control, not a config knob tucked into the device settings
+    assert sw.entity_category is None
+
+
+async def test_the_master_control_is_the_light_alone(hass):
+    """The movie-mode switch is gone: one thing, one entity."""
+    import custom_components.hue_music_sync.switch as switch_platform
+
+    assert not hasattr(switch_platform, "HueGhostMovieModeSwitch")
+
+
+# -- the sensors --------------------------------------------------------------
+async def test_the_status_sensor_reports_what_hue_ghost_is_doing(hass):
+    from custom_components.hue_music_sync.sensor import HueGhostStateSensor
+
+    sensor = HueGhostStateSensor(await _ready(hass))
+    assert sensor.native_value == "syncing"
+    assert sensor.extra_state_attributes["now_playing"] == "Show - S01E02"
+
+
+async def test_the_area_sensor_says_which_room_the_sync_plays_in(hass):
+    from custom_components.hue_music_sync.sensor import HueGhostAreaSensor
+
+    sensor = HueGhostAreaSensor(await _ready(hass))
+    assert sensor.native_value == "Living room"
+    attrs = sensor.extra_state_attributes
+    assert attrs["source"] == "Apple TV" and attrs["syncing"] is True
+    # only followed sources are listed; Elden Ring is switched off
+    assert attrs["areas_by_source"] == {"Apple TV": "Living room"}
+
+
+async def test_the_area_sensor_is_empty_while_the_pc_is_offline(hass):
+    from custom_components.hue_music_sync.sensor import HueGhostAreaSensor
+
+    manager = _manager(hass)
+    coordinator = _coordinator(hass, manager, fail=True)
+    await coordinator.async_refresh()
+    assert HueGhostAreaSensor(coordinator).native_value is None
+
+
+async def test_the_source_sensor_names_the_one_driving_the_lights_now(hass):
+    from custom_components.hue_music_sync.sensor import HueGhostSourceSensor
+
+    sensor = HueGhostSourceSensor(await _ready(hass))
+    assert sensor.native_value == "Apple TV"
+    attrs = sensor.extra_state_attributes
+    assert attrs["kind"] == "jellyfin" and attrs["followed"] == ["Apple TV"]
+
+
+async def test_now_playing_falls_back_to_what_the_pc_source_reported(hass):
+    from custom_components.hue_music_sync.sensor import HueGhostNowPlayingSensor
+
+    status = {**FULL_STATUS, "follow": {}, "source": {"kind": "pc", "name": "Elden Ring"}}
+    sensor = HueGhostNowPlayingSensor(await _ready(hass, status))
+    assert sensor.native_value == "Elden Ring"
+
+
+async def test_the_drift_sensor_is_the_evidence_for_the_offset(hass):
+    from custom_components.hue_music_sync.sensor import HueGhostDriftSensor
+
+    sensor = HueGhostDriftSensor(await _ready(hass, {**FULL_STATUS, "drift_s": -0.1234}))
+    assert sensor.native_value == -0.123
+    assert HueGhostDriftSensor(await _ready(hass)).native_value is None

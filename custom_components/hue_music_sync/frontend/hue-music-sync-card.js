@@ -13,7 +13,7 @@
 // Cosmetic version (shown in the console banner). The browser cache-bust no
 // longer depends on this: the integration appends ?v=<content-hash> derived from
 // this file's bytes, so any edit is picked up without a manual hard refresh.
-const VERSION = "1.23.2";
+const VERSION = "1.24.0";
 
 /* ------------------------- Palette data ------------------------- */
 // Colour schemes from the integration, each a small gradient swatch.
@@ -4544,6 +4544,758 @@ class HueMusicSyncTabletCard extends HueMusicSyncCard {
   }
 }
 
+/* ======================================================================== */
+/*  Hue Ghost card - "Movie mode" in one tile                               */
+/*                                                                          */
+/*  The music-sync card above is Hue's own dark navy; this one wears the    */
+/*  hue-ghost desktop app's warm charcoal and gold instead, because it      */
+/*  drives that app and the two should look like one product on the         */
+/*  dashboard as they do on the PC.                                         */
+/*                                                                          */
+/*  Everything on it comes off ONE device: the light is the master (on/off  */
+/*  and the level), the selects are the live knobs, and one switch per      */
+/*  source is the row of tiles. Entities are found by their translation     */
+/*  keys in the entity registry, so a bare `type:` with no options is a     */
+/*  working card - no entity ids to copy in, and none to fix when a source  */
+/*  is added on the PC.                                                     */
+/* ======================================================================== */
+
+const GHOST_DOMAIN = "hue_music_sync";
+
+// Roles keyed by the integration's translation keys (stable across renames).
+const GHOST_ROLES = {
+  ghost_light: "light",
+  ghost_state: "status",
+  ghost_area: "area",
+  ghost_source: "source",
+  ghost_now_playing: "playing",
+  ghost_intensity: "intensity",
+  ghost_mode: "mode",
+  ghost_audio_effects: "audio",
+  ghost_offset: "offset",
+};
+
+// The app's own palette (hueghost/gui/theme.py), so a glance at the dashboard
+// and a glance at the PC read the same.
+const GHOST_STATE_COLORS = {
+  offline: "#4a463f", idle: "#6b665d", ghosting: "#60a5fa", syncing: "#3ddc97",
+};
+const GHOST_INTENSITY_COLORS = {
+  subtle: "#38bdf8", moderate: "#a78bfa", high: "#f472b6", extreme: "#fb7185",
+};
+const GHOST_MODE_COLORS = { video: "#60a5fa", music: "#a78bfa", games: "#3ddc97" };
+const GHOST_MODE_ICONS = {
+  video: "mdi:television-play", music: "mdi:music", games: "mdi:gamepad-variant",
+};
+const GHOST_ACCENT = "#e4a667";
+
+const GHOST_DEMO = {
+  demo: true, title: "Hue Movie Sync", on: true, offline: false, brightness: 62,
+  status: "syncing", statusLabel: "Syncing", area: "Living room", source: "Apple TV",
+  playing: "The Bear - S03E01", sources: [
+    { name: "Abdullah's S23", on: true, active: false, kind: "jellyfin", priority: 0 },
+    { name: "Apple TV", on: true, active: true, kind: "jellyfin", priority: 1 },
+    { name: "PC", on: true, active: false, kind: "pc", priority: 2 },
+  ],
+  intensity: { value: "high", options: ["subtle", "moderate", "high", "extreme"],
+               colors: GHOST_INTENSITY_COLORS },
+  mode: { value: "video", options: ["video", "music", "games"], colors: GHOST_MODE_COLORS },
+};
+
+const GHOST_CSS = `
+  :host {
+    --g-card: #1c1a16;
+    --g-card-hi: #26231d;
+    --g-line: #302c25;
+    --g-line-hi: #403b32;
+    --g-text: #f5f3ef;
+    --g-text2: #c9c3b8;
+    --g-muted: #8f887c;
+    --g-faint: #5e584f;
+    --g-accent: ${GHOST_ACCENT};
+    --g-font: "Hanken Grotesk", var(--paper-font-common-base_-_font-family, system-ui), system-ui, sans-serif;
+    display: block;
+  }
+  * { box-sizing: border-box; }
+
+  .g-card {
+    position: relative; overflow: hidden; isolation: isolate;
+    background: linear-gradient(180deg, var(--g-card) 0%, #141210 100%);
+    border: 1px solid var(--g-line); border-radius: 26px;
+    color: var(--g-text); font-family: var(--g-font);
+    padding: 18px 18px 16px;
+    transition: border-color .35s;
+  }
+  .g-card.on { border-color: var(--g-line-hi); }
+  /* the accent bleed: the card itself lighting up when the sync is live */
+  .g-bleed {
+    position: absolute; left: 50%; top: -55%; width: 150%; aspect-ratio: 1;
+    transform: translateX(-50%); z-index: -1; pointer-events: none;
+    opacity: 0; transition: opacity .6s, background .6s;
+  }
+  .g-card.on .g-bleed { opacity: .5; }
+  .g-card.live .g-bleed { opacity: .9; }
+
+  /* -- header -- */
+  .g-head { display: flex; align-items: center; gap: 12px; }
+  .g-brand {
+    flex: none; width: 40px; height: 40px; border-radius: 13px; cursor: pointer;
+    display: grid; place-items: center; color: var(--g-muted);
+    background: #ffffff08; border: 1px solid var(--g-line); transition: .25s;
+    --mdc-icon-size: 21px;
+  }
+  .g-card.on .g-brand { color: #241a10; background: var(--g-accent); border-color: transparent; }
+  .g-titles { flex: 1; min-width: 0; }
+  .g-title {
+    font-size: 15px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .g-sub {
+    margin-top: 2px; font-size: 12px; font-weight: 600; color: var(--g-muted);
+    display: flex; align-items: center; gap: 7px; min-width: 0;
+  }
+  .g-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; }
+  .g-dot.pulse { animation: g-pulse 2.2s ease-in-out infinite; }
+  @keyframes g-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+  .g-sub-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  /* -- power -- */
+  .g-power {
+    flex: none; position: relative; width: 52px; height: 30px; border-radius: 999px;
+    border: 1px solid var(--g-line); background: #00000040; cursor: pointer; padding: 0;
+    transition: .25s;
+  }
+  .g-power.on { background: var(--g-accent); border-color: transparent; }
+  .g-power-knob {
+    position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 50%;
+    background: #6e675c; transition: .25s;
+  }
+  .g-power.on .g-power-knob { left: calc(100% - 25px); background: #fff; }
+  .g-power:disabled { opacity: .45; cursor: not-allowed; }
+
+  /* -- brightness bar -- */
+  .g-bri {
+    position: relative; margin-top: 15px; height: 56px; border-radius: 17px;
+    background: #00000045; border: 1px solid var(--g-line); overflow: hidden;
+    cursor: pointer; touch-action: none; user-select: none;
+  }
+  .g-bri-fill {
+    position: absolute; top: 0; bottom: 0; left: 0; border-radius: 16px;
+    transition: width .18s ease-out;
+  }
+  .g-bri.drag .g-bri-fill { transition: none; }
+  .g-bri-meta {
+    position: absolute; inset: 0; display: flex; align-items: center; gap: 8px;
+    padding: 0 16px; font-size: 14px; font-weight: 800; color: var(--g-text);
+    text-shadow: 0 1px 3px #0009; pointer-events: none; --mdc-icon-size: 18px;
+  }
+  .g-bri-val { font-variant-numeric: tabular-nums; }
+  .g-bri-val.g-off { color: var(--g-muted); font-weight: 700; text-shadow: none; }
+  .g-bri.disabled { opacity: .5; pointer-events: none; }
+  /* nothing to drive while the PC is away - say so by fading, not by lying */
+  .g-card.offline .g-sec { opacity: .45; pointer-events: none; }
+
+  /* -- sections -- */
+  .g-sec { margin-top: 16px; }
+  .g-label {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+    font-size: 10.5px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--g-faint); margin-bottom: 8px;
+  }
+  .g-label-val {
+    text-transform: none; letter-spacing: 0; font-size: 12px; font-weight: 700;
+    color: var(--g-text2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+
+  /* -- segmented picker -- */
+  .g-seg {
+    display: flex; gap: 4px; padding: 4px; border-radius: 14px;
+    background: #00000040; border: 1px solid var(--g-line);
+  }
+  .g-seg-btn {
+    position: relative; flex: 1; min-width: 0; padding: 8px 4px; border: none;
+    border-radius: 10px; background: transparent; color: var(--g-muted);
+    font-family: var(--g-font); font-size: 11.5px; font-weight: 700; cursor: pointer;
+    transition: .16s; overflow: hidden;
+    display: flex; align-items: center; justify-content: center; gap: 5px;
+    --mdc-icon-size: 15px;
+  }
+  .g-seg-btn:hover { color: var(--g-text); background: #ffffff0a; }
+  .g-seg-btn.on { color: var(--g-text); }
+  .g-seg-glow { position: absolute; inset: 0; opacity: .22; border-radius: 10px; }
+  .g-seg-txt {
+    position: relative; z-index: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .g-seg-btn ha-icon { position: relative; z-index: 1; flex: none; }
+
+  /* -- source tiles -- */
+  .g-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(82px, 1fr)); gap: 8px; }
+  .g-tile {
+    position: relative; display: flex; flex-direction: column; align-items: center; gap: 7px;
+    padding: 12px 8px 10px; border-radius: 16px; cursor: pointer;
+    background: #ffffff06; border: 1px solid var(--g-line); color: var(--g-muted);
+    font-family: var(--g-font); transition: .18s; overflow: hidden; --mdc-icon-size: 21px;
+  }
+  .g-tile:hover { background: #ffffff0f; }
+  .g-tile.on { color: var(--g-text); background: var(--g-card-hi); }
+  .g-tile.live { border-color: var(--g-accent); }
+  .g-tile-name {
+    font-size: 11px; font-weight: 700; text-align: center; line-height: 1.2;
+    width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .g-tile-sw {
+    position: relative; width: 34px; height: 18px; border-radius: 999px;
+    background: #00000055; border: 1px solid var(--g-line); transition: .2s; flex: none;
+  }
+  .g-tile.on .g-tile-sw { background: var(--g-accent); border-color: transparent; }
+  .g-tile-sw i {
+    position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%;
+    background: #6e675c; transition: .2s;
+  }
+  .g-tile.on .g-tile-sw i { left: calc(100% - 14px); background: #fff; }
+  .g-tile-live {
+    position: absolute; top: 7px; right: 8px; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--g-accent); animation: g-pulse 2.2s ease-in-out infinite;
+  }
+  .g-tile.unavail { opacity: .4; pointer-events: none; }
+
+  .g-note {
+    margin-top: 14px; padding: 11px 13px; border-radius: 13px; font-size: 12px;
+    font-weight: 600; background: #ffffff08; border: 1px solid var(--g-line);
+    color: var(--g-text2); line-height: 1.45;
+  }
+  .g-note b { color: var(--g-text); font-weight: 800; }
+  .g-note code {
+    font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11.5px; color: var(--g-accent);
+  }
+`;
+
+/* Icon: HA's own <ha-icon> when it is defined, so the integration's icons and
+   any user override come through; a plain dot anywhere it is not (the demo
+   harness, a bare preview). */
+function ghostIcon(name, cls) {
+  const has = !!customElements.get("ha-icon");
+  const el = document.createElement(has ? "ha-icon" : "span");
+  if (has) el.setAttribute("icon", name);
+  else el.textContent = "●";
+  if (cls) el.className = cls;
+  return el;
+}
+
+const ghostTitleize = (s) =>
+  String(s || "").replace(/[_-]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+
+class HueGhostCard extends HTMLElement {
+  constructor() {
+    super();
+    this.attachShadow({ mode: "open" });
+    this._config = {};
+    this._dragging = false;
+  }
+
+  static getStubConfig() {
+    return { type: "custom:hue-ghost-card" };
+  }
+
+  getCardSize() {
+    return 5;
+  }
+
+  setConfig(config) {
+    this._config = config || {};
+    this._ids = null;
+    this._sig = null;
+    this._render();
+  }
+
+  set hass(hass) {
+    const first = !this._hass;
+    this._hass = hass;
+    // The lookup is keyed on the registry object, which HA replaces only when
+    // something is actually added or renamed - so a source added on the PC
+    // appears here on its own, without touching the dashboard.
+    if (first || this._regFrom !== hass.entities) this._ids = null;
+    const sig = this._signature();
+    if (!first && sig === this._sig) return;
+    this._sig = sig;
+    if (!this._dragging) this._render();
+  }
+
+  get hass() {
+    return this._hass;
+  }
+
+  /* ---------------- entity discovery ---------------- */
+
+  _lookup() {
+    const hass = this._hass;
+    if (!hass) return null;
+    if (this._ids) return this._ids;
+    const cfg = this._config || {};
+    const reg = hass.entities || {};
+    this._regFrom = hass.entities;
+    const out = { sources: [] };
+
+    const entries = Object.keys(reg)
+      .map((id) => reg[id])
+      .filter((e) => e && e.platform === GHOST_DOMAIN &&
+        typeof e.translation_key === "string" && e.translation_key.indexOf("ghost_") === 0);
+
+    // Which Hue Ghost device: the one the configured light belongs to, else
+    // the first that has one (a second config entry = a second PC).
+    let device = cfg.device || null;
+    if (!device && cfg.light && reg[cfg.light]) device = reg[cfg.light].device_id;
+    if (!device) {
+      const lit = entries.find((e) => e.translation_key === "ghost_light");
+      device = lit ? lit.device_id : null;
+    }
+    for (const e of entries) {
+      if (device && e.device_id !== device) continue;
+      if (e.translation_key === "ghost_binding") out.sources.push(e.entity_id);
+      else {
+        const role = GHOST_ROLES[e.translation_key];
+        if (role && !out[role]) out[role] = e.entity_id;
+      }
+    }
+    out.device = device;
+
+    if (!out.light) this._guess(out);      // no registry to read (older HA, preview)
+    for (const key of ["light", "status", "area", "source", "playing", "intensity", "mode"]) {
+      if (cfg[key]) out[key] = cfg[key];   // an explicit id always wins
+    }
+    if (Array.isArray(cfg.sources)) out.sources = cfg.sources.slice();
+    this._ids = out;
+    return out;
+  }
+
+  /* Last resort: find the light by its shape - no other light carries both a
+     `syncing` and an `intensity` attribute - then match its siblings on the
+     entity-id prefix Home Assistant built them all from. */
+  _guess(out) {
+    const states = this._hass.states;
+    const lightId = Object.keys(states).find((id) => {
+      if (id.indexOf("light.") !== 0) return false;
+      const a = states[id].attributes || {};
+      return a.syncing !== undefined && a.intensity !== undefined;
+    });
+    if (!lightId) return;
+    out.light = lightId;
+    const slug = lightId.split(".")[1].replace(/_(global_sync|movie_mode_lights)$/, "");
+    const pick = (domain, re) =>
+      Object.keys(states).find((id) => id.indexOf(domain + "." + slug) === 0 && re.test(id));
+    out.status = pick("sensor", /(sync_status|_state)$/);
+    out.area = pick("sensor", /sync_area$/);
+    out.source = pick("sensor", /active_source$/);
+    out.playing = pick("sensor", /now_playing$/);
+    out.intensity = pick("select", /intensity$/);
+    out.mode = pick("select", /(_mode|_effect)$/);
+    out.sources = Object.keys(states).filter(
+      (id) => id.indexOf("switch." + slug) === 0 && !/audio/.test(id));
+  }
+
+  /* Re-render only when something the card shows has actually moved. */
+  _signature() {
+    const hass = this._hass;
+    if (!hass) return "";
+    const ids = this._lookup();
+    if (!ids) return "";
+    let out = ids.device || "";
+    const all = [ids.light, ids.status, ids.area, ids.source, ids.playing,
+      ids.intensity, ids.mode].concat(ids.sources);
+    for (const id of all) {
+      if (!id) continue;
+      const e = hass.states[id];
+      if (!e) { out += id + "=∅;"; continue; }
+      const a = e.attributes;
+      out += `${id}=${e.state}|${a.brightness || ""}|${a.active || ""}|${a.friendly_name || ""};`;
+    }
+    return out;
+  }
+
+  /* ---------------- model ---------------- */
+
+  _model() {
+    const hass = this._hass;
+    const ids = this._lookup();
+    if (!hass || !ids || !ids.light || !hass.states[ids.light]) return GHOST_DEMO;
+    const st = (id) => (id && hass.states[id]) || null;
+    const known = (s) => (s && s !== "unknown" && s !== "unavailable" ? s : null);
+    const light = st(ids.light);
+    const la = light.attributes || {};
+    const status = st(ids.status);
+    const statusState = status ? status.state : (la.syncing ? "syncing" : null);
+    const areaEnt = st(ids.area);
+    const sourceEnt = st(ids.source);
+    const playingEnt = st(ids.playing);
+
+    const picker = (id, colors) => {
+      const e = st(id);
+      if (!e || !Array.isArray(e.attributes.options)) return null;
+      return {
+        entity: id,
+        value: known(e.state),
+        options: e.attributes.options.slice(),
+        label: (opt) => this._fmt(e, opt),
+        colors,
+      };
+    };
+
+    const sources = ids.sources
+      .map((id) => {
+        const e = st(id);
+        if (!e) return null;
+        const a = e.attributes;
+        return {
+          entity: id,
+          name: this._shortName(id, a.friendly_name),
+          on: e.state === "on",
+          active: !!a.active,
+          kind: a.source,
+          icon: a.icon,
+          unavailable: e.state === "unavailable",
+          priority: typeof a.priority === "number" ? a.priority : 99,
+        };
+      })
+      .filter(Boolean)
+      // hue-ghost's own priority order, so the tiles read like the app's list
+      .sort((a, b) => a.priority - b.priority || a.name.localeCompare(b.name));
+
+    return {
+      title: this._config.title || this._deviceName(ids) || "Hue Movie Sync",
+      lightEntity: ids.light,
+      on: light.state === "on",
+      offline: statusState === "offline" || light.state === "unavailable",
+      brightness: la.brightness != null ? Math.round((la.brightness / 255) * 100) : null,
+      status: statusState,
+      statusLabel: status ? this._fmt(status) : null,
+      area: known(areaEnt && areaEnt.state) || la.area || null,
+      source: known(sourceEnt && sourceEnt.state) || la.source || null,
+      playing: known(playingEnt && playingEnt.state) || la.now_playing || null,
+      intensity: picker(ids.intensity, GHOST_INTENSITY_COLORS),
+      mode: picker(ids.mode, GHOST_MODE_COLORS),
+      sources,
+    };
+  }
+
+  _deviceName(ids) {
+    const devices = this._hass && this._hass.devices;
+    const d = ids && ids.device && devices ? devices[ids.device] : null;
+    return d ? d.name_by_user || d.name : null;
+  }
+
+  /* "Hue Ghost Apple TV" -> "Apple TV": the device name is already the card's
+     title, so repeating it on every tile only eats the width. */
+  _shortName(entityId, friendly) {
+    let name = friendly || ghostTitleize(entityId.split(".")[1]);
+    const device = this._deviceName(this._ids);
+    if (device && name.indexOf(device + " ") === 0) name = name.slice(device.length + 1);
+    return name;
+  }
+
+  /* Translated option/state labels straight from HA, so "Video (picture)" here
+     matches the more-info dialog; the raw key, titleized, if it cannot. */
+  _fmt(stateObj, value) {
+    const hass = this._hass;
+    if (hass && typeof hass.formatEntityState === "function") {
+      try {
+        return hass.formatEntityState(stateObj, value);
+      } catch (err) { /* fall through */ }
+    }
+    return ghostTitleize(value != null ? value : stateObj.state);
+  }
+
+  /* ---------------- services ---------------- */
+
+  _toggleLight(m) {
+    if (m.demo) return;
+    this._hass.callService("light", m.on ? "turn_off" : "turn_on", { entity_id: m.lightEntity });
+  }
+
+  _setBrightness(m, pct) {
+    if (m.demo) return;
+    this._hass.callService("light", "turn_on", {
+      entity_id: m.lightEntity, brightness_pct: Math.max(1, Math.min(100, Math.round(pct))),
+    });
+  }
+
+  _select(picker, option) {
+    if (!picker || !picker.entity) return;
+    this._hass.callService("select", "select_option", { entity_id: picker.entity, option });
+  }
+
+  _toggleSource(src) {
+    if (!src.entity) return;
+    this._hass.callService("switch", src.on ? "turn_off" : "turn_on", { entity_id: src.entity });
+  }
+
+  _moreInfo(entityId) {
+    if (!entityId) return;
+    const ev = new Event("hass-more-info", { bubbles: true, composed: true });
+    ev.detail = { entityId };
+    this.dispatchEvent(ev);
+  }
+
+  /* ---------------- render ---------------- */
+
+  _render() {
+    let m;
+    try {
+      m = this._model();
+    } catch (err) {
+      // A render error must never escape setConfig(): Lovelace turns that into
+      // a red configuration-error card that no state update recovers from.
+      console.error("hue-ghost-card: could not read the Hue Ghost entities", err);
+      m = GHOST_DEMO;
+    }
+    const root = document.createElement("div");
+    root.className = "g-card" + (m.on && !m.offline ? " on" : "") +
+      (m.status === "syncing" ? " live" : "") + (m.offline ? " offline" : "");
+
+    // The ambient bleed takes the intensity's colour (subtle is cool, extreme
+    // is hot) - the one place the card shows intensity as light rather than
+    // as a label. Everything you touch stays gold, like the app.
+    const accent = (m.intensity && m.intensity.value &&
+      GHOST_INTENSITY_COLORS[m.intensity.value]) || GHOST_ACCENT;
+
+    const bleed = document.createElement("div");
+    bleed.className = "g-bleed";
+    bleed.style.background =
+      `radial-gradient(closest-side, ${accent}59, ${accent}14 55%, transparent 72%)`;
+    root.appendChild(bleed);
+
+    root.appendChild(this._header(m));
+    root.appendChild(this._brightness(m, GHOST_ACCENT));
+    if (m.intensity && this._show("intensity")) root.appendChild(this._picker("Intensity", m.intensity, m));
+    if (m.mode && this._show("mode")) root.appendChild(this._picker("Mode", m.mode, m, GHOST_MODE_ICONS));
+    if (m.sources.length && this._show("sources")) root.appendChild(this._sourceTiles(m));
+    const note = this._note(m);
+    if (note) root.appendChild(note);
+
+    const style = document.createElement("style");
+    style.textContent = GHOST_CSS;
+    this.shadowRoot.replaceChildren(style, root);
+  }
+
+  _show(key) {
+    return (this._config || {})["show_" + key] !== false;
+  }
+
+  _header(m) {
+    const head = document.createElement("div");
+    head.className = "g-head";
+
+    const brand = document.createElement("div");
+    brand.className = "g-brand";
+    brand.appendChild(ghostIcon(this._config.icon || "mdi:ghost"));
+    brand.addEventListener("click", () => this._moreInfo(m.lightEntity));
+    head.appendChild(brand);
+
+    const titles = document.createElement("div");
+    titles.className = "g-titles";
+    const title = document.createElement("div");
+    title.className = "g-title";
+    title.textContent = m.title;
+    titles.appendChild(title);
+
+    const sub = document.createElement("div");
+    sub.className = "g-sub";
+    const dot = document.createElement("span");
+    dot.className = "g-dot" +
+      (m.status === "syncing" || m.status === "ghosting" ? " pulse" : "");
+    dot.style.background = GHOST_STATE_COLORS[m.status] || "#6b665d";
+    sub.appendChild(dot);
+    const text = document.createElement("span");
+    text.className = "g-sub-text";
+    text.textContent = this._subtitle(m);
+    sub.appendChild(text);
+    titles.appendChild(sub);
+    head.appendChild(titles);
+
+    const power = document.createElement("button");
+    power.className = "g-power" + (m.on && !m.offline ? " on" : "");
+    power.disabled = !!m.offline;
+    power.title = m.on ? "Turn movie mode off" : "Turn movie mode on";
+    const knob = document.createElement("span");
+    knob.className = "g-power-knob";
+    power.appendChild(knob);
+    power.addEventListener("click", () => this._toggleLight(m));
+    head.appendChild(power);
+    return head;
+  }
+
+  /* Status, where, and what - in that order, dropping whatever is not known
+     rather than printing "unknown" three times. */
+  _subtitle(m) {
+    if (m.offline) return "PC offline";
+    const bits = [m.statusLabel || (m.on ? "On" : "Off")];
+    if (m.area) bits.push(m.area);
+    if (m.playing && (m.status === "syncing" || m.status === "ghosting")) bits.push(m.playing);
+    else if (m.source) bits.push(m.source);
+    return bits.join(" · ");
+  }
+
+  _brightness(m, accent) {
+    const bar = document.createElement("div");
+    bar.className = "g-bri" + (m.offline ? " disabled" : "");
+    const fill = document.createElement("div");
+    fill.className = "g-bri-fill";
+    const meta = document.createElement("div");
+    meta.className = "g-bri-meta";
+    meta.appendChild(ghostIcon("mdi:brightness-6"));
+    const val = document.createElement("span");
+    val.className = "g-bri-val";
+    meta.appendChild(val);
+    bar.appendChild(fill);
+    bar.appendChild(meta);
+
+    const level = m.brightness != null ? m.brightness : (m.on ? 100 : 0);
+    const paint = (pct, live) => {
+      const lit = m.on || live;
+      fill.style.width = Math.max(0, Math.min(100, pct)) + "%";
+      fill.style.opacity = lit ? "1" : ".3";
+      fill.style.background = `linear-gradient(90deg, ${accent}66, ${accent})`;
+      val.textContent = lit ? Math.round(pct) + "%" : "Movie mode off";
+      val.className = "g-bri-val" + (lit ? "" : " g-off");
+    };
+    paint(level, false);
+    if (m.demo || m.offline) return bar;
+
+    // Drag anywhere on the bar. Dragging while off turns movie mode on at that
+    // level - what the light entity does anyway, and what the Hue app does:
+    // one gesture, lights on.
+    let pending = level;
+    const at = (clientX) => {
+      const r = bar.getBoundingClientRect();
+      pending = Math.max(1, Math.min(100, ((clientX - r.left) / r.width) * 100));
+      paint(pending, true);
+    };
+    const move = (e) => {
+      if (!this._dragging) return;
+      const x = e.clientX != null ? e.clientX : (e.touches && e.touches[0] && e.touches[0].clientX);
+      if (x != null) at(x);
+    };
+    const up = () => {
+      if (!this._dragging) return;
+      this._dragging = false;
+      bar.classList.remove("drag");
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+      this._setBrightness(m, pending);
+    };
+    bar.addEventListener("pointerdown", (e) => {
+      this._dragging = true;
+      bar.classList.add("drag");
+      if (bar.setPointerCapture) bar.setPointerCapture(e.pointerId);
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+      window.addEventListener("pointercancel", up);
+      at(e.clientX);
+    });
+    return bar;
+  }
+
+  _picker(label, picker, m, icons) {
+    const sec = document.createElement("div");
+    sec.className = "g-sec";
+    const head = document.createElement("div");
+    head.className = "g-label";
+    const name = document.createElement("span");
+    name.textContent = label;
+    head.appendChild(name);
+    const value = document.createElement("span");
+    value.className = "g-label-val";
+    value.textContent = picker.value
+      ? (picker.label ? picker.label(picker.value) : ghostTitleize(picker.value))
+      : "—";
+    head.appendChild(value);
+    sec.appendChild(head);
+
+    const seg = document.createElement("div");
+    seg.className = "g-seg";
+    for (const opt of picker.options) {
+      const btn = document.createElement("button");
+      const on = opt === picker.value;
+      btn.className = "g-seg-btn" + (on ? " on" : "");
+      const colour = (picker.colors && picker.colors[opt]) || GHOST_ACCENT;
+      if (on) {
+        const glow = document.createElement("span");
+        glow.className = "g-seg-glow";
+        glow.style.background = `linear-gradient(180deg, ${colour}, ${colour}66)`;
+        btn.appendChild(glow);
+      }
+      if (icons && icons[opt]) btn.appendChild(ghostIcon(icons[opt]));
+      const txt = document.createElement("span");
+      txt.className = "g-seg-txt";
+      txt.textContent = picker.label ? picker.label(opt) : ghostTitleize(opt);
+      btn.appendChild(txt);
+      if (!m.demo) btn.addEventListener("click", () => this._select(picker, opt));
+      seg.appendChild(btn);
+    }
+    sec.appendChild(seg);
+    return sec;
+  }
+
+  _sourceTiles(m) {
+    const sec = document.createElement("div");
+    sec.className = "g-sec";
+    const head = document.createElement("div");
+    head.className = "g-label";
+    const name = document.createElement("span");
+    name.textContent = "Sources";
+    head.appendChild(name);
+    const live = m.offline ? null : m.sources.find((s) => s.active);
+    if (live) {
+      const value = document.createElement("span");
+      value.className = "g-label-val";
+      value.textContent = live.name + " is playing";
+      head.appendChild(value);
+    }
+    sec.appendChild(head);
+
+    const grid = document.createElement("div");
+    grid.className = "g-tiles";
+    for (const src of m.sources) {
+      const tile = document.createElement("button");
+      tile.className = "g-tile" + (src.on ? " on" : "") + (src.active ? " live" : "") +
+        (src.unavailable ? " unavail" : "");
+      tile.title = src.name;
+      if (src.active) {
+        const dot = document.createElement("span");
+        dot.className = "g-tile-live";
+        tile.appendChild(dot);
+      }
+      tile.appendChild(ghostIcon(
+        src.icon || (src.kind === "pc" ? "mdi:monitor" : "mdi:television-play")));
+      const label = document.createElement("span");
+      label.className = "g-tile-name";
+      label.textContent = src.name;
+      tile.appendChild(label);
+      const sw = document.createElement("span");
+      sw.className = "g-tile-sw";
+      sw.appendChild(document.createElement("i"));
+      tile.appendChild(sw);
+      if (!m.demo) tile.addEventListener("click", () => this._toggleSource(src));
+      grid.appendChild(tile);
+    }
+    sec.appendChild(grid);
+    return sec;
+  }
+
+  /* Only speaks up when there is nothing to drive. */
+  _note(m) {
+    if (!m.demo) return null;
+    const note = document.createElement("div");
+    note.className = "g-note";
+    note.innerHTML = this._hass
+      ? "No <b>Hue Ghost</b> device found. Fill in the Hue Ghost PC host, port " +
+        "and token under the integration's <b>Configure</b>, or point the card at " +
+        "the light: <code>light: light.hue_ghost_global_sync</code>."
+      : "Preview. On a dashboard this card finds the <b>Hue Ghost</b> device by itself.";
+    return note;
+  }
+}
+
 const defineCard = () => {
   if (!customElements.get("hue-music-sync-card")) {
     try {
@@ -4559,9 +5311,17 @@ const defineCard = () => {
       console.error("hue-music-sync-card-tablet: define failed", e);
     }
   }
+  if (!customElements.get("hue-ghost-card")) {
+    try {
+      customElements.define("hue-ghost-card", HueGhostCard);
+    } catch (e) {
+      console.error("hue-ghost-card: define failed", e);
+    }
+  }
   console.info(
     `hue-music-sync-card: registered=${!!customElements.get("hue-music-sync-card")}` +
     ` tablet=${!!customElements.get("hue-music-sync-card-tablet")}` +
+    ` ghost=${!!customElements.get("hue-ghost-card")}` +
     ` top=${window === window.top}`
   );
 };
@@ -4608,6 +5368,15 @@ if (!window.customCards.some((c) => c.type === "hue-music-sync-card-tablet")) {
     description: "Landscape Ambient Glow card for the Hue Synco integration, optimised for tablets.",
     preview: true,
     documentationURL: "https://github.com/engabd11/syncoV2",
+  });
+}
+if (!window.customCards.some((c) => c.type === "hue-ghost-card")) {
+  window.customCards.push({
+    type: "hue-ghost-card",
+    name: "Hue Ghost Card (Movie mode)",
+    description: "Movie mode in one tile: the Global sync light, intensity, mode and the sources hue-ghost follows.",
+    preview: true,
+    documentationURL: "https://github.com/engabd11/syncoV2#movie-mode-hue-ghost",
   });
 }
 

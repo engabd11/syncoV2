@@ -158,6 +158,10 @@ areas:
     # ...same keys as above
 ```
 
+A third card ships in the same bundle for movie mode — **Hue Ghost Card (Movie
+mode)**, in the hue-ghost app's warm gold rather than Hue navy. It configures
+itself; see [Movie mode (Hue Ghost)](#the-hue-ghost-card).
+
 ## Requirements
 
 - **Home Assistant** 2024.12 or newer
@@ -263,18 +267,22 @@ allows one streamer per entertainment area.
 
 Set it up on the PC first (`hue-ghost setup` exposes its control API to the LAN
 with a token), then **Configure → Hue Ghost PC host / port / token**. A
-**Hue Ghost — Movie mode** device appears:
+**Hue Ghost** device appears, named for what each entity does rather than for
+the device it is already under:
 
 | Entity | Type | Description |
 |---|---|---|
-| Movie mode | Switch | Enables hue-ghost. Turning it **on** stops every active music-sync area first; starting a music-sync area turns it **off** |
-| Movie mode state | Sensor | `offline` / `idle` / `ghosting` / `syncing`, with what the TV is playing, the measured ghost-vs-TV drift and the Hue Sync app state as attributes |
-| Movie mode effect | Select | What Hue Sync reacts to: video (the picture), music (the sound) or games. Applies live, mid-movie |
-| Movie intensity | Select | Hue Sync's intensity (subtle / moderate / high / extreme), applied when a movie starts and live while syncing |
-| Movie audio effects | Switch | Hue Sync's *use audio for light effects* for video and games mode. Until you touch it, it mirrors what the Hue Sync app itself is set to; flipping it hands the setting to hue-ghost, which applies it at the start of the next sync |
-| Movie sync offset | Number | How far the ghost runs ahead of the TV to cancel capture → bridge → lamp latency. Tune it from the couch: +0.25 s = lights later |
-| Movie mode lights | Light | The entertainment area itself: on/off is movie mode, and the brightness slider is the level Hue Sync runs the area at — so it works in scenes and by voice |
-| Follow *&lt;source&gt;* | Switch | One per thing Hue Ghost can follow — a Jellyfin client, or an app on the PC. Off = ignore it without deleting it. The `active` attribute says which one is driving the lights *right now*, which is a different question from whether it is followed |
+| Global sync | Light | **The master control.** On/off is movie mode, and the brightness slider is the level Hue Sync runs the area at — so it works in scenes, in voice assistants and on any light card. Turning it **on** stops every active music-sync area first; starting a music-sync area turns it **off** |
+| Sync status | Sensor | `offline` / `idle` / `ghosting` / `syncing`, with what is playing, the measured ghost-vs-TV drift and the Hue Sync app state as attributes |
+| Sync area | Sensor | Which entertainment area the sync plays in. Reported, not set — the area is chosen per source in hue-ghost. The `areas_by_source` attribute lists where each followed source would go |
+| Active source | Sensor | Which followed source is driving the lights *now* — a different question from which ones are switched on |
+| Now playing | Sensor | The Jellyfin item the TV is playing, or whatever the PC source reported (a window title, a game) |
+| Intensity | Select | Hue Sync's intensity (subtle / moderate / high / extreme), applied when a movie starts and live while syncing |
+| Mode | Select | What Hue Sync reacts to: video (the picture), music (the sound) or games. Applies live, mid-movie |
+| *&lt;source&gt;* | Switch | One per thing Hue Ghost can follow — a Jellyfin client, or an app on the PC — named for the source itself ("Apple TV", "PC"). Off = ignore it without deleting it |
+| Audio effects | Switch | Hue Sync's *use audio for light effects* for video and games mode. Until you touch it, it mirrors what the Hue Sync app itself is set to; flipping it hands the setting to hue-ghost, which applies it at the start of the next sync |
+| Sync offset | Number | How far the ghost runs ahead of the TV to cancel capture → bridge → lamp latency. Tune it from the couch: +0.25 s = lights later |
+| Sync drift | Sensor | *(diagnostic)* The measured gap between the ghost and the TV, in seconds — the evidence for the offset above |
 
 With movie mode on, nothing else is needed: press play on the TV and the lights
 follow; stop, and they stop. The PC's Hue Sync app must have *Allow public
@@ -286,6 +294,41 @@ the light still switches movie mode but reports no level, no source switches
 appear, and the rest simply has nothing to report. The entertainment
 area stays yours to pick in the Hue Sync app — hue-ghost only sets it when a
 movie starts.
+
+> **Upgrading from 1.59 or earlier.** The separate `switch.hue_ghost_movie_mode`
+> is gone — the Global sync light already did both halves of its job — and is
+> removed from the registry on the first restart, so point any card or
+> automation at the light instead. Entities you already have keep their old
+> entity ids (Home Assistant never renames them); the new names show up as
+> friendly names. To take the shorter ids as well, delete the Hue Ghost device
+> under **Settings → Devices & services → Hue Synco** and reload the entry — it
+> comes straight back with `light.hue_ghost_global_sync`,
+> `sensor.hue_ghost_sync_status` and so on.
+
+### The Hue Ghost card
+
+The bundled **Hue Ghost Card (Movie mode)** puts all of it in one tile — the
+light and its level, the intensity and mode pickers, and a tile per source with
+the one that is playing ringed in gold — in the hue-ghost desktop app's own
+warm charcoal and gold, so the dashboard and the PC look like one product. It
+is served by the integration like the music-sync card, so it needs no separate
+install, and it finds the Hue Ghost device by itself:
+
+```yaml
+type: custom:hue-ghost-card
+```
+
+That is the whole config. Everything below is optional:
+
+| Option | Default | |
+|---|---|---|
+| `title` | the device name | Heading text |
+| `icon` | `mdi:ghost` | Heading icon |
+| `show_intensity`, `show_mode`, `show_sources` | `true` | Hide a section |
+| `light`, `status`, `area`, `source`, `playing`, `intensity`, `mode`, `sources` | auto | Pin a specific entity, e.g. with two PCs |
+
+Because it reads the sources from the device, one added in the Hue Ghost app
+appears as a new tile on its own — nothing to edit here.
 
 ## Services
 

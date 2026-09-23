@@ -32,7 +32,8 @@ async def async_setup_entry(
         entities.append(HueMusicSyncSwitch(manager, area_id))
         entities.append(HueMusicSyncAdvancedSwitch(manager, area_id))
     if manager.ghost is not None:
-        entities.append(HueGhostMovieModeSwitch(manager.ghost))
+        # No movie-mode switch: the Global sync light is the master control
+        # (on/off *and* the level), and one thing should have one entity.
         entities.append(HueGhostAudioEffectsSwitch(manager.ghost))
         entities.extend(_binding_switches(manager.ghost, set()))
     async_add_entities(entities)
@@ -168,33 +169,6 @@ class HueMusicSyncAdvancedSwitch(HueMusicSyncAreaEntity, SwitchEntity):
         await self._set(False)
 
 
-class HueGhostMovieModeSwitch(HueGhostEntity, SwitchEntity):
-    """Movie mode: the hue-ghost master switch.
-
-    Turning it on stops every active music-sync area first (a bridge allows
-    one streamer per entertainment area) and then enables hue-ghost, which
-    starts the Hue Sync app the moment the TV plays.
-    """
-
-    _attr_name = None  # use the device name
-    _attr_icon = "mdi:movie-open-play"
-
-    def __init__(self, coordinator) -> None:
-        super().__init__(coordinator, "movie_mode")
-
-    @property
-    def is_on(self) -> bool:
-        return self.coordinator.enabled
-
-    @property
-    def extra_state_attributes(self) -> dict | None:
-        return self.coordinator.data or None
-
-    async def async_turn_on(self, **kwargs: Any) -> None:
-        await self.coordinator.async_turn_on()
-
-    async def async_turn_off(self, **kwargs: Any) -> None:
-        await self.coordinator.async_turn_off()
 class HueGhostAudioEffectsSwitch(HueGhostEntity, SwitchEntity):
     """Hue Sync's "use audio for light effects" for video and games mode: the
     lights react to the soundtrack as well as the picture.
@@ -238,10 +212,15 @@ class HueGhostAudioEffectsSwitch(HueGhostEntity, SwitchEntity):
 class HueGhostBindingSwitch(HueGhostEntity, SwitchEntity):
     """One source the PC can follow: a Jellyfin client, or an app on that PC.
 
-    Off means "ignore it" - it stays configured. The `active` attribute is the
-    different question of whether this is the one driving the lights *now*."""
+    Named for the source itself ("Apple TV", "PC") rather than "Follow Apple
+    TV": the device name is already in front of it, and these are the tiles a
+    dashboard shows in a row, where the verb is noise. Off means "ignore it" -
+    it stays configured. The `active` attribute is the different question of
+    whether this is the one driving the lights *now*.
 
-    _attr_entity_category = EntityCategory.CONFIG
+    A live control, not configuration - which sources may take the lights is
+    something you change from the couch, alongside the intensity."""
+
     _attr_translation_key = "ghost_binding"
 
     def __init__(self, coordinator, binding: dict) -> None:
@@ -254,6 +233,15 @@ class HueGhostBindingSwitch(HueGhostEntity, SwitchEntity):
     @property
     def _binding(self) -> dict:
         return self.coordinator.binding(self._key) or {}
+
+    @property
+    def _priority(self) -> int | None:
+        """Where this source sits in hue-ghost's own priority order, so a card
+        can lay the tiles out the way the app does instead of alphabetically."""
+        return next(
+            (i for i, b in enumerate(self.coordinator.bindings) if b.get("id") == self._key),
+            None,
+        )
 
     @property
     def available(self) -> bool:
@@ -271,6 +259,7 @@ class HueGhostBindingSwitch(HueGhostEntity, SwitchEntity):
         data = self.coordinator.data or {}
         return {
             "active": bool(b.get("active")),
+            "priority": self._priority,
             "source": b.get("source"),
             "area": b.get("area_name"),
             "device": b.get("device") or b.get("exe"),

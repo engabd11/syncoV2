@@ -104,6 +104,7 @@ def summarize_status(status: dict[str, Any] | None) -> dict[str, Any]:
     follow = status.get("follow") or {}
     ghost = status.get("ghost") or {}
     engine = status.get("engine") or {}
+    live = next((b for b in bindings_of(status) if b.get("active")), None) or {}
     return {
         "state": status.get("state") or "idle",
         "enabled": bool(status.get("enabled")),
@@ -122,10 +123,16 @@ def summarize_status(status: dict[str, Any] | None) -> dict[str, Any]:
         "intensity": status.get("intensity"),
         "use_audio": status.get("use_audio"),
         "app_use_audio": engine.get("use_audio"),
-        "area": engine.get("area_name"),
+        "area": engine.get("area_name") or live.get("area_name"),
+        "area_id": engine.get("area_id") or live.get("area_id"),
+        "active_source": live.get("name"),
+        "active_source_id": live.get("id"),
         "offset_s": status.get("offset_s"),
         "brightness": engine.get("bri"),
         "source_kind": (status.get("source") or {}).get("kind"),
+        # What is on screen: a Jellyfin item when the TV drives it, otherwise
+        # whatever the PC source reported (a window title, a game).
+        "source_title": (status.get("source") or {}).get("name"),
         "version": status.get("version"),
     }
 

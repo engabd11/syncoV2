@@ -1,9 +1,11 @@
-"""Movie mode as a light.
+"""Movie mode as a light: "Global sync".
 
 The entertainment area is what the Hue Sync app is driving, so this entity is
 deliberately a light and not another number: on/off is movie mode, and the
 brightness slider is the level Hue Sync runs the area at - usable in scenes,
-in voice assistants and on a normal light card.
+in voice assistants and on a normal light card. It is the *only* master
+control: there is no separate movie-mode switch, because a light already does
+both halves of the job and two entities for one thing is one too many.
 
 Hue Sync's Public Control protocol has no absolute brightness command, only a
 signed step; hue-ghost turns a level into that step against the level the app
@@ -46,7 +48,7 @@ def _to_ghost(brightness: int) -> int:
 
 
 class HueGhostLight(HueGhostEntity, LightEntity):
-    """The entertainment area movie mode drives."""
+    """The entertainment area movie mode drives - the master on/off + level."""
 
     _attr_translation_key = "ghost_light"
     _attr_icon = "mdi:television-ambient-light"
@@ -71,6 +73,8 @@ class HueGhostLight(HueGhostEntity, LightEntity):
             "area": data.get("area"),
             "mode": data.get("mode"),
             "intensity": data.get("intensity"),
+            "source": data.get("active_source"),
+            "now_playing": data.get("now_playing") or data.get("source_title"),
             "syncing": data.get("state") == "syncing",
         }
 

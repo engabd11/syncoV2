@@ -6,6 +6,7 @@ import asyncio
 import logging
 import mimetypes
 import ssl
+from typing import Final
 
 import aiohttp
 import voluptuous as vol
@@ -22,9 +23,10 @@ mimetypes.add_type("text/javascript", ".mjs")
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_ENTITY_ID
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.util import dt as dt_util
 
@@ -511,10 +513,34 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         manager.ghost = HueGhostCoordinator(hass, manager, client)
         # First poll may fail (PC asleep): entities still load and show offline.
         await manager.ghost.async_refresh()
+        _drop_retired_ghost_entities(hass, entry)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     _register_services(hass)
     return True
+
+
+# Entities that existed in an earlier version and have since been folded into
+# another one. Left alone they linger in the registry as "restored" rows that
+# never come back, and any card or automation pointing at them fails silently.
+RETIRED_GHOST_ENTITIES: Final = {
+    # The Global sync light does on/off *and* the level, so the separate
+    # movie-mode switch has nothing left to do (1.60).
+    "switch": ("movie_mode",),
+}
+
+
+@callback
+def _drop_retired_ghost_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    registry = er.async_get(hass)
+    for domain, keys in RETIRED_GHOST_ENTITIES.items():
+        for key in keys:
+            entity_id = registry.async_get_entity_id(
+                domain, DOMAIN, f"{entry.entry_id}_ghost_{key}"
+            )
+            if entity_id:
+                _LOGGER.debug("Removing retired entity %s", entity_id)
+                registry.async_remove(entity_id)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

@@ -10,7 +10,13 @@ from .ghost.coordinator import HueGhostCoordinator
 
 
 class HueGhostEntity(CoordinatorEntity[HueGhostCoordinator]):
-    """Base for entities on the per-entry "Hue Ghost — Movie mode" device."""
+    """Base for entities on the per-entry "Hue Ghost" device.
+
+    The device carries the name, so every entity here is named for what it does
+    and nothing else - "Sync status", "Global sync", "Apple TV". Home Assistant
+    prefixes the device name itself, which is what keeps the entity ids short
+    (``sensor.hue_ghost_sync_status``) and the dashboard tiles readable.
+    """
 
     _attr_has_entity_name = True
 
@@ -20,7 +26,7 @@ class HueGhostEntity(CoordinatorEntity[HueGhostCoordinator]):
         self._attr_unique_id = f"{entry_id}_ghost_{key}"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, f"{entry_id}_ghost")},
-            name="Hue Ghost — Movie mode",
+            name="Hue Ghost",
             manufacturer="hue-ghost",
             model="Software Hue Sync Box (Jellyfin)",
             configuration_url=coordinator.client.base_url + "/status",

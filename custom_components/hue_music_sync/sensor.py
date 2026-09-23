@@ -8,7 +8,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import UnitOfInformation
+from homeassistant.const import EntityCategory, UnitOfInformation, UnitOfTime
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -33,7 +33,15 @@ async def async_setup_entry(
     ]
     manager: SyncManager | None = hass.data[DOMAIN].get(entry.entry_id)
     if manager is not None and manager.ghost is not None:
-        entities.append(HueGhostStateSensor(manager.ghost))
+        entities.extend(
+            [
+                HueGhostStateSensor(manager.ghost),
+                HueGhostAreaSensor(manager.ghost),
+                HueGhostSourceSensor(manager.ghost),
+                HueGhostNowPlayingSensor(manager.ghost),
+                HueGhostDriftSensor(manager.ghost),
+            ]
+        )
     async_add_entities(entities)
 
 
@@ -176,10 +184,11 @@ class HueSyncoPrewarmProgress(HueSyncoLibraryEntity, SensorEntity):
 
 
 class HueGhostStateSensor(HueGhostEntity, SensorEntity):
-    """What hue-ghost is doing: offline / idle / ghosting / syncing.
+    """Sync status: offline / idle / ghosting / syncing.
 
-    Attributes carry what the TV is playing, its position, the measured drift
-    between the ghost and the TV, and the Hue Sync app's state.
+    The one sensor to put on a card next to the light. Attributes carry the
+    detail - what is playing, its position, the measured drift between the
+    ghost and the TV, and the Hue Sync app's own state.
     """
 
     _attr_translation_key = "ghost_state"
@@ -200,3 +209,123 @@ class HueGhostStateSensor(HueGhostEntity, SensorEntity):
         data = dict(self.coordinator.data or {})
         data.pop("state", None)
         return data or None
+
+
+class HueGhostAreaSensor(HueGhostEntity, SensorEntity):
+    """Which entertainment area the sync plays in.
+
+    The area is picked in the Hue Sync app (per source, in hue-ghost), so it
+    is reported rather than set: this answers "where are the lights going to
+    go when I press play", which matters once more than one room can be the
+    one syncing.
+    """
+
+    _attr_translation_key = "ghost_area"
+    _attr_icon = "mdi:sofa"
+
+    def __init__(self, coordinator) -> None:
+        super().__init__(coordinator, "area")
+
+    @property
+    def native_value(self) -> str | None:
+        return (self.coordinator.data or {}).get("area")
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        data = self.coordinator.data or {}
+        return {
+            "area_id": data.get("area_id"),
+            "source": data.get("active_source"),
+            "syncing": data.get("state") == "syncing",
+            # Every source can target its own area; this is where each would go.
+            "areas_by_source": {
+                b.get("name") or b["id"]: b.get("area_name")
+                for b in self.coordinator.bindings
+                if b.get("enabled")
+            },
+        }
+
+
+class HueGhostSourceSensor(HueGhostEntity, SensorEntity):
+    """Which followed source is driving the lights right now.
+
+    Not the same question as which sources are switched on: several can be
+    followed, one plays.
+    """
+
+    _attr_translation_key = "ghost_source"
+    _attr_icon = "mdi:import"
+
+    def __init__(self, coordinator) -> None:
+        super().__init__(coordinator, "source")
+
+    @property
+    def native_value(self) -> str | None:
+        return (self.coordinator.data or {}).get("active_source")
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        data = self.coordinator.data or {}
+        live = data.get("active_source_id")
+        binding = self.coordinator.binding(live) if live else None
+        return {
+            "source_id": live,
+            "kind": (binding or {}).get("source") or data.get("source_kind"),
+            "device": (binding or {}).get("device") or (binding or {}).get("exe"),
+            "area": (binding or {}).get("area_name") or data.get("area"),
+            "followed": [
+                b.get("name") or b["id"] for b in self.coordinator.bindings if b.get("enabled")
+            ],
+        }
+
+
+class HueGhostNowPlayingSensor(HueGhostEntity, SensorEntity):
+    """What is on screen: the Jellyfin item the TV is playing, or whatever the
+    PC source reported (a window title, a game)."""
+
+    _attr_translation_key = "ghost_now_playing"
+    _attr_icon = "mdi:play-box-outline"
+
+    def __init__(self, coordinator) -> None:
+        super().__init__(coordinator, "now_playing")
+
+    @property
+    def native_value(self) -> str | None:
+        data = self.coordinator.data or {}
+        title = data.get("now_playing") or data.get("source_title")
+        # A state is capped at 255 characters; a long title must not break it.
+        return title[:255] if isinstance(title, str) else None
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        data = self.coordinator.data or {}
+        return {
+            "source": data.get("active_source"),
+            "position_s": data.get("position_s"),
+            "paused": data.get("paused"),
+            "device": data.get("followed_device"),
+        }
+
+
+class HueGhostDriftSensor(HueGhostEntity, SensorEntity):
+    """How far the ghost copy is from the TV, in seconds.
+
+    Diagnostic: a steady non-zero reading while syncing is what the sync offset
+    is for, so the number to watch from the couch while tuning it. Signed -
+    positive means the ghost (and so the lights) runs ahead.
+    """
+
+    _attr_translation_key = "ghost_drift"
+    _attr_icon = "mdi:swap-horizontal"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_native_unit_of_measurement = UnitOfTime.SECONDS
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_suggested_display_precision = 2
+
+    def __init__(self, coordinator) -> None:
+        super().__init__(coordinator, "drift")
+
+    @property
+    def native_value(self) -> float | None:
+        value = (self.coordinator.data or {}).get("drift_s")
+        return round(float(value), 3) if value is not None else None
