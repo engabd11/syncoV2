@@ -133,6 +133,7 @@
         "name": "Sync status",
         "state": {
           "offline": "Offline",
+          "disabled": "Off",
           "idle": "Idle",
           "ghosting": "Ghosting",
           "syncing": "Syncing"

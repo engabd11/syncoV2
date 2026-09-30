@@ -195,3 +195,20 @@ def test_nothing_playing_means_no_active_source():
     binds = [{**b, "active": False} for b in STATUS["bindings"]]
     s = summarize_status({**STATUS, "state": "idle", "bindings": binds})
     assert s["active_source"] is None and s["active_source_id"] is None
+
+def test_switched_off_reads_disabled_not_idle():
+    """Global sync off and "on, nothing playing" are different answers - an
+    automation must be able to tell them apart from the status sensor alone."""
+    from hue_music_sync.ghost.client import ghost_state
+
+    assert ghost_state({**STATUS, "enabled": False, "state": "idle"}) == "disabled"
+    assert ghost_state({**STATUS, "state": "idle"}) == "idle"
+    assert ghost_state({**STATUS, "state": "standby?"}) == "idle"
+    assert ghost_state(None) == "offline"
+    assert summarize_status({**STATUS, "enabled": False})["state"] == "disabled"
+
+
+def test_syncing_is_what_the_hue_sync_app_itself_reports():
+    assert summarize_status(STATUS)["syncing"] is False       # no engine.syncing key
+    on = {**STATUS, "engine": {**STATUS["engine"], "syncing": True}}
+    assert summarize_status(on)["syncing"] is True

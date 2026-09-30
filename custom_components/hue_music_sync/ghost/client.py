@@ -17,9 +17,16 @@ from typing import Any
 
 import aiohttp
 
-_TIMEOUT = aiohttp.ClientTimeout(total=5)
+# hue-ghost answers from its daemon loop's lock, which a Jellyfin poll, an mpv
+# launch or a Hue Sync stop holds for a few seconds; switching off waits for
+# the app to confirm the stop. 5 s turned those into "offline" and into
+# errors for commands that had in fact worked.
+_STATUS_TIMEOUT = aiohttp.ClientTimeout(total=10)
+_ACTION_TIMEOUT = aiohttp.ClientTimeout(total=20)
 
-GHOST_STATES = ("offline", "idle", "ghosting", "syncing")
+# "disabled" = the PC is up but sync is switched off (Global sync off), so it
+# never reads as the same "idle" as switched on and waiting for something to play
+GHOST_STATES = ("offline", "disabled", "idle", "ghosting", "syncing")
 
 
 class HueGhostError(Exception):
@@ -47,7 +54,7 @@ class HueGhostClient:
         try:
             async with self._session.request(
                 method, self._base + path, json=body, headers=self._headers(),
-                timeout=_TIMEOUT,
+                timeout=_STATUS_TIMEOUT if method == "GET" else _ACTION_TIMEOUT,
             ) as resp:
                 if resp.status == 401:
                     raise HueGhostError("hue-ghost rejected the token (401)")
@@ -106,8 +113,11 @@ def summarize_status(status: dict[str, Any] | None) -> dict[str, Any]:
     engine = status.get("engine") or {}
     live = next((b for b in bindings_of(status) if b.get("active")), None) or {}
     return {
-        "state": status.get("state") or "idle",
+        "state": ghost_state(status),
         "enabled": bool(status.get("enabled")),
+        # the Hue Sync app itself streaming to the area - the lights' truth,
+        # whoever started it
+        "syncing": bool(engine.get("syncing")),
         "now_playing": follow.get("item"),
         "position_s": follow.get("position_s"),
         "paused": follow.get("paused"),
@@ -135,6 +145,16 @@ def summarize_status(status: dict[str, Any] | None) -> dict[str, Any]:
         "source_title": (status.get("source") or {}).get("name"),
         "version": status.get("version"),
     }
+
+
+def ghost_state(status: dict[str, Any] | None) -> str:
+    """One of GHOST_STATES for a /status payload."""
+    if not status:
+        return "offline"
+    if not status.get("enabled"):
+        return "disabled"
+    state = status.get("state")
+    return state if state in GHOST_STATES else "idle"
 
 
 def bindings_of(status: dict[str, Any] | None) -> list[dict[str, Any]]:

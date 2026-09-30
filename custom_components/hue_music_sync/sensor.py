@@ -184,9 +184,11 @@ class HueSyncoPrewarmProgress(HueSyncoLibraryEntity, SensorEntity):
 
 
 class HueGhostStateSensor(HueGhostEntity, SensorEntity):
-    """Sync status: offline / idle / ghosting / syncing.
+    """Sync status: offline / disabled / idle / ghosting / syncing.
 
-    The one sensor to put on a card next to the light. Attributes carry the
+    The one sensor to put on a card next to the light, and the one to trigger
+    automations on: "disabled" is Global sync off, "idle" is on and waiting
+    for something to play. Attributes carry the
     detail - what is playing, its position, the measured drift between the
     ghost and the TV, and the Hue Sync app's own state.
     """
@@ -201,8 +203,7 @@ class HueGhostStateSensor(HueGhostEntity, SensorEntity):
 
     @property
     def native_value(self) -> str:
-        state = self.coordinator.state
-        return state if state in GHOST_STATES else "idle"
+        return self.coordinator.state
 
     @property
     def extra_state_attributes(self) -> dict | None:
@@ -236,7 +237,7 @@ class HueGhostAreaSensor(HueGhostEntity, SensorEntity):
         return {
             "area_id": data.get("area_id"),
             "source": data.get("active_source"),
-            "syncing": data.get("state") == "syncing",
+            "syncing": bool(data.get("syncing")),
             # Every source can target its own area; this is where each would go.
             "areas_by_source": {
                 b.get("name") or b["id"]: b.get("area_name")

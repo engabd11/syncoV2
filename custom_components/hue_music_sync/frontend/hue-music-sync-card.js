@@ -4578,7 +4578,7 @@ const GHOST_ROLES = {
 // The app's own palette (hueghost/gui/theme.py), so a glance at the dashboard
 // and a glance at the PC read the same.
 const GHOST_STATE_COLORS = {
-  offline: "#4a463f", idle: "#6b665d", ghosting: "#60a5fa", syncing: "#3ddc97",
+  offline: "#4a463f", disabled: "#4a463f", idle: "#6b665d", ghosting: "#60a5fa", syncing: "#3ddc97",
 };
 const GHOST_INTENSITY_COLORS = {
   subtle: "#38bdf8", moderate: "#a78bfa", high: "#f472b6", extreme: "#fb7185",
