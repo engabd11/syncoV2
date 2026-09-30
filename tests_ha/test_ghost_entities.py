@@ -117,7 +117,7 @@ BINDINGS = [
 ]
 FULL_STATUS = {
     "enabled": True, "state": "syncing", "mode": "video", "intensity": "high",
-    "engine": {"name": "huesync", "area_name": "Living room", "bri": 60},
+    "engine": {"name": "huesync", "area_name": "Living room", "bri": 60, "syncing": True},
     "follow": {"item": "Show - S01E02"},
     "bindings": BINDINGS,
 }
@@ -285,3 +285,54 @@ async def test_the_drift_sensor_is_the_evidence_for_the_offset(hass):
     sensor = HueGhostDriftSensor(await _ready(hass, {**FULL_STATUS, "drift_s": -0.1234}))
     assert sensor.native_value == -0.123
     assert HueGhostDriftSensor(await _ready(hass)).native_value is None
+
+
+# -- mirroring the PC reliably (automations trigger on these edges) -----------
+async def test_one_failed_poll_does_not_flip_global_sync_off(hass):
+    """The daemon can be busy for a few seconds (mpv launch, Hue Sync restart);
+    one slow answer used to turn the light off and on again."""
+    from custom_components.hue_music_sync.light import HueGhostLight
+
+    coordinator = await _ready(hass)
+    light = HueGhostLight(coordinator)
+    coordinator.client.status = AsyncMock(side_effect=HueGhostError("hue-ghost timed out"))
+    await coordinator.async_refresh()
+    await coordinator.async_refresh()
+    assert coordinator.online is True and light.is_on is True
+    await coordinator.async_refresh()                 # third miss in a row: really gone
+    assert coordinator.online is False
+    assert coordinator.state == "offline"
+
+
+async def test_an_unreachable_pc_is_unknown_not_off(hass):
+    from custom_components.hue_music_sync.light import HueGhostLight
+
+    coordinator = _coordinator(hass, _manager(hass), fail=True)
+    await coordinator.async_refresh()
+    light = HueGhostLight(coordinator)
+    assert light.is_on is None
+    assert light.available is True        # can still be switched on when it is back
+
+
+async def test_global_sync_off_shows_as_disabled_on_the_status_sensor(hass):
+    from custom_components.hue_music_sync.sensor import HueGhostStateSensor
+
+    sensor = HueGhostStateSensor(await _ready(hass, {**FULL_STATUS, "enabled": False, "state": "idle"}))
+    assert sensor.native_value == "disabled"
+    assert "disabled" in sensor.options
+
+
+async def test_a_command_lands_on_the_entities_before_the_next_poll(hass):
+    """/off answers with the state after the command; the light must show it
+    at once, even if the follow-up read is slow or fails."""
+    from custom_components.hue_music_sync.light import HueGhostLight
+
+    coordinator = await _ready(hass)
+    light = HueGhostLight(coordinator)
+    coordinator.client.set_enabled = AsyncMock(return_value={"ok": True, "enabled": False, "state": "idle"})
+    coordinator.client.status = AsyncMock(side_effect=HueGhostError("busy"))
+
+    await light.async_turn_off()
+
+    assert light.is_on is False
+    assert coordinator.state == "disabled"

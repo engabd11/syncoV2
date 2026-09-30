@@ -59,7 +59,12 @@ class HueGhostLight(HueGhostEntity, LightEntity):
         super().__init__(coordinator, "light")
 
     @property
-    def is_on(self) -> bool:
+    def is_on(self) -> bool | None:
+        # unknown, not off, while the PC cannot be reached: "off" would be a
+        # state change automations react to, and it was never switched off.
+        # Still available, so it can be switched on once the PC is back.
+        if not self.coordinator.online:
+            return None
         return self.coordinator.enabled
 
     @property
@@ -75,7 +80,8 @@ class HueGhostLight(HueGhostEntity, LightEntity):
             "intensity": data.get("intensity"),
             "source": data.get("active_source"),
             "now_playing": data.get("now_playing") or data.get("source_title"),
-            "syncing": data.get("state") == "syncing",
+            # the Hue Sync app streaming to the area right now
+            "syncing": bool(data.get("syncing")),
         }
 
     async def async_turn_on(self, **kwargs: Any) -> None:

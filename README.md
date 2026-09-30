@@ -273,7 +273,7 @@ the device it is already under:
 | Entity | Type | Description |
 |---|---|---|
 | Global sync | Light | **The master control.** On/off is movie mode, and the brightness slider is the level Hue Sync runs the area at — so it works in scenes, in voice assistants and on any light card. Turning it **on** stops every active music-sync area first; starting a music-sync area turns it **off** |
-| Sync status | Sensor | `offline` / `idle` / `ghosting` / `syncing`, with what is playing, the measured ghost-vs-TV drift and the Hue Sync app state as attributes |
+| Sync status | Sensor | `offline` / `disabled` (Global sync off) / `idle` (on, nothing playing) / `ghosting` / `syncing` — the one to trigger automations on. If the PC misses a poll or two it keeps its last state; after three missed polls in a row it is `offline` and Global sync reads *unknown*, never a false *off*. Comes with what is playing, the measured ghost-vs-TV drift and the Hue Sync app state as attributes |
 | Sync area | Sensor | Which entertainment area the sync plays in. Reported, not set — the area is chosen per source in hue-ghost. The `areas_by_source` attribute lists where each followed source would go |
 | Active source | Sensor | Which followed source is driving the lights *now* — a different question from which ones are switched on |
 | Now playing | Sensor | The Jellyfin item the TV is playing, or whatever the PC source reported (a window title, a game) |
