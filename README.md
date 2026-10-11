@@ -4,6 +4,7 @@
 [![Licence: MIT](https://img.shields.io/badge/Licence-MIT-yellow.svg)](https://github.com/engabd11/syncoV2/blob/main/LICENSE)
 ![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.12%2B-blue)
 [![Latest release](https://img.shields.io/github/v/release/engabd11/syncoV2?label=release)](https://github.com/engabd11/syncoV2/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/engabd11/syncoV2/total?logo=github&color=brightgreen)](https://github.com/engabd11/syncoV2/releases)
 
 **Beat-mapped Philips Hue lighting for Home Assistant.**
 
