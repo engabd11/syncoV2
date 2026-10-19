@@ -12,7 +12,15 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .client import HueGhostClient, HueGhostError, bindings_of, ghost_state, summarize_status
+from .client import (
+    HueGhostClient,
+    HueGhostError,
+    areas_of,
+    bindings_of,
+    ghost_state,
+    settings_of,
+    summarize_status,
+)
 
 if TYPE_CHECKING:
     from ..coordinator import SyncManager
@@ -134,3 +142,34 @@ class HueGhostCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def async_set_offset(self, seconds: float) -> None:
         await self._call(self.client.set_offset(seconds))
+
+    # -- remote control (hue-ghost 2.13+) ------------------------------------------------
+    @property
+    def settings(self) -> dict[str, Any]:
+        """The PC's tunables as they are now ({} before 2.13)."""
+        return settings_of(self.raw)
+
+    @property
+    def areas(self) -> list[dict[str, Any]]:
+        return areas_of(self.raw)
+
+    @property
+    def pin(self) -> str | None:
+        return (self.raw or {}).get("pin") or None
+
+    @property
+    def remote_control(self) -> bool:
+        """Whether the PC's Hue Ghost is new enough for the remote controls."""
+        return "settings" in (self.raw or {})
+
+    async def async_set_values(self, **values: Any) -> None:
+        await self._call(self.client.set_values(**values))
+
+    async def async_set_binding_fields(self, key: str, **fields: Any) -> None:
+        await self._call(self.client.set_binding_fields(key, **fields))
+
+    async def async_set_pin(self, key: str | None) -> None:
+        await self._call(self.client.set_pin(key))
+
+    async def async_restart(self) -> None:
+        await self._call(self.client.restart())

@@ -194,6 +194,7 @@ class HueGhostStateSensor(HueGhostEntity, SensorEntity):
     """
 
     _attr_translation_key = "ghost_state"
+    _description = 'What Hue Ghost is doing: Offline (the PC cannot be reached), Off (Global sync is switched off), Idle (on, waiting for something to play), Ghosting (following a player, the lights are starting) or Syncing (the lights are following it).'
     _attr_icon = "mdi:ghost"
     _attr_device_class = SensorDeviceClass.ENUM
     _attr_options = list(GHOST_STATES)
@@ -205,8 +206,7 @@ class HueGhostStateSensor(HueGhostEntity, SensorEntity):
     def native_value(self) -> str:
         return self.coordinator.state
 
-    @property
-    def extra_state_attributes(self) -> dict | None:
+    def _ghost_attributes(self) -> dict | None:
         data = dict(self.coordinator.data or {})
         data.pop("state", None)
         return data or None
@@ -222,6 +222,7 @@ class HueGhostAreaSensor(HueGhostEntity, SensorEntity):
     """
 
     _attr_translation_key = "ghost_area"
+    _description = 'The entertainment area the lights are syncing in now. Each source has its own area control to change where it syncs.'
     _attr_icon = "mdi:sofa"
 
     def __init__(self, coordinator) -> None:
@@ -231,8 +232,7 @@ class HueGhostAreaSensor(HueGhostEntity, SensorEntity):
     def native_value(self) -> str | None:
         return (self.coordinator.data or {}).get("area")
 
-    @property
-    def extra_state_attributes(self) -> dict:
+    def _ghost_attributes(self) -> dict:
         data = self.coordinator.data or {}
         return {
             "area_id": data.get("area_id"),
@@ -255,6 +255,7 @@ class HueGhostSourceSensor(HueGhostEntity, SensorEntity):
     """
 
     _attr_translation_key = "ghost_source"
+    _description = 'The source driving the lights right now. Several sources can be switched on; the first one that plays wins, or the one picked in Sync source.'
     _attr_icon = "mdi:import"
 
     def __init__(self, coordinator) -> None:
@@ -264,8 +265,7 @@ class HueGhostSourceSensor(HueGhostEntity, SensorEntity):
     def native_value(self) -> str | None:
         return (self.coordinator.data or {}).get("active_source")
 
-    @property
-    def extra_state_attributes(self) -> dict:
+    def _ghost_attributes(self) -> dict:
         data = self.coordinator.data or {}
         live = data.get("active_source_id")
         binding = self.coordinator.binding(live) if live else None
@@ -285,6 +285,7 @@ class HueGhostNowPlayingSensor(HueGhostEntity, SensorEntity):
     PC source reported (a window title, a game)."""
 
     _attr_translation_key = "ghost_now_playing"
+    _description = 'What the active source is playing: the film, episode or song, or the window or game on the PC.'
     _attr_icon = "mdi:play-box-outline"
 
     def __init__(self, coordinator) -> None:
@@ -297,8 +298,7 @@ class HueGhostNowPlayingSensor(HueGhostEntity, SensorEntity):
         # A state is capped at 255 characters; a long title must not break it.
         return title[:255] if isinstance(title, str) else None
 
-    @property
-    def extra_state_attributes(self) -> dict:
+    def _ghost_attributes(self) -> dict:
         data = self.coordinator.data or {}
         return {
             "source": data.get("active_source"),
@@ -317,6 +317,7 @@ class HueGhostDriftSensor(HueGhostEntity, SensorEntity):
     """
 
     _attr_translation_key = "ghost_drift"
+    _description = "How far the lights' copy is from the player, in seconds. Positive means the lights run ahead. Close to 0 is good; a steady gap you can see is what the sync offsets are for."
     _attr_icon = "mdi:swap-horizontal"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_native_unit_of_measurement = UnitOfTime.SECONDS

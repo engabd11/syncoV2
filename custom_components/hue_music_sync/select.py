@@ -12,6 +12,12 @@ from .const import DOMAIN, GHOST_INTENSITIES, GHOST_MODES, ColorScheme, SyncEffe
 from .coordinator import SyncManager
 from .entity import HueMusicSyncAreaEntity
 from .ghost_entity import HueGhostEntity
+from .ghost_remote import (
+    HueGhostKeepAwakeSelect,
+    HueGhostSyncSourceSelect,
+    binding_selects,
+    watch_new_bindings,
+)
 
 
 async def async_setup_entry(
@@ -26,9 +32,16 @@ async def async_setup_entry(
         entities.append(EffectSelect(manager, area_id))
         entities.append(ColourSelect(manager, area_id))
     if manager.ghost is not None:
-        entities.append(HueGhostModeSelect(manager.ghost))
-        entities.append(HueGhostIntensitySelect(manager.ghost))
+        ghost = manager.ghost
+        entities.append(HueGhostModeSelect(ghost))
+        entities.append(HueGhostIntensitySelect(ghost))
+        entities.append(HueGhostSyncSourceSelect(ghost))
+        entities.append(HueGhostKeepAwakeSelect(ghost))
+        entities.extend(binding_selects(ghost, ghost.bindings))
     async_add_entities(entities)
+    if manager.ghost is not None:
+        watch_new_bindings(manager.ghost, async_add_entities,
+                           lambda new: binding_selects(manager.ghost, new))
 
 
 class ModeSelect(HueMusicSyncAreaEntity, SelectEntity):
@@ -101,6 +114,7 @@ class HueGhostModeSelect(HueGhostEntity, SelectEntity):
     settings drawer."""
 
     _attr_translation_key = "ghost_mode"
+    _description = 'What Hue Sync reacts to: Video (the picture), Music (the sound) or Games (a fast picture). Changes the sync running now; a source with its own mode uses that again next time it plays.'
     _attr_icon = "mdi:movie-filter"
     _attr_options = list(GHOST_MODES)
 
@@ -123,6 +137,7 @@ class HueGhostIntensitySelect(HueGhostEntity, SelectEntity):
     the light instead of under Configuration."""
 
     _attr_translation_key = "ghost_intensity"
+    _description = 'How strongly the lights react: Subtle, Moderate, High or Extreme. Changes the sync running now; a source with its own intensity uses that again next time.'
     _attr_icon = "mdi:sine-wave"
     _attr_options = list(GHOST_INTENSITIES)
 

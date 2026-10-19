@@ -32,8 +32,34 @@ class HueGhostEntity(CoordinatorEntity[HueGhostCoordinator]):
             configuration_url=coordinator.client.base_url + "/status",
         )
 
+    # One plain sentence on what this entity does and what its values mean,
+    # shown under Attributes in the entity's details (Home Assistant has no
+    # description field of its own for entities).
+    _description: str = ""
+
     @property
     def available(self) -> bool:
         # Stay available while offline so the switch can still be used to
         # (re)enable once the PC is back; the state sensor reports "offline".
         return True
+
+    @property
+    def extra_state_attributes(self) -> dict | None:
+        attrs = dict(self._ghost_attributes() or {})
+        if self._description:
+            attrs["description"] = self._description
+        return attrs or None
+
+    def _ghost_attributes(self) -> dict | None:
+        """What a subclass reports besides its description."""
+        return None
+
+
+class HueGhostRemoteEntity(HueGhostEntity):
+    """A control that needs Hue Ghost 2.13 or newer on the PC. Unavailable
+    while the PC runs an older version (it has nothing to set); kept available
+    while the PC is offline, like the rest of the device."""
+
+    @property
+    def available(self) -> bool:
+        return not self.coordinator.online or self.coordinator.remote_control

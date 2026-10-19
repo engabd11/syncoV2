@@ -51,6 +51,7 @@ class HueGhostLight(HueGhostEntity, LightEntity):
     """The entertainment area movie mode drives - the master on/off + level."""
 
     _attr_translation_key = "ghost_light"
+    _description = "Global sync: the master switch for Hue Ghost, for films, music and PC games alike. Brightness sets Hue Sync's brightness."
     _attr_icon = "mdi:television-ambient-light"
     _attr_color_mode = ColorMode.BRIGHTNESS
     _attr_supported_color_modes = {ColorMode.BRIGHTNESS}
@@ -71,8 +72,7 @@ class HueGhostLight(HueGhostEntity, LightEntity):
     def brightness(self) -> int | None:
         return _to_ha((self.coordinator.data or {}).get("brightness"))
 
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
+    def _ghost_attributes(self) -> dict[str, Any]:
         data = self.coordinator.data or {}
         return {
             "area": data.get("area"),

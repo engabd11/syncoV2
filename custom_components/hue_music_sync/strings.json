@@ -115,6 +115,42 @@
           "high": "High",
           "extreme": "Extreme"
         }
+      },
+      "ghost_sync_source": {
+        "name": "Sync source",
+        "state": {
+          "automatic": "Automatic (first one playing)"
+        }
+      },
+      "ghost_keep_awake": {
+        "name": "Keep displays awake",
+        "state": {
+          "off": "Off",
+          "playing": "While a film syncs",
+          "always": "Always"
+        }
+      },
+      "ghost_binding_area": {
+        "name": "{name} area"
+      },
+      "ghost_binding_mode": {
+        "name": "{name} mode",
+        "state": {
+          "default": "Default (global Mode)",
+          "video": "Video (picture)",
+          "music": "Music (sound)",
+          "games": "Games"
+        }
+      },
+      "ghost_binding_intensity": {
+        "name": "{name} intensity",
+        "state": {
+          "default": "Default (global Intensity)",
+          "subtle": "Subtle",
+          "moderate": "Moderate",
+          "high": "High",
+          "extreme": "Extreme"
+        }
       }
     },
     "number": {
@@ -125,7 +161,31 @@
         "name": "Timing offset"
       },
       "ghost_offset": {
-        "name": "Sync offset"
+        "name": "Film sync offset"
+      },
+      "ghost_music_offset": {
+        "name": "Music sync offset"
+      },
+      "ghost_lights_off_delay": {
+        "name": "Lights off after video stops"
+      },
+      "ghost_idle_stop_delay": {
+        "name": "Standby after a film stops"
+      },
+      "ghost_music_gap": {
+        "name": "Gap allowed between songs"
+      },
+      "ghost_music_pause_stop": {
+        "name": "Music pause limit"
+      },
+      "ghost_film_pause_stop": {
+        "name": "Film pause limit"
+      },
+      "ghost_pixel_shift": {
+        "name": "Screen care: pixel shift every"
+      },
+      "ghost_blackout_idle": {
+        "name": "Screen care: black out idle screens after"
       }
     },
     "sensor": {
@@ -158,11 +218,19 @@
       },
       "ghost_binding": {
         "name": "{name}"
+      },
+      "ghost_time_lock": {
+        "name": "Time lock"
       }
     },
     "light": {
       "ghost_light": {
         "name": "Global sync"
+      }
+    },
+    "button": {
+      "ghost_restart": {
+        "name": "Restart app"
       }
     }
   },

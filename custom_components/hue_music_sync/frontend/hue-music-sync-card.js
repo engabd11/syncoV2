@@ -13,7 +13,7 @@
 // Cosmetic version (shown in the console banner). The browser cache-bust no
 // longer depends on this: the integration appends ?v=<content-hash> derived from
 // this file's bytes, so any edit is picked up without a manual hard refresh.
-const VERSION = "1.24.0";
+const VERSION = "1.25.0";
 
 /* ------------------------- Palette data ------------------------- */
 // Colour schemes from the integration, each a small gradient swatch.
@@ -4573,6 +4573,21 @@ const GHOST_ROLES = {
   ghost_mode: "mode",
   ghost_audio_effects: "audio",
   ghost_offset: "offset",
+  ghost_sync_source: "pin",
+};
+
+// The settings panel (gear in the header), Hue Ghost 2.13+. Timings in the
+// order they are met: the offsets, then what happens when a player stops.
+const GHOST_NUMBERS = [
+  "ghost_offset", "ghost_music_offset", "ghost_lights_off_delay", "ghost_idle_stop_delay",
+  "ghost_music_gap", "ghost_music_pause_stop", "ghost_film_pause_stop",
+  "ghost_pixel_shift", "ghost_blackout_idle",
+];
+const GHOST_PER_SOURCE = {
+  ghost_binding_area: "area", ghost_binding_mode: "mode", ghost_binding_intensity: "intensity",
+};
+const GHOST_EXTRAS = {
+  ghost_time_lock: "timeLock", ghost_keep_awake: "keepAwake", ghost_restart: "restart",
 };
 
 // The app's own palette (hueghost/gui/theme.py), so a glance at the dashboard
@@ -4759,6 +4774,75 @@ const GHOST_CSS = `
   }
   .g-tile.unavail { opacity: .4; pointer-events: none; }
 
+  .g-drop {
+    width: 100%; padding: 10px 12px; border-radius: 13px; cursor: pointer;
+    background: #00000040; border: 1px solid var(--g-line); color: var(--g-text);
+    font-family: var(--g-font); font-size: 13px; font-weight: 700;
+    appearance: auto;
+  }
+  .g-drop option { background: #1c1a16; color: #f5f3ef; }
+  .g-drop.mini { width: auto; flex: 1 1 0; min-width: 0; padding: 7px 8px; font-size: 11.5px; border-radius: 10px; }
+
+  /* -- settings panel -- */
+  .g-gear {
+    flex: none; width: 34px; height: 34px; border-radius: 11px; cursor: pointer;
+    display: grid; place-items: center; color: var(--g-muted); padding: 0;
+    background: #ffffff08; border: 1px solid var(--g-line); --mdc-icon-size: 18px;
+  }
+  .g-gear.open, .g-gear:hover { color: var(--g-text); border-color: var(--g-line-hi); }
+  .g-settings {
+    margin-top: 16px; padding-top: 6px; border-top: 1px solid var(--g-line);
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .g-phead { margin-top: 12px; }
+  .g-fold {
+    margin-top: 10px; display: flex; align-items: center; justify-content: space-between;
+    width: 100%; padding: 6px 2px; background: none; border: none; cursor: pointer;
+    color: var(--g-faint); --mdc-icon-size: 18px;
+  }
+  .g-fold .g-label { margin: 0; }
+  .g-fold:hover, .g-fold:hover .g-label { color: var(--g-text2); }
+  .g-fold-body { display: flex; flex-direction: column; gap: 8px; }
+  .g-expander {
+    margin-top: 14px; width: 100%; display: flex; align-items: center; justify-content: center;
+    gap: 6px; padding: 9px; border-radius: 13px; cursor: pointer; background: #ffffff06;
+    border: 1px solid var(--g-line); color: var(--g-muted); font-family: var(--g-font);
+    font-size: 12px; font-weight: 700; --mdc-icon-size: 18px;
+  }
+  .g-expander:hover, .g-expander.open { color: var(--g-text); border-color: var(--g-line-hi); }
+  .g-phead .g-label { margin-bottom: 2px; }
+  .g-help { font-size: 11.5px; font-weight: 500; line-height: 1.4; color: var(--g-muted); margin-top: 4px; }
+  .g-srow, .g-prow {
+    padding: 10px 12px; border-radius: 14px; background: #ffffff06; border: 1px solid var(--g-line);
+  }
+  .g-srow.live { border-color: var(--g-accent); }
+  .g-srow-name, .g-prow-name { font-size: 13px; font-weight: 700; color: var(--g-text); }
+  .g-srow-ctls { display: flex; gap: 6px; margin-top: 8px; }
+  .g-prow-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .g-prow-top .g-drop.mini { flex: 0 1 auto; max-width: 60%; }
+  .g-step { flex: none; display: flex; align-items: center; gap: 6px; }
+  .g-step-btn {
+    width: 30px; height: 30px; border-radius: 10px; cursor: pointer; padding: 0;
+    background: #00000040; border: 1px solid var(--g-line); color: var(--g-text);
+    font-family: var(--g-font); font-size: 16px; font-weight: 800;
+  }
+  .g-step-btn:disabled { opacity: .4; cursor: default; }
+  .g-step-val {
+    min-width: 62px; text-align: center; font-size: 13px; font-weight: 800;
+    font-variant-numeric: tabular-nums; color: var(--g-text);
+  }
+  .g-power.small { width: 44px; height: 26px; }
+  .g-power.small .g-power-knob { width: 18px; height: 18px; }
+  .g-power.small.on .g-power-knob { left: calc(100% - 21px); }
+  .g-restart {
+    margin-top: 4px; display: flex; align-items: center; justify-content: center; gap: 8px;
+    padding: 10px; border-radius: 13px; cursor: pointer; background: #00000040;
+    border: 1px solid var(--g-line); color: var(--g-text2); font-family: var(--g-font);
+    font-size: 12.5px; font-weight: 700; --mdc-icon-size: 17px;
+  }
+  .g-restart:hover { color: var(--g-text); border-color: var(--g-line-hi); }
+  .g-drop:disabled { opacity: .5; cursor: default; }
+
   .g-note {
     margin-top: 14px; padding: 11px 13px; border-radius: 13px; font-size: 12px;
     font-weight: 600; background: #ffffff08; border: 1px solid var(--g-line);
@@ -4805,6 +4889,49 @@ class HueGhostCard extends HTMLElement {
     this._config = config || {};
     this._ids = null;
     this._sig = null;
+    this._fold = this._loadFold();
+    this._open = !!this._fold.open;
+    this._render();
+  }
+
+  /* What is expanded - the settings panel and each of its sections - is
+     remembered in this browser, so a wall tablet stays the way it was left.
+     Storage can be missing or blocked: then it simply starts closed. */
+  _foldKey() {
+    return "hue-ghost-card:fold:" + ((this._config && (this._config.title || this._config.light)) || "default");
+  }
+
+  _loadFold() {
+    try {
+      const v = JSON.parse(window.localStorage.getItem(this._foldKey()) || "{}");
+      return v && typeof v === "object" ? v : {};
+    } catch (err) {
+      return {};
+    }
+  }
+
+  _saveFold() {
+    try {
+      window.localStorage.setItem(this._foldKey(), JSON.stringify(this._fold));
+    } catch (err) { /* nothing to remember with */ }
+  }
+
+  _setOpen(open) {
+    this._open = !!open;
+    this._fold.open = this._open;
+    this._saveFold();
+    this._sig = null;
+    this._render();
+  }
+
+  _sectionOpen(key) {
+    return this._fold[key] !== false;              // sections start expanded
+  }
+
+  _toggleSection(key) {
+    this._fold[key] = !this._sectionOpen(key);
+    this._saveFold();
+    this._sig = null;
     this._render();
   }
 
@@ -4834,7 +4961,7 @@ class HueGhostCard extends HTMLElement {
     const cfg = this._config || {};
     const reg = hass.entities || {};
     this._regFrom = hass.entities;
-    const out = { sources: [] };
+    const out = { sources: [], areas: [], numbers: [], perSource: [] };
 
     const entries = Object.keys(reg)
       .map((id) => reg[id])
@@ -4852,12 +4979,23 @@ class HueGhostCard extends HTMLElement {
     for (const e of entries) {
       if (device && e.device_id !== device) continue;
       if (e.translation_key === "ghost_binding") out.sources.push(e.entity_id);
+      else if (e.translation_key === "ghost_binding_area") {
+        out.areas.push(e.entity_id);
+        out.perSource.push(e.entity_id);
+      } else if (GHOST_PER_SOURCE[e.translation_key]) out.perSource.push(e.entity_id);
+      else if (GHOST_EXTRAS[e.translation_key]) out[GHOST_EXTRAS[e.translation_key]] = e.entity_id;
+      else if (GHOST_NUMBERS.indexOf(e.translation_key) >= 0) out.numbers.push(e);
       else {
         const role = GHOST_ROLES[e.translation_key];
         if (role && !out[role]) out[role] = e.entity_id;
       }
     }
     out.device = device;
+    out.numbers = out.numbers
+      .sort((a, b) => GHOST_NUMBERS.indexOf(a.translation_key) - GHOST_NUMBERS.indexOf(b.translation_key))
+      .map((e) => e.entity_id);
+    out.perSourceKey = {};
+    for (const id of out.perSource) out.perSourceKey[id] = reg[id].translation_key;
 
     if (!out.light) this._guess(out);      // no registry to read (older HA, preview)
     for (const key of ["light", "status", "area", "source", "playing", "intensity", "mode"]) {
@@ -4901,7 +5039,12 @@ class HueGhostCard extends HTMLElement {
     if (!ids) return "";
     let out = ids.device || "";
     const all = [ids.light, ids.status, ids.area, ids.source, ids.playing,
-      ids.intensity, ids.mode].concat(ids.sources);
+      ids.intensity, ids.mode, ids.pin].concat(ids.sources, ids.areas || []);
+    if (this._open) {
+      all.push(ids.timeLock, ids.keepAwake, ids.restart);
+      for (const id of (ids.numbers || []).concat(ids.perSource || [])) all.push(id);
+    }
+    out += this._open ? "|open" : "";
     for (const id of all) {
       if (!id) continue;
       const e = hass.states[id];
@@ -4973,8 +5116,24 @@ class HueGhostCard extends HTMLElement {
       playing: known(playingEnt && playingEnt.state) || la.now_playing || null,
       intensity: picker(ids.intensity, GHOST_INTENSITY_COLORS),
       mode: picker(ids.mode, GHOST_MODE_COLORS),
+      pin: picker(ids.pin),
+      areaPick: this._areaPicker(ids, sourceEnt, st(ids.pin), picker),
       sources,
     };
+  }
+
+  /* The area control of the source in charge: the one playing now, else the
+     one picked to sync, so "where will the lights go" is one tap away. */
+  _areaPicker(ids, sourceEnt, pinEnt, picker) {
+    const hass = this._hass;
+    const want = (sourceEnt && sourceEnt.attributes.source_id) ||
+      (pinEnt && pinEnt.attributes.source_id) || null;
+    if (!want) return null;
+    const id = (ids.areas || []).find(
+      (a) => hass.states[a] && hass.states[a].attributes.source_id === want);
+    const p = id ? picker(id) : null;
+    if (p) p.name = this._shortName(id, hass.states[id].attributes.friendly_name);
+    return p;
   }
 
   _deviceName(ids) {
@@ -5067,7 +5226,11 @@ class HueGhostCard extends HTMLElement {
     root.appendChild(this._brightness(m, GHOST_ACCENT));
     if (m.intensity && this._show("intensity")) root.appendChild(this._picker("Intensity", m.intensity, m));
     if (m.mode && this._show("mode")) root.appendChild(this._picker("Mode", m.mode, m, GHOST_MODE_ICONS));
+    if (m.pin && this._show("sync_source")) root.appendChild(this._dropdown("Sync source", m.pin, m));
+    if (m.areaPick && this._show("area")) root.appendChild(this._dropdown(m.areaPick.name || "Area", m.areaPick, m));
     if (m.sources.length && this._show("sources")) root.appendChild(this._sourceTiles(m));
+    if (this._open && !m.demo) root.appendChild(this._settings(m));
+    if (!m.demo && this._show("settings") && this._hasSettings()) root.appendChild(this._expander());
     const note = this._note(m);
     if (note) root.appendChild(note);
 
@@ -5110,6 +5273,15 @@ class HueGhostCard extends HTMLElement {
     sub.appendChild(text);
     titles.appendChild(sub);
     head.appendChild(titles);
+
+    if (!m.demo && this._show("settings") && this._hasSettings()) {
+      const gear = document.createElement("button");
+      gear.className = "g-gear" + (this._open ? " open" : "");
+      gear.title = this._open ? "Close the settings" : "Settings: sources, areas and timings";
+      gear.appendChild(ghostIcon(this._open ? "mdi:close" : "mdi:cog-outline"));
+      gear.addEventListener("click", () => this._setOpen(!this._open));
+      head.appendChild(gear);
+    }
 
     const power = document.createElement("button");
     power.className = "g-power" + (m.on && !m.offline ? " on" : "");
@@ -5233,6 +5405,245 @@ class HueGhostCard extends HTMLElement {
       seg.appendChild(btn);
     }
     sec.appendChild(seg);
+    return sec;
+  }
+
+  _expander() {
+    const bar = document.createElement("button");
+    bar.className = "g-expander" + (this._open ? " open" : "");
+    const t = document.createElement("span");
+    t.textContent = this._open ? "Hide settings" : "Settings: sources, areas and timings";
+    bar.appendChild(t);
+    bar.appendChild(ghostIcon(this._open ? "mdi:chevron-up" : "mdi:chevron-down", "g-chev"));
+    bar.addEventListener("click", () => this._setOpen(!this._open));
+    return bar;
+  }
+
+  _hasSettings() {
+    const ids = this._lookup();
+    return !!(ids && ((ids.numbers || []).length || (ids.perSource || []).length || ids.timeLock));
+  }
+
+  /* ---------------- settings panel ---------------- */
+
+  _settings(m) {
+    const hass = this._hass;
+    const ids = this._lookup();
+    const wrap = document.createElement("div");
+    wrap.className = "g-settings";
+
+    // each source: its area, mode and intensity, next to its name
+    const bySource = {};
+    for (const id of ids.perSource || []) {
+      const e = hass.states[id];
+      if (!e || !e.attributes.source_id) continue;
+      const row = (bySource[e.attributes.source_id] = bySource[e.attributes.source_id] || {});
+      row[GHOST_PER_SOURCE[ids.perSourceKey[id]]] = e;
+    }
+    const sourceRows = m.sources
+      .map((src) => ({ src, ctl: bySource[(hass.states[src.entity] || { attributes: {} }).attributes.source_id] }))
+      .filter((r) => r.ctl);
+    if (sourceRows.length) {
+      const body = this._section(wrap, "sources", "Each source",
+        "Where each source syncs, and how. Default follows the main Mode and Intensity.");
+      for (const { src, ctl } of (body ? sourceRows : [])) {
+        const row = document.createElement("div");
+        row.className = "g-srow" + (src.active ? " live" : "");
+        const name = document.createElement("div");
+        name.className = "g-srow-name";
+        name.textContent = src.name + (src.on ? "" : " (off)");
+        row.appendChild(name);
+        const ctls = document.createElement("div");
+        ctls.className = "g-srow-ctls";
+        for (const key of ["area", "mode", "intensity"]) {
+          if (ctl[key]) ctls.appendChild(this._miniSelect(ctl[key]));
+        }
+        row.appendChild(ctls);
+        body.appendChild(row);
+      }
+    }
+
+    if ((ids.numbers || []).length) {
+      const body = this._section(wrap, "timings", "Timings", null);
+      for (const id of (body ? ids.numbers : [])) {
+        const e = hass.states[id];
+        if (e) body.appendChild(this._numberRow(e));
+      }
+    }
+
+    const extras = [ids.timeLock, ids.keepAwake].filter((id) => id && hass.states[id]);
+    const more = (extras.length || ids.restart) ? this._section(wrap, "more", "More", null) : null;
+    if (more) {
+      if (ids.timeLock && hass.states[ids.timeLock]) more.appendChild(this._toggleRow(hass.states[ids.timeLock]));
+      if (ids.keepAwake && hass.states[ids.keepAwake]) {
+        const e = hass.states[ids.keepAwake];
+        const row = this._rowShell(e);
+        row.children[0].appendChild(this._miniSelect(e));
+        more.appendChild(row);
+      }
+      if (ids.restart && hass.states[ids.restart]) {
+        const btn = document.createElement("button");
+        btn.className = "g-restart";
+        btn.appendChild(ghostIcon("mdi:restart"));
+        const t = document.createElement("span");
+        t.textContent = "Restart Hue Ghost on the PC";
+        btn.appendChild(t);
+        btn.addEventListener("click", () =>
+          hass.callService("button", "press", { entity_id: ids.restart }));
+        more.appendChild(btn);
+      }
+    }
+    return wrap;
+  }
+
+  _section(wrap, key, title, help) {
+    const open = this._sectionOpen(key);
+    const head = document.createElement("button");
+    head.className = "g-fold" + (open ? " open" : "");
+    const t = document.createElement("span");
+    t.className = "g-label";
+    t.textContent = title;
+    head.appendChild(t);
+    head.appendChild(ghostIcon(open ? "mdi:chevron-up" : "mdi:chevron-down", "g-chev"));
+    head.addEventListener("click", () => this._toggleSection(key));
+    wrap.appendChild(head);
+    if (!open) return null;
+    const body = document.createElement("div");
+    body.className = "g-fold-body";
+    if (help) {
+      const p = document.createElement("div");
+      p.className = "g-help";
+      p.textContent = help;
+      body.appendChild(p);
+    }
+    wrap.appendChild(body);
+    return body;
+  }
+
+  _panelHead(title, help) {
+    const h = document.createElement("div");
+    h.className = "g-phead";
+    const t = document.createElement("div");
+    t.className = "g-label";
+    t.textContent = title;
+    h.appendChild(t);
+    if (help) {
+      const p = document.createElement("div");
+      p.className = "g-help";
+      p.textContent = help;
+      h.appendChild(p);
+    }
+    return h;
+  }
+
+  /* A row with the entity's name on the left, room for a control on the
+     right, and its description - what it does, what the values mean - below. */
+  _rowShell(e) {
+    const row = document.createElement("div");
+    row.className = "g-prow";
+    const top = document.createElement("div");
+    top.className = "g-prow-top";
+    const name = document.createElement("div");
+    name.className = "g-prow-name";
+    name.textContent = this._shortName(e.entity_id, e.attributes.friendly_name);
+    top.appendChild(name);
+    row.appendChild(top);
+    if (e.attributes.description && this._show("descriptions")) {
+      const d = document.createElement("div");
+      d.className = "g-help";
+      d.textContent = e.attributes.description;
+      row.appendChild(d);
+    }
+    return row;
+  }
+
+  _numberRow(e) {
+    const a = e.attributes;
+    const row = this._rowShell(e);
+    const step = Number(a.step) || 1;
+    const min = a.min != null ? Number(a.min) : -Infinity;
+    const max = a.max != null ? Number(a.max) : Infinity;
+    const now = Number(e.state);
+    const box = document.createElement("div");
+    box.className = "g-step";
+    const val = document.createElement("span");
+    val.className = "g-step-val";
+    const unit = a.unit_of_measurement || "";
+    const short = unit === "s" ? " s" : unit === "min" ? " min" : unit ? " " + unit : "";
+    val.textContent = isNaN(now) ? "—" : (Math.round(now * 100) / 100) + short;
+    const set = (v) => {
+      v = Math.max(min, Math.min(max, Math.round(v / step) * step));
+      this._hass.callService("number", "set_value", { entity_id: e.entity_id, value: Number(v.toFixed(3)) });
+    };
+    for (const [label, d] of [["−", -1], ["+", 1]]) {
+      const b = document.createElement("button");
+      b.className = "g-step-btn";
+      b.textContent = label;
+      b.disabled = isNaN(now) || e.state === "unavailable";
+      b.addEventListener("click", () => set(now + d * step));
+      if (d < 0) box.appendChild(b);
+      else { box.appendChild(val); box.appendChild(b); }
+    }
+    row.children[0].appendChild(box);
+    return row;
+  }
+
+  _toggleRow(e) {
+    const row = this._rowShell(e);
+    const on = e.state === "on";
+    const sw = document.createElement("button");
+    sw.className = "g-power small" + (on ? " on" : "");
+    const knob = document.createElement("span");
+    knob.className = "g-power-knob";
+    sw.appendChild(knob);
+    sw.disabled = e.state === "unavailable";
+    sw.addEventListener("click", () =>
+      this._hass.callService("switch", on ? "turn_off" : "turn_on", { entity_id: e.entity_id }));
+    row.children[0].appendChild(sw);
+    return row;
+  }
+
+  _miniSelect(e) {
+    const sel = document.createElement("select");
+    sel.className = "g-drop mini";
+    sel.title = this._shortName(e.entity_id, e.attributes.friendly_name) +
+      (e.attributes.description ? ": " + e.attributes.description : "");
+    for (const opt of e.attributes.options || []) {
+      const o = document.createElement("option");
+      o.value = opt;
+      o.textContent = this._fmt(e, opt);
+      if (opt === e.state) o.selected = true;
+      sel.appendChild(o);
+    }
+    sel.disabled = e.state === "unavailable";
+    sel.addEventListener("change", () =>
+      this._hass.callService("select", "select_option", { entity_id: e.entity_id, option: sel.value }));
+    return sel;
+  }
+
+  /* A native dropdown: sources and areas are lists of any length, which a
+     segmented row cannot hold. */
+  _dropdown(label, picker, m) {
+    const sec = document.createElement("div");
+    sec.className = "g-sec";
+    const head = document.createElement("div");
+    head.className = "g-label";
+    const name = document.createElement("span");
+    name.textContent = label;
+    head.appendChild(name);
+    sec.appendChild(head);
+    const sel = document.createElement("select");
+    sel.className = "g-drop";
+    for (const opt of picker.options) {
+      const o = document.createElement("option");
+      o.value = opt;
+      o.textContent = picker.label ? picker.label(opt) : ghostTitleize(opt);
+      if (opt === picker.value) o.selected = true;
+      sel.appendChild(o);
+    }
+    if (m.demo) sel.disabled = true;
+    else sel.addEventListener("change", () => this._select(picker, sel.value));
+    sec.appendChild(sel);
     return sec;
   }
 

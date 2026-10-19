@@ -12,6 +12,7 @@ from .const import DOMAIN
 from .coordinator import SyncManager
 from .entity import HueMusicSyncAreaEntity
 from .ghost_entity import HueGhostEntity
+from .ghost_remote import NUMBERS, HueGhostSettingNumber
 
 
 async def async_setup_entry(
@@ -26,6 +27,7 @@ async def async_setup_entry(
         entities.append(TimingNumber(manager, area_id))
     if manager.ghost is not None:
         entities.append(HueGhostOffsetNumber(manager.ghost))
+        entities.extend(HueGhostSettingNumber(manager.ghost, spec) for spec in NUMBERS)
     async_add_entities(entities)
 
 
@@ -84,6 +86,7 @@ class HueGhostOffsetNumber(HueGhostEntity, NumberEntity):
 
     _attr_entity_category = EntityCategory.CONFIG
     _attr_translation_key = "ghost_offset"
+    _description = 'Film sync offset, in seconds: moves the lights against the TV picture. Lights late? Raise it. Lights early? Lower it. Used for films, TV and PC video; music has its own offset.'
     _attr_icon = "mdi:timer-sand"
     _attr_native_min_value = -2.0
     _attr_native_max_value = 5.0
