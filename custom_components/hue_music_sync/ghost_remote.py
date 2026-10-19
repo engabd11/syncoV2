@@ -257,7 +257,7 @@ class HueGhostBindingModeSelect(_BindingEntity, SelectEntity):
     _attr_options = [DEFAULT, *GHOST_MODES]
     _description = (
         "What Hue Sync reacts to while this source plays: Video (the picture), Music (the "
-        "sound) or Games (a fast picture). Default: the global Mode."
+        "sound) or Games (a fast picture). Default: Sync mode."
     )
 
     @property
@@ -277,7 +277,7 @@ class HueGhostBindingIntensitySelect(_BindingEntity, SelectEntity):
     _attr_options = [DEFAULT, *GHOST_INTENSITIES]
     _description = (
         "How strongly the lights react while this source plays: Subtle, Moderate, High or "
-        "Extreme. Default: the global Intensity."
+        "Extreme. Default: Sync intensity."
     )
 
     @property

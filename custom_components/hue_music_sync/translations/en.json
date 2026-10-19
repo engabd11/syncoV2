@@ -100,7 +100,7 @@
         }
       },
       "ghost_mode": {
-        "name": "Mode",
+        "name": "Sync mode",
         "state": {
           "video": "Video (picture)",
           "music": "Music (sound)",
@@ -108,7 +108,7 @@
         }
       },
       "ghost_intensity": {
-        "name": "Intensity",
+        "name": "Sync intensity",
         "state": {
           "subtle": "Subtle",
           "moderate": "Moderate",
@@ -131,21 +131,21 @@
         }
       },
       "ghost_binding_area": {
-        "name": "{name} area"
+        "name": "Sync area for {name}"
       },
       "ghost_binding_mode": {
-        "name": "{name} mode",
+        "name": "Sync mode for {name}",
         "state": {
-          "default": "Default (global Mode)",
+          "default": "Default (Sync mode)",
           "video": "Video (picture)",
           "music": "Music (sound)",
           "games": "Games"
         }
       },
       "ghost_binding_intensity": {
-        "name": "{name} intensity",
+        "name": "Sync intensity for {name}",
         "state": {
-          "default": "Default (global Intensity)",
+          "default": "Default (Sync intensity)",
           "subtle": "Subtle",
           "moderate": "Moderate",
           "high": "High",

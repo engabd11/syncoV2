@@ -15,8 +15,8 @@ Set it up on the PC first (`hue-ghost setup` exposes its control API to the LAN 
 | Sync area | Sensor | Which entertainment area the sync plays in. Reported rather than set, because the area is chosen per source in Hue Ghost. The `areas_by_source` attribute lists where each followed source would go |
 | Active source | Sensor | Which followed source is driving the lights *now*, a different question from which ones are switched on |
 | Now playing | Sensor | The Jellyfin item the TV is playing, or whatever the PC source reported (a window title, a game) |
-| Intensity | Select | Hue Sync's intensity (subtle / moderate / high / extreme), applied when a movie starts and live while syncing |
-| Mode | Select | What Hue Sync reacts to: video (the picture), music (the sound) or games. Applies live, mid-movie |
+| Sync intensity | Select | Hue Sync's intensity (subtle / moderate / high / extreme), applied when a movie starts and live while syncing |
+| Sync mode | Select | What Hue Sync reacts to: video (the picture), music (the sound) or games. Applies live, mid-movie |
 | *&lt;source&gt;* | Switch | One per thing Hue Ghost can follow, a Jellyfin client or an app on the PC, named for the source itself ("Apple TV", "PC"). Off ignores the source while keeping it in the list |
 | Audio effects | Switch | Hue Sync's *use audio for light effects* for video and games mode. Until you touch it, it mirrors what the Hue Sync app itself is set to. Flipping it hands the setting to Hue Ghost, which applies it at the start of the next sync |
 | Film sync offset | Number | How far the ghost runs ahead of the TV to cancel capture, bridge and lamp latency, for films, TV and PC video. Lights late? Raise it. Lights early? Lower it |
@@ -28,6 +28,8 @@ Every Hue Ghost entity also carries a **`description`** attribute: one plain sen
 
 ## Remote control (Hue Ghost 2.13 and newer)
 
+The per-source controls are named *Sync area for …*, *Sync mode for …* and *Sync intensity for …*, so they sit together in the entity list and say what they set. (1.62.0 called them *&lt;source&gt; area* and so on; entities you already have keep their entity ids.)
+
 With Hue Ghost 2.13 or newer on the PC, Home Assistant can change almost everything the PC app can, so a dashboard or the phone app is a remote for it. Older versions show these entities as unavailable.
 
 ### What syncs, and where
@@ -35,9 +37,9 @@ With Hue Ghost 2.13 or newer on the PC, Home Assistant can change almost everyth
 | Entity | Type | Description |
 |---|---|---|
 | Sync source | Select | The source to sync now. **Automatic**: the first source that plays wins, in the order set in the Hue Ghost app. Pick a source to put it first whenever it plays; the others still sync while it does not. Picking a source that is switched off switches it on |
-| *&lt;source&gt;* area | Select | The entertainment area this source syncs in. *Hue Sync's current area* follows whatever the Hue Sync app is set to. Changing it while the source plays moves the lights there (Hue Sync restarts for a few seconds) |
-| *&lt;source&gt;* mode | Select | What Hue Sync reacts to while this source plays: Video, Music or Games. *Default* uses the global Mode |
-| *&lt;source&gt;* intensity | Select | How strongly the lights react while this source plays. *Default* uses the global Intensity |
+| Sync area for *&lt;source&gt;* | Select | The entertainment area this source syncs in. *Hue Sync's current area* follows whatever the Hue Sync app is set to. Changing it while the source plays moves the lights there (Hue Sync restarts for a few seconds) |
+| Sync mode for *&lt;source&gt;* | Select | What Hue Sync reacts to while this source plays: Video, Music or Games. *Default* uses Sync mode |
+| Sync intensity for *&lt;source&gt;* | Select | How strongly the lights react while this source plays. *Default* uses Sync intensity |
 
 A paused source never holds the lights while another one plays, and it takes them back as soon as it plays again.
 
