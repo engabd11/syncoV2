@@ -8,6 +8,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN
+from .ghost_remote import HueGhostRestartButton
 from .library_entity import HueSyncoLibraryEntity
 
 
@@ -16,13 +17,15 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    async_add_entities(
-        [
-            HueSyncoPrewarmButton(entry),
-            HueSyncoReanalyseButton(entry),
-            HueSyncoClearCacheButton(entry),
-        ]
-    )
+    entities: list[ButtonEntity] = [
+        HueSyncoPrewarmButton(entry),
+        HueSyncoReanalyseButton(entry),
+        HueSyncoClearCacheButton(entry),
+    ]
+    manager = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if manager is not None and getattr(manager, "ghost", None) is not None:
+        entities.append(HueGhostRestartButton(manager.ghost))
+    async_add_entities(entities)
 
 
 class HueSyncoPrewarmButton(HueSyncoLibraryEntity, ButtonEntity):

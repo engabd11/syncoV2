@@ -17,6 +17,7 @@ from .const import DOMAIN, signal_area_update
 from .coordinator import SyncManager
 from .entity import HueMusicSyncAreaEntity
 from .ghost_entity import HueGhostEntity
+from .ghost_remote import HueGhostTimeLockSwitch
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -35,6 +36,7 @@ async def async_setup_entry(
         # No movie-mode switch: the Global sync light is the master control
         # (on/off *and* the level), and one thing should have one entity.
         entities.append(HueGhostAudioEffectsSwitch(manager.ghost))
+        entities.append(HueGhostTimeLockSwitch(manager.ghost))
         entities.extend(_binding_switches(manager.ghost, set()))
     async_add_entities(entities)
 
@@ -181,6 +183,7 @@ class HueGhostAudioEffectsSwitch(HueGhostEntity, SwitchEntity):
 
     _attr_entity_category = EntityCategory.CONFIG
     _attr_translation_key = "ghost_audio_effects"
+    _description = 'Hue Sync\'s "use audio for light effects" in Video and Games mode: the lights also react to the soundtrack. Takes effect at the next sync (Hue Sync restarts to read it).'
     _attr_icon = "mdi:music-circle-outline"
 
     def __init__(self, coordinator) -> None:
@@ -194,8 +197,7 @@ class HueGhostAudioEffectsSwitch(HueGhostEntity, SwitchEntity):
             return bool((raw.get("engine") or {}).get("use_audio"))
         return bool(wanted)
 
-    @property
-    def extra_state_attributes(self) -> dict:
+    def _ghost_attributes(self) -> dict:
         raw = self.coordinator.raw or {}
         return {
             "set_by": "hue_ghost" if raw.get("use_audio") is not None else "hue_sync_app",
@@ -222,6 +224,7 @@ class HueGhostBindingSwitch(HueGhostEntity, SwitchEntity):
     something you change from the couch, alongside the intensity."""
 
     _attr_translation_key = "ghost_binding"
+    _description = 'Whether Hue Ghost follows this source. Off means it is ignored but stays set up. The active attribute says whether it is driving the lights now.'
 
     def __init__(self, coordinator, binding: dict) -> None:
         super().__init__(coordinator, f"binding_{binding['id']}")
@@ -253,12 +256,12 @@ class HueGhostBindingSwitch(HueGhostEntity, SwitchEntity):
     def is_on(self) -> bool:
         return bool(self._binding.get("enabled"))
 
-    @property
-    def extra_state_attributes(self) -> dict:
+    def _ghost_attributes(self) -> dict:
         b = self._binding
         data = self.coordinator.data or {}
         return {
             "active": bool(b.get("active")),
+            "source_id": self._key,
             "priority": self._priority,
             "source": b.get("source"),
             "area": b.get("area_name"),

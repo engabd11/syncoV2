@@ -6,7 +6,10 @@ tested in ``tests/`` without the HA harness).
   POST /on | /off
   POST /set  {"mode": ..., "intensity": ..., "use_audio": ..., "offset_s": ...,
               "offset_delta": ..., "brightness_step": ..., "brightness": 0-100,
-              "binding": {"key": ..., "enabled": ...}}
+              "binding": {"key": ..., "enabled": ..., "area_id": ..., "mode": ...,
+                          "intensity": ...},
+              "pin": <binding id> | null, and any key of /status "settings"}
+  POST /api/restart                   -> relaunches the app
 
 Auth: ``Authorization: Bearer <token>`` when the PC has a token configured.
 """
@@ -103,6 +106,24 @@ class HueGhostClient:
         """Follow one source, or stop following it."""
         return await self._request("POST", "/set", {"binding": {"key": key, "enabled": bool(on)}})
 
+    async def set_binding_fields(self, key: str, **fields: Any) -> dict[str, Any]:
+        """Change one source's ``area_id``, ``mode`` or ``intensity`` (hue-ghost
+        2.13+). An empty value hands the choice back to the default."""
+        return await self._request("POST", "/set", {"binding": {"key": key, **fields}})
+
+    async def set_pin(self, key: str | None) -> dict[str, Any]:
+        """The source to sync now: first whenever it plays (hue-ghost 2.13+).
+        None goes back to the list order."""
+        return await self._request("POST", "/set", {"pin": key or None})
+
+    async def set_values(self, **values: Any) -> dict[str, Any]:
+        """Any of the settings in ``/status``'s ``settings`` block, by name."""
+        return await self._request("POST", "/set", values)
+
+    async def restart(self) -> dict[str, Any]:
+        """Restart the Hue Ghost app on the PC (it relaunches itself)."""
+        return await self._request("POST", "/api/restart", {})
+
 
 def summarize_status(status: dict[str, Any] | None) -> dict[str, Any]:
     """Flatten hue-ghost's /status into sensor attributes (stable key names)."""
@@ -155,6 +176,18 @@ def ghost_state(status: dict[str, Any] | None) -> str:
         return "disabled"
     state = status.get("state")
     return state if state in GHOST_STATES else "idle"
+
+
+def settings_of(status: dict[str, Any] | None) -> dict[str, Any]:
+    """The tunables hue-ghost 2.13+ reports; {} from older versions."""
+    out = (status or {}).get("settings")
+    return out if isinstance(out, dict) else {}
+
+
+def areas_of(status: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """The entertainment areas the PC's Hue Sync app knows: [{id, name}]."""
+    out = (status or {}).get("areas")
+    return [a for a in out if isinstance(a, dict) and a.get("id")] if isinstance(out, list) else []
 
 
 def bindings_of(status: dict[str, Any] | None) -> list[dict[str, Any]]:

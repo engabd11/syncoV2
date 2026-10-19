@@ -62,6 +62,8 @@ class FakeGhost:
             if body.get("intensity") == "max":
                 return web.json_response({"error": "intensity must be one of subtle, moderate, high, extreme"}, status=400)
             return web.json_response({"ok": True, **body})
+        if request.path == "/api/restart":
+            return web.json_response({"ok": True, "restarting": True})
         return web.json_response({"error": "unknown path"}, status=404)
 
 
@@ -212,3 +214,40 @@ def test_syncing_is_what_the_hue_sync_app_itself_reports():
     assert summarize_status(STATUS)["syncing"] is False       # no engine.syncing key
     on = {**STATUS, "engine": {**STATUS["engine"], "syncing": True}}
     assert summarize_status(on)["syncing"] is True
+
+
+def test_remote_controls_send_what_hue_ghost_2_13_reads():
+    async def main():
+        import aiohttp
+        fake = FakeGhost()
+        runner, port = await _serve(fake)
+        try:
+            async with aiohttp.ClientSession() as session:
+                c = HueGhostClient(session, "127.0.0.1", port, "secret")
+                await c.set_pin("apple-tv")
+                await c.set_pin(None)
+                await c.set_binding_fields("apple-tv", area_id="a2")
+                await c.set_binding_fields("apple-tv", mode="", intensity="high")
+                await c.set_values(music_offset_s=0.1, music_gap_s=6)
+                await c.restart()
+        finally:
+            await runner.cleanup()
+        calls = [(m, p, b) for (m, p, b) in fake.calls]
+        assert ("POST", "/set", {"pin": "apple-tv"}) in calls
+        assert ("POST", "/set", {"pin": None}) in calls            # back to the list order
+        assert ("POST", "/set", {"binding": {"key": "apple-tv", "area_id": "a2"}}) in calls
+        assert ("POST", "/set", {"binding": {"key": "apple-tv", "mode": "", "intensity": "high"}}) in calls
+        assert ("POST", "/set", {"music_offset_s": 0.1, "music_gap_s": 6}) in calls
+        assert ("POST", "/api/restart", {}) in calls
+
+    run(main())
+
+
+def test_settings_areas_and_pin_read_back_and_default_when_missing():
+    from hue_music_sync.ghost.client import areas_of, settings_of
+    st = {**STATUS, "pin": "apple-tv", "settings": {"music_gap_s": 10.0},
+          "areas": [{"id": "a1", "name": "Living room"}, {"name": "no id"}, "junk"]}
+    assert settings_of(st) == {"music_gap_s": 10.0}
+    assert areas_of(st) == [{"id": "a1", "name": "Living room"}]
+    # an older Hue Ghost reports none of it
+    assert settings_of(STATUS) == {} and areas_of(STATUS) == [] and settings_of(None) == {}
