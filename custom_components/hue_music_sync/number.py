@@ -99,8 +99,12 @@ class HueGhostOffsetNumber(HueGhostEntity, NumberEntity):
 
     @property
     def native_value(self) -> float | None:
-        raw = self.coordinator.raw or {}
-        value = raw.get("offset_s")
+        # The film offset itself. The top-level "offset_s" is the one in use
+        # right now - the music offset while music plays - so reading it made
+        # this entity show (and seem to move with) the music offset. Hue Ghost
+        # before 2.13 has no settings block: there the top level is all there is.
+        settings = self.coordinator.settings
+        value = settings.get("offset_s") if "offset_s" in settings else             (self.coordinator.raw or {}).get("offset_s")
         return round(float(value), 2) if value is not None else None
 
     async def async_set_native_value(self, value: float) -> None:

@@ -190,3 +190,21 @@ async def test_the_existing_entities_describe_themselves_too(hass):
         assert attrs and attrs["description"], type(ent).__name__
     # and what they reported before is still there
     assert HueGhostAreaSensor(coordinator).extra_state_attributes["source"] == "Apple TV"
+
+
+async def test_the_film_offset_shows_the_film_value_while_music_plays(hass):
+    """Live 2026-10-21: music playing, /status top-level offset_s is the offset
+    in use (the music one, 0.1) while the film offset is 0.15. The film entity
+    read the top level and showed 0.1 - the two entities looked like one."""
+    from custom_components.hue_music_sync.ghost_remote import NUMBERS, HueGhostSettingNumber
+    from custom_components.hue_music_sync.number import HueGhostOffsetNumber
+
+    status = {**STATUS, "offset_s": 0.1,
+              "settings": {**SETTINGS, "offset_s": 0.15, "music_offset_s": 0.1}}
+    coordinator = await _ready(hass, status)
+    music = next(HueGhostSettingNumber(coordinator, s) for s in NUMBERS if s.key == "music_offset_s")
+    assert HueGhostOffsetNumber(coordinator).native_value == 0.15
+    assert music.native_value == 0.1
+    # an older Hue Ghost (no settings block): the top level is all there is
+    old = {k: v for k, v in status.items() if k != "settings"}
+    assert HueGhostOffsetNumber(await _ready(hass, old)).native_value == 0.1
