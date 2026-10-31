@@ -70,6 +70,8 @@ class HueGhostClient:
             raise HueGhostError(f"hue-ghost unreachable at {self._base}: {err}") from err
         except TimeoutError as err:
             raise HueGhostError(f"hue-ghost timed out at {self._base}") from err
+        except ValueError as err:  # an HTML error page, not hue-ghost's JSON
+            raise HueGhostError(f"hue-ghost {path}: reply was not JSON") from err
 
     async def status(self) -> dict[str, Any]:
         return await self._request("GET", "/status")

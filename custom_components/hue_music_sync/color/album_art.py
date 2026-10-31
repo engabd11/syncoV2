@@ -34,7 +34,7 @@ import logging
 
 import numpy as np
 
-from ..const import FFMPEG_PROTOCOL_ARGS
+from ..const import FFMPEG_PROTOCOL_ARGS, FFMPEG_READ_TIMEOUT_ARGS
 from ..util import redact_url
 from .palette import RGB, Palette
 
@@ -289,16 +289,21 @@ def _kmeans_palette_v2(
 async def _decode_thumb(ffmpeg_bin: str, url: str) -> np.ndarray | None:
     """Decode the artwork at ``url`` to an (N,3) float 0..1 pixel array."""
     args = [
-        ffmpeg_bin, "-nostdin", "-loglevel", "error", *FFMPEG_PROTOCOL_ARGS, "-i", url,
+        ffmpeg_bin, "-nostdin", "-loglevel", "error", *FFMPEG_PROTOCOL_ARGS,
+        *FFMPEG_READ_TIMEOUT_ARGS, "-i", url,
         "-vf", f"scale={_THUMB}:{_THUMB}",
         "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
     ]
+    proc = None
     try:
         proc = await asyncio.create_subprocess_exec(
             *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
         raw, err = await asyncio.wait_for(proc.communicate(), timeout=10)
     except (asyncio.TimeoutError, OSError) as exc:
+        if proc is not None and proc.returncode is None:
+            proc.kill()  # wait_for gave up; don't leave ffmpeg running
+            await proc.wait()
         _LOGGER.debug("Album-art decode failed for %s: %s", redact_url(url), exc)
         return None
 

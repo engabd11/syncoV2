@@ -32,6 +32,7 @@ import asyncio
 import hashlib
 import logging
 import subprocess
+import tempfile
 import time
 from collections import OrderedDict
 from collections.abc import Callable, Coroutine
@@ -48,6 +49,7 @@ from ..const import (
     ANALYSIS_WINDOW,
     BANDS,
     FFMPEG_PROTOCOL_ARGS,
+    FFMPEG_READ_TIMEOUT_ARGS,
     MELBANK_BINS,
 )
 from ..util import redact_url
@@ -1713,18 +1715,20 @@ def _decode_and_analyze(ffmpeg_bin: str, url: str, max_seconds: float) -> MapRes
     """
     args = [
         ffmpeg_bin, "-nostdin", "-loglevel", "error", *FFMPEG_PROTOCOL_ARGS,
-        "-i", url,
+        *FFMPEG_READ_TIMEOUT_ARGS, "-i", url,
         "-t", f"{max_seconds:.0f}",
         # Stereo decode: pan analysis rides alongside; the mid (L+R)/2 feeds
         # the same feature path the old mono decode did.
         "-vn", "-ac", "2", "-ar", str(ANALYSIS_SAMPLE_RATE),
         "-f", "f32le", "-acodec", "pcm_f32le", "pipe:1",
     ]
+    # stderr goes to a temp file, not a pipe: a damaged file logs one line per
+    # bad frame, and a full stderr pipe would block ffmpeg while we block on stdout.
+    errf = tempfile.TemporaryFile()
     try:
-        proc = subprocess.Popen(
-            args, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-        )
+        proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=errf)
     except OSError as err:
+        errf.close()
         _LOGGER.debug("Track-map decode failed to start: %s", err)
         return MapResult(None, decoded=False, error=str(err))
     ex = EnvelopeExtractor()
@@ -1745,17 +1749,16 @@ def _decode_and_analyze(ffmpeg_bin: str, url: str, max_seconds: float) -> MapRes
             proc.stdout.close()  # type: ignore[union-attr]
         except OSError:
             pass
-        # ffmpeg with -loglevel error emits only a few lines of stderr, so reading
-        # it after stdout drains can't deadlock; it tells us why a fetch failed.
-        err_txt = ""
-        if proc.stderr is not None:
-            try:
-                err_txt = proc.stderr.read().decode(errors="replace").strip()
-                proc.stderr.close()
-            except OSError:
-                pass
         proc.kill()
         proc.wait()
+        # stderr tells us why a fetch failed (auth, 404, transcode failure).
+        err_txt = ""
+        try:
+            errf.seek(0)
+            err_txt = errf.read().decode(errors="replace").strip()
+        except OSError:
+            pass
+        errf.close()
     decoded = (n_bytes / 8 / ANALYSIS_SAMPLE_RATE) >= _MIN_DECODE_S  # 2ch f32 = 8 B/frame
     # "complete" = ffmpeg reached end-of-stream without complaining: only then
     # is an unusable analysis a fact about the MUSIC rather than the fetch, so

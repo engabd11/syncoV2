@@ -127,6 +127,10 @@ DISCOVERY_CACHE_TTL: Final = 15 * 60
 # friends (local-file read / SSRF surface). Passed as an input option, so the
 # pipe:1 PCM output is unaffected.
 FFMPEG_PROTOCOL_ARGS: Final = ("-protocol_whitelist", "http,https,tcp,tls,crypto")
+# Offline decodes only (track maps, artwork): a server that stalls mid-stream
+# makes ffmpeg exit instead of pinning an executor thread forever. Not used live,
+# where a paused player can legitimately hold the stream quiet for longer.
+FFMPEG_READ_TIMEOUT_ARGS: Final = ("-rw_timeout", "30000000")  # microseconds
 
 # --- Audio analysis ------------------------------------------------------
 # Decode rate for ffmpeg PCM output. 22050 mono is plenty for beat/band work

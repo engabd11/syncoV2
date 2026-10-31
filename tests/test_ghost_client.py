@@ -64,6 +64,9 @@ class FakeGhost:
             return web.json_response({"ok": True, **body})
         if request.path == "/api/restart":
             return web.json_response({"ok": True, "restarting": True})
+        if request.path == "/html":
+            return web.Response(text="<html>503 Service Unavailable</html>", status=503,
+                                content_type="text/html")
         return web.json_response({"error": "unknown path"}, status=404)
 
 
@@ -119,6 +122,22 @@ def test_status_on_off_set_with_token():
         assert ("POST", "/set", {"brightness": 40}) in paths
         assert ("POST", "/set", {"brightness": 100}) in paths
         assert ("POST", "/set", {"binding": {"key": "elden-ring", "enabled": True}}) in paths
+    run(main())
+
+
+def test_a_non_json_reply_is_a_ghost_error():
+    # A proxy or HTTP.sys error page must not escape as ValueError: callers
+    # (the movie-mode hand-over before music starts) only catch HueGhostError.
+    async def main():
+        import aiohttp
+        runner, port = await _serve(FakeGhost(token=""))
+        try:
+            async with aiohttp.ClientSession() as session:
+                c = HueGhostClient(session, "127.0.0.1", port)
+                with pytest.raises(HueGhostError):
+                    await c._request("GET", "/html")  # noqa: SLF001
+        finally:
+            await runner.cleanup()
     run(main())
 
 
