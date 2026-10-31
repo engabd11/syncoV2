@@ -81,14 +81,8 @@ def ws_subscribe(
     triggers no state writes and never touches the recorder. We therefore do not
     gate this with ``require_admin``; HA still requires a valid auth token.
     """
-    from . import DATA_AREA_INDEX  # local import to avoid a setup cycle
-
-    index = hass.data.get(DOMAIN, {}).get(DATA_AREA_INDEX, {})
-    target = index.get(msg["entity_id"])
+    target = _resolve_area(hass, connection, msg)
     if target is None:
-        connection.send_error(
-            msg["id"], "not_found", f"No sync switch {msg['entity_id']}"
-        )
         return
     manager, area_id = target
 
@@ -340,6 +334,13 @@ async def ws_backend(
 
     entry = manager.entry
     if "set" in msg:
+        # Reading is open to dashboard users like the rest; switching writes
+        # the entry's saved options, so it takes an admin.
+        if not connection.user.is_admin:
+            connection.send_error(
+                msg["id"], "unauthorized", "Switching the library needs an admin"
+            )
+            return
         hass.config_entries.async_update_entry(
             entry, options={**entry.options, CONF_ACTIVE_BACKEND: msg["set"]}
         )

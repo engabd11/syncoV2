@@ -400,9 +400,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Certificate pinning (trust-on-first-use): entries created before pinning
     # existed capture the bridge's certificate on their next setup; from then
     # on every CLIP call verifies it's the same bridge.
+    live_cert = await hass.async_add_executor_job(_fetch_bridge_certificate, host)
     pinned_cert = entry.data.get(CONF_BRIDGE_CERT)
     if not pinned_cert:
-        pinned_cert = await hass.async_add_executor_job(_fetch_bridge_certificate, host)
+        pinned_cert = live_cert
         if pinned_cert:
             hass.config_entries.async_update_entry(
                 entry, data={**entry.data, CONF_BRIDGE_CERT: pinned_cert}
@@ -410,15 +411,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.info("Pinned the Hue bridge's TLS certificate (trust-on-first-use)")
         else:
             _LOGGER.warning(
-                "Could not capture the Hue bridge's TLS certificate; "
-                "connecting without verification for now"
+                "Could not capture the Hue bridge's TLS certificate; validating "
+                "against the Hue root certificates only for now"
             )
     # Common-name check: the bridge certificate's CN is the bridge id, which is
     # the config entry's unique id. This is the documented stand-in for hostname
     # verification, and it is what stops a device that merely holds *a* valid
-    # Hue certificate from impersonating *this* bridge.
-    if pinned_cert and entry.unique_id:
-        cn = cert_common_name(pinned_cert)
+    # Hue certificate from impersonating *this* bridge. Checked on the
+    # certificate served now: the stored pin says nothing about who answers today.
+    checked_cert = live_cert or pinned_cert
+    if checked_cert and entry.unique_id:
+        cn = cert_common_name(checked_cert)
         bridge_id = entry.unique_id
         if not matches_bridge_id(cn, bridge_id):
             if looks_like_bridge_id(cn):

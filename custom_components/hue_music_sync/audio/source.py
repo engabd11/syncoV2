@@ -605,9 +605,12 @@ class PcmDecoder:
         self._sr = sample_rate
         self._channels = max(1, min(2, channels))
         self._proc: asyncio.subprocess.Process | None = None
+        self._stderr_task: asyncio.Task | None = None
+        self._last_err = ""
 
     async def start(self, url: str, offset: float = 0.0) -> None:
         await self.stop()
+        self._last_err = ""
         args = [self._ffmpeg, "-nostdin", "-loglevel", "error", *FFMPEG_PROTOCOL_ARGS]
         if offset > 0.05:
             args += ["-ss", f"{offset:.3f}"]
@@ -628,15 +631,27 @@ class PcmDecoder:
         except FileNotFoundError:
             _LOGGER.error("ffmpeg binary %r not found; cannot decode audio", self._ffmpeg)
             self._proc = None
+            return
+        self._stderr_task = asyncio.create_task(self._drain_stderr(self._proc))
+
+    async def _drain_stderr(self, proc: asyncio.subprocess.Process) -> None:
+        """Keep stderr flowing (a damaged stream logs a line per bad frame, and a
+        full pipe would stall the decode) and remember the last line."""
+        assert proc.stderr is not None
+        while chunk := await proc.stderr.read(4096):
+            lines = chunk.decode(errors="replace").strip().splitlines()
+            if lines:
+                self._last_err = lines[-1]
 
     async def _log_stderr_if_failed(self) -> None:
         """If ffmpeg exited immediately, surface its error output."""
         proc = self._proc
-        if proc is None or proc.returncode is None or proc.stderr is None:
+        if proc is None or proc.returncode is None:
             return
-        err = (await proc.stderr.read()).decode(errors="replace").strip()
-        if err:
-            _LOGGER.warning("ffmpeg could not open the stream: %s", err.splitlines()[-1])
+        if self._stderr_task is not None:
+            await self._stderr_task  # ffmpeg exited, so stderr hits EOF promptly
+        if self._last_err:
+            _LOGGER.warning("ffmpeg could not open the stream: %s", self._last_err)
 
     async def read_hop(self) -> np.ndarray | None:
         """Read one hop of mono float32 samples (-1..1), or None at stream end.
@@ -672,6 +687,9 @@ class PcmDecoder:
     async def stop(self) -> None:
         proc = self._proc
         self._proc = None
+        if self._stderr_task is not None:
+            self._stderr_task.cancel()
+            self._stderr_task = None
         if proc is None or proc.returncode is not None:
             return
         try:
