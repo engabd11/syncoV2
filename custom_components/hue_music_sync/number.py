@@ -90,7 +90,7 @@ class HueGhostOffsetNumber(HueGhostEntity, NumberEntity):
     _attr_icon = "mdi:timer-sand"
     _attr_native_min_value = -2.0
     _attr_native_max_value = 5.0
-    _attr_native_step = 0.05
+    _attr_native_step = 0.01
     _attr_native_unit_of_measurement = UnitOfTime.SECONDS
     _attr_mode = NumberMode.BOX
 

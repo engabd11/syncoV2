@@ -55,7 +55,7 @@ class GhostNumber:
 
 NUMBERS: tuple[GhostNumber, ...] = (
     GhostNumber(
-        "music_offset_s", "ghost_music_offset", UnitOfTime.SECONDS, -2.0, 5.0, 0.05,
+        "music_offset_s", "ghost_music_offset", UnitOfTime.SECONDS, -2.0, 5.0, 0.01,
         "mdi:music-clef-treble",
         "Music sync offset, in seconds: moves the lights against the music. Lights after the "
         "beat? Raise it. Lights before the beat? Lower it. Used only for music; films keep "
