@@ -4827,6 +4827,9 @@ const GHOST_CSS = `
     font-family: var(--g-font); font-size: 16px; font-weight: 800;
   }
   .g-step-btn:disabled { opacity: .4; cursor: default; }
+  .g-step-btn.amt { width: auto; min-width: 44px; padding: 0 7px; font-size: 11px; }
+  .g-step-btn.amt.fine { color: var(--g-text2); }
+  .g-prow-top.wrap { flex-wrap: wrap; row-gap: 8px; }
   .g-step-val {
     min-width: 62px; text-align: center; font-size: 13px; font-weight: 800;
     font-variant-numeric: tabular-nums; color: var(--g-text);
@@ -5564,26 +5567,39 @@ class HueGhostCard extends HTMLElement {
     const min = a.min != null ? Number(a.min) : -Infinity;
     const max = a.max != null ? Number(a.max) : Infinity;
     const now = Number(e.state);
+    // The sync offsets step by 0.001 s (Hue Ghost 2.13.7+). One press per
+    // millisecond is too slow to tune from the couch, so they get a coarse
+    // pair (0.05 s) outside a fine pair (the entity's own step).
+    const fine = step < 0.01;
+    const coarse = 0.05;
     const box = document.createElement("div");
     box.className = "g-step";
     const val = document.createElement("span");
     val.className = "g-step-val";
     const unit = a.unit_of_measurement || "";
     const short = unit === "s" ? " s" : unit === "min" ? " min" : unit ? " " + unit : "";
-    val.textContent = isNaN(now) ? "—" : (Math.round(now * 100) / 100) + short;
+    const shown = fine ? Math.round(now * 1000) / 1000 : Math.round(now * 100) / 100;
+    val.textContent = isNaN(now) ? "—" : shown + short;
     const set = (v) => {
       v = Math.max(min, Math.min(max, Math.round(v / step) * step));
       this._hass.callService("number", "set_value", { entity_id: e.entity_id, value: Number(v.toFixed(3)) });
     };
-    for (const [label, d] of [["−", -1], ["+", 1]]) {
+    const amt = (n) => String(n).replace(/^0(?=\.)/, "");
+    const buttons = fine
+      ? [[-coarse, "−" + amt(coarse), ""], [-step, "−" + amt(step), " fine"],
+         [step, "+" + amt(step), " fine"], [coarse, "+" + amt(coarse), ""]]
+      : [[-step, "−", null], [step, "+", null]];
+    for (const [d, label, kind] of buttons) {
       const b = document.createElement("button");
-      b.className = "g-step-btn";
+      b.className = "g-step-btn" + (kind === null ? "" : " amt" + kind);
       b.textContent = label;
+      if (kind !== null) b.title = (d < 0 ? "Lower by " : "Raise by ") + Math.abs(d) + " s";
       b.disabled = isNaN(now) || e.state === "unavailable";
-      b.addEventListener("click", () => set(now + d * step));
-      if (d < 0) box.appendChild(b);
-      else { box.appendChild(val); box.appendChild(b); }
+      b.addEventListener("click", () => set(now + d));
+      if (d > 0 && !val.parentNode) box.appendChild(val);
+      box.appendChild(b);
     }
+    if (fine) row.children[0].classList.add("wrap");
     row.children[0].appendChild(box);
     return row;
   }

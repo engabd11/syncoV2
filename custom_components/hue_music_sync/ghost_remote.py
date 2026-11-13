@@ -55,7 +55,7 @@ class GhostNumber:
 
 NUMBERS: tuple[GhostNumber, ...] = (
     GhostNumber(
-        "music_offset_s", "ghost_music_offset", UnitOfTime.SECONDS, -2.0, 5.0, 0.01,
+        "music_offset_s", "ghost_music_offset", UnitOfTime.SECONDS, -2.0, 5.0, 0.001,
         "mdi:music-clef-treble",
         "Music sync offset, in seconds: moves the lights against the music. Lights after the "
         "beat? Raise it. Lights before the beat? Lower it. Used only for music; films keep "
@@ -135,7 +135,7 @@ class HueGhostSettingNumber(HueGhostRemoteEntity, NumberEntity):
         value = settings.get(self._spec.key)
         if value is None and self._spec.fallback:
             value = settings.get(self._spec.fallback)
-        return round(float(value), 2) if isinstance(value, (int, float)) else None
+        return round(float(value), 3) if isinstance(value, (int, float)) else None
 
     def _ghost_attributes(self) -> dict | None:
         if self._spec.fallback and self.coordinator.settings.get(self._spec.key) is None:
