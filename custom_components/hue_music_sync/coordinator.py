@@ -1110,6 +1110,8 @@ class SyncSession:
                         continue
 
                     frame = await self._source.read_frame()  # paced to real time
+                    if self._source is None:
+                        continue  # a player switch reset the source mid-read
                     if frame is None:
                         await self._reset_source()
                         continue
@@ -1155,6 +1157,8 @@ class SyncSession:
                         # idle) doesn't strand the show on the generic animation.
                         # This frame still renders; the new source reads next loop.
                         await self._maybe_upgrade_source(now)
+                        if self._source is None:
+                            continue  # reset by a player switch during the swap
                     # Track change: reset the rhythm/structure models so the
                     # previous song's locked tempo can't keep firing stale beats
                     # on the new one (which read as flashes that don't match the
