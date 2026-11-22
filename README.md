@@ -1,6 +1,6 @@
 # Hue Synco for Home Assistant
 
-[![HACS: Custom](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
+[![Marketplace: Custom](https://img.shields.io/badge/Marketplace-Custom-41BDF5.svg)](https://www.home-assistant.io/integrations/marketplace/)
 [![Licence: MIT](https://img.shields.io/badge/Licence-MIT-yellow.svg)](https://github.com/engabd11/syncoV2/blob/main/LICENSE)
 ![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.12%2B-blue)
 [![Latest release](https://img.shields.io/github/v/release/engabd11/syncoV2?label=release)](https://github.com/engabd11/syncoV2/releases/latest)
@@ -52,11 +52,13 @@ Point Hue Synco at a **Navidrome or OpenSubsonic** server to analyse your librar
 
 ## Install
 
-### HACS (custom repository)
+### Marketplace (add from link)
 
-1. In HACS, open **⋮ → Custom repositories**
-2. Add `https://github.com/engabd11/syncoV2` with type **Integration**
+1. Go to **Settings → Marketplace** and select **Add from link**
+2. Enter `engabd11/syncoV2` under **GitHub link** and select **Add** (if asked for a **Type**, choose **Integration**)
 3. Install **Hue Synco** and restart Home Assistant
+
+Updates then appear under **Settings → Updates**. On Home Assistant before 2026.11, add the same repository in HACS under **⋮ → Custom repositories** with type **Integration**.
 
 ### Manual
 
