@@ -90,7 +90,7 @@ class HueGhostOffsetNumber(HueGhostEntity, NumberEntity):
     _attr_icon = "mdi:timer-sand"
     _attr_native_min_value = -2.0
     _attr_native_max_value = 5.0
-    _attr_native_step = 0.01
+    _attr_native_step = 0.001
     _attr_native_unit_of_measurement = UnitOfTime.SECONDS
     _attr_mode = NumberMode.BOX
 
@@ -105,7 +105,7 @@ class HueGhostOffsetNumber(HueGhostEntity, NumberEntity):
         # before 2.13 has no settings block: there the top level is all there is.
         settings = self.coordinator.settings
         value = settings.get("offset_s") if "offset_s" in settings else             (self.coordinator.raw or {}).get("offset_s")
-        return round(float(value), 2) if value is not None else None
+        return round(float(value), 3) if value is not None else None
 
     async def async_set_native_value(self, value: float) -> None:
         await self.coordinator.async_set_offset(value)
