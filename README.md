@@ -52,7 +52,7 @@ Point Hue Synco at a **Navidrome or OpenSubsonic** server to analyse your librar
 
 ## Install
 
-### Marketplace (add from link)
+### Marketplace
 
 1. Go to **Settings → Marketplace** and select **Add from link**
 2. Enter `engabd11/syncoV2` under **GitHub link** and select **Add** (if asked for a **Type**, choose **Integration**)
