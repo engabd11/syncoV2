@@ -36,6 +36,21 @@ def iter_http_urls(obj):
                     yield vv
 
 
+def mapping_stream_urls(media_item) -> list[str]:
+    """Stream URLs a media item's provider mappings carry in ``details``.
+
+    Saved TuneIn radio stations reach the client with ``streamdetails.path``
+    unset; the station's stream URL is only on its provider mapping's
+    ``details``. (``url`` there is the provider's web page, so it is skipped.)
+    """
+    mappings = getattr(media_item, "provider_mappings", None) or []
+    return [
+        d for pm in mappings
+        if isinstance(d := getattr(pm, "details", None), str)
+        and d.startswith(("http://", "https://"))
+    ]
+
+
 def library_track_url(track, subsonic) -> str | None:
     """A decodable URL for an MA library Track (for offline pre-analysis).
 

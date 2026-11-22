@@ -35,6 +35,7 @@ from .ma_stream import (
     iter_http_urls,
     library_track_url,
     ma_stream_variants,
+    mapping_stream_urls,
 )
 from .subsonic import is_subsonic_provider, subsonic_stream_url
 
@@ -942,6 +943,9 @@ class MusicAssistantSource:
                         for u in iter_http_urls(obj):
                             if u != album_art and u not in candidates:
                                 candidates.append(u)
+                    for u in mapping_stream_urls(getattr(item, "media_item", None)):
+                        if u not in candidates:
+                            candidates.append(u)
                     if not candidates:
                         # Nothing usable: capture the full object shapes so the
                         # failure WARNING reveals where a URL/session id lives.

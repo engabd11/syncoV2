@@ -8,6 +8,7 @@ from hue_music_sync.audio.ma_stream import (
     iter_http_urls,
     library_track_url,
     ma_stream_variants,
+    mapping_stream_urls,
 )
 
 
@@ -119,6 +120,30 @@ def test_iter_http_urls_finds_a_stream_url_field():
 def test_iter_http_urls_scans_nested_dicts():
     sd = _Obj(path=None, data={"stream_url": "https://host/track.mp3"})
     assert "https://host/track.mp3" in list(iter_http_urls(sd))
+
+
+def test_mapping_stream_urls_finds_saved_tunein_station():
+    # Issue #14: a saved TuneIn station has streamdetails.path=None and nothing
+    # on the queue item; its stream URL is only on the provider mapping details.
+    station = _Obj(provider_mappings=[
+        _Obj(provider_domain="tunein", item_id="s88004",
+             url="https://tunein.com/radio/s88004/",  # web page, not audio
+             details="http://live.radiolumina.ro:8000/stream"),
+    ])
+    sd = _Obj(path=None, provider="tunein--GvJoKoeS", item_id="s88004")
+    assert list(iter_http_urls(sd)) == []  # why it fell back before
+    assert mapping_stream_urls(station) == ["http://live.radiolumina.ro:8000/stream"]
+
+
+def test_mapping_stream_urls_skips_non_url_details():
+    # TuneIn stores the bare preset id when it has no URL; Radio Browser
+    # mappings carry no details at all.
+    station = _Obj(provider_mappings=[
+        _Obj(provider_domain="tunein", details="s88004"),
+        _Obj(provider_domain="radiobrowser", details=None),
+    ])
+    assert mapping_stream_urls(station) == []
+    assert mapping_stream_urls(None) == []
 
 
 def test_iter_http_urls_empty_when_no_url():
