@@ -9,6 +9,8 @@ from hue_music_sync.audio.ma_stream import (
     library_track_url,
     ma_stream_variants,
     mapping_stream_urls,
+    radiobrowser_stream_urls,
+    radiobrowser_uuid,
 )
 
 
@@ -144,6 +146,36 @@ def test_mapping_stream_urls_skips_non_url_details():
     ])
     assert mapping_stream_urls(station) == []
     assert mapping_stream_urls(None) == []
+
+
+_ASCOR = "2f1fc325-c42c-4184-8d96-bfb5df2e9c95"
+
+
+def test_radiobrowser_uuid_from_streamdetails_or_mapping():
+    # Issue #14's Radio ASCOR log: sd_provider='radiobrowser', sd_path=None.
+    sd = _Obj(path=None, provider="radiobrowser", item_id=_ASCOR)
+    assert radiobrowser_uuid(sd, None) == _ASCOR
+    station = _Obj(provider_mappings=[
+        _Obj(provider_domain="radiobrowser", item_id=_ASCOR.upper(), details=None),
+    ])
+    assert radiobrowser_uuid(None, station) == _ASCOR
+
+
+def test_radiobrowser_uuid_rejects_other_providers_and_bad_ids():
+    assert radiobrowser_uuid(_Obj(provider="tunein--x", item_id=_ASCOR), None) is None
+    bad = _Obj(provider="radiobrowser", item_id="../../json/stats")  # goes in a URL
+    assert radiobrowser_uuid(bad, None) is None
+    assert radiobrowser_uuid(None, None) is None
+
+
+def test_radiobrowser_stream_urls_prefers_url_resolved():
+    reply = [{"url": "http://a/playlist.pls", "url_resolved": "http://a:8000/live"}]
+    assert radiobrowser_stream_urls(reply) == ["http://a:8000/live", "http://a/playlist.pls"]
+    same = [{"url": "https://s/lisen", "url_resolved": "https://s/lisen"}]
+    assert radiobrowser_stream_urls(same) == ["https://s/lisen"]
+    assert radiobrowser_stream_urls([]) == []
+    assert radiobrowser_stream_urls({"error": "x"}) == []
+    assert radiobrowser_stream_urls([{"url": "", "url_resolved": None}]) == []
 
 
 def test_iter_http_urls_empty_when_no_url():

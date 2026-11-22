@@ -6,6 +6,8 @@ URL-variant and provider logic can be unit-tested on their own.
 
 from __future__ import annotations
 
+import uuid
+
 from .subsonic import is_subsonic_provider, subsonic_stream_url
 
 
@@ -49,6 +51,38 @@ def mapping_stream_urls(media_item) -> list[str]:
         if isinstance(d := getattr(pm, "details", None), str)
         and d.startswith(("http://", "https://"))
     ]
+
+
+def radiobrowser_uuid(streamdetails, media_item) -> str | None:
+    """The Radio Browser station UUID of the playing item, or None.
+
+    Music Assistant resolves Radio Browser stream URLs server side only, so the
+    client sees just this id. Validated as a UUID because it goes into a URL.
+    """
+    item_id = None
+    if str(getattr(streamdetails, "provider", None) or "").startswith("radiobrowser"):
+        item_id = getattr(streamdetails, "item_id", None)
+    if not item_id:
+        for pm in getattr(media_item, "provider_mappings", None) or []:
+            if getattr(pm, "provider_domain", None) == "radiobrowser":
+                item_id = getattr(pm, "item_id", None)
+                break
+    try:
+        return str(uuid.UUID(str(item_id))) if item_id else None
+    except ValueError:
+        return None
+
+
+def radiobrowser_stream_urls(stations) -> list[str]:
+    """``url_resolved`` then ``url`` of a Radio Browser ``byuuid`` reply."""
+    if not isinstance(stations, list) or not stations or not isinstance(stations[0], dict):
+        return []
+    urls: list[str] = []
+    for key in ("url_resolved", "url"):
+        u = stations[0].get(key)
+        if isinstance(u, str) and u.startswith(("http://", "https://")) and u not in urls:
+            urls.append(u)
+    return urls
 
 
 def library_track_url(track, subsonic) -> str | None:
