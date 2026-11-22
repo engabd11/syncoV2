@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+
+import aiohttp
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -35,6 +37,9 @@ from .ma_stream import (
     iter_http_urls,
     library_track_url,
     ma_stream_variants,
+    mapping_stream_urls,
+    radiobrowser_stream_urls,
+    radiobrowser_uuid,
 )
 from .subsonic import is_subsonic_provider, subsonic_stream_url
 
@@ -70,6 +75,50 @@ _MISS = object()  # cached negative result, distinct from "not looked up yet"
 # expired entries — a long-lived HA process with a huge play history must not
 # grow these without bound.
 _MEMO_MAX = 512
+
+# Radio Browser stations: Music Assistant resolves their stream URL server side
+# only, so as a last resort ask the public Radio Browser API by station UUID.
+# Module level so the per-probe sources share it: uuid -> (expires, urls).
+_RB_API = "https://all.api.radio-browser.info/json/stations/byuuid/"
+_RB_HIT_TTL_S = 1800.0
+_RB_MISS_TTL_S = 60.0
+_RB_CACHE: dict[str, tuple[float, list[str]]] = {}
+_RB_INFLIGHT: set[str] = set()
+
+
+async def _radiobrowser_lookup(hass: HomeAssistant, station: str) -> None:
+    """Fill ``_RB_CACHE`` for ``station`` (a validated UUID); never raises.
+
+    A failed refresh keeps the last good URLs (retried after the miss TTL), so
+    an API outage can't knock a station that is already playing off live audio.
+    """
+    from homeassistant.helpers.aiohttp_client import async_get_clientsession
+
+    if station in _RB_INFLIGHT:
+        return
+    _RB_INFLIGHT.add(station)
+    urls: list[str] = []
+    try:
+        async with async_get_clientsession(hass).get(
+            _RB_API + station,
+            headers={"User-Agent": "HueSynco"},
+            timeout=aiohttp.ClientTimeout(total=5),
+        ) as resp:
+            resp.raise_for_status()
+            urls = radiobrowser_stream_urls(await resp.json(content_type=None))
+    except Exception as err:  # noqa: BLE001 - a failed lookup just means metadata sync
+        _LOGGER.debug("Radio Browser lookup for %s failed: %s", station, err)
+    finally:
+        _RB_INFLIGHT.discard(station)
+    now = time.monotonic()
+    old = _RB_CACHE.get(station)
+    for k in [k for k, (exp, _u) in _RB_CACHE.items() if exp + _RB_HIT_TTL_S < now]:
+        del _RB_CACHE[k]  # long dead; a stale entry is still served while refreshing
+    if urls:
+        _RB_CACHE[station] = (now + _RB_HIT_TTL_S, urls)
+    else:
+        _RB_CACHE[station] = (now + _RB_MISS_TTL_S, old[1] if old else [])
+    _LOGGER.debug("Radio Browser %s -> %s", station, [redact_url(u) for u in urls])
 
 
 @dataclass(slots=True)
@@ -740,6 +789,8 @@ class MusicAssistantSource:
         self._ma_kind: str | None = None
         self._ma_fmt: str | None = None
         self._cand_meta: dict[str, tuple[str, str]] = {}
+        # A Radio Browser station _resolve() wants looked up (it can't await).
+        self._rb_wanted: str | None = None
 
     @property
     def entity_id(self) -> str:
@@ -860,6 +911,7 @@ class MusicAssistantSource:
              URL / radio providers).
           3. the HA ``media_content_id`` if it happens to be HTTP.
         """
+        self._rb_wanted = None
         position, playing = self._ha_position()
         if not playing:
             _LOGGER.debug("[%s] not playing; no audio source", self._entity_id)
@@ -942,6 +994,18 @@ class MusicAssistantSource:
                         for u in iter_http_urls(obj):
                             if u != album_art and u not in candidates:
                                 candidates.append(u)
+                    for u in mapping_stream_urls(getattr(item, "media_item", None)):
+                        if u not in candidates:
+                            candidates.append(u)
+                    rb = None if candidates else radiobrowser_uuid(
+                        sd, getattr(item, "media_item", None)
+                    )
+                    if rb:
+                        hit = _RB_CACHE.get(rb)
+                        if hit is None or hit[0] < time.monotonic():
+                            self._rb_wanted = rb  # _resolve_async looks it up
+                        if hit is not None:
+                            candidates += hit[1]  # stale is fine while it refreshes
                     if not candidates:
                         # Nothing usable: capture the full object shapes so the
                         # failure WARNING reveals where a URL/session id lives.
@@ -966,6 +1030,8 @@ class MusicAssistantSource:
                 stream_url, source_desc = content, "media_content_id"
 
         if not stream_url:
+            if self._rb_wanted:
+                return None  # _resolve_async looks the station up and asks again
             # Expected for providers that don't expose a tappable stream (e.g.
             # OpenSubsonic/Navidrome via flow mode): the offline track-map takes
             # over. INFO, not WARNING, so it doesn't read as an error every track;
@@ -991,6 +1057,20 @@ class MusicAssistantSource:
             is_live=bool(is_live),
             alt_urls=alt_urls,
         )
+
+    async def _resolve_async(self) -> TrackInfo | None:
+        """``_resolve`` plus the one lookup it cannot do itself (Radio Browser)."""
+        info = self._resolve()
+        if self._rb_wanted and self._rb_wanted not in _RB_INFLIGHT:
+            if info is None:
+                await _radiobrowser_lookup(self._hass, self._rb_wanted)
+                info = self._resolve()  # now served from _RB_CACHE
+            else:  # playing on a stale URL: refresh without stalling the show
+                self._hass.async_create_background_task(
+                    _radiobrowser_lookup(self._hass, self._rb_wanted),
+                    "hue_music_sync_radiobrowser",
+                )
+        return info
 
     @staticmethod
     def _song_signature(attrs) -> str:
@@ -1059,7 +1139,7 @@ class MusicAssistantSource:
         Returning False (no URL, or the URL won't decode) lets the coordinator
         fall back to the metadata source.
         """
-        info = self._resolve()
+        info = await self._resolve_async()
         if info is None:
             return False
         # Try the primary URL then each alternate until one actually decodes
@@ -1150,7 +1230,7 @@ class MusicAssistantSource:
         on every poll, muting the tap far more than the drift itself would.
         Track changes and end-of-stream restarts are never delayed.
         """
-        info = self._resolve()
+        info = await self._resolve_async()
         if info is None:
             return False
         decoded_pos = self._decode_start_pos + self._frames_emitted * self._frame_period
